@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import sys
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+from pathlib import Path
+
+from pydantic import BaseModel, model_validator
+
+
+class MeleeConfig(BaseModel):
+    repo_path: Path
+    version: str = "GALE01"
+    build_dir: str = "build"
+
+    @property
+    def src_dir(self) -> Path:
+        return self.repo_path / "src"
+
+    @property
+    def build_path(self) -> Path:
+        return self.repo_path / self.build_dir / self.version
+
+    @property
+    def report_path(self) -> Path:
+        return self.build_path / "report.json"
+
+    @property
+    def configure_py(self) -> Path:
+        return self.repo_path / "configure.py"
+
+    @property
+    def symbols_path(self) -> Path:
+        return self.repo_path / "config" / self.version / "symbols.txt"
+
+    @property
+    def splits_path(self) -> Path:
+        return self.repo_path / "config" / self.version / "splits.txt"
+
+    @property
+    def objdiff_json(self) -> Path:
+        return self.repo_path / "objdiff.json"
+
+    @model_validator(mode="after")
+    def validate_repo_exists(self) -> MeleeConfig:
+        if not self.repo_path.is_dir():
+            raise ValueError(f"Melee repo not found: {self.repo_path}")
+        if not self.configure_py.is_file():
+            raise ValueError(f"configure.py not found: {self.configure_py}")
+        return self
+
+
+class AgentConfig(BaseModel):
+    model: str = "gpt-5.3"
+    max_iterations: int = 30
+    max_tokens_per_attempt: int = 100_000
+
+
+class DockerConfig(BaseModel):
+    enabled: bool = False
+    container_name: str = "melee-build"
+    image: str = "ghcr.io/doldecomp/build-melee:main"
+
+
+class GhidraConfig(BaseModel):
+    enabled: bool = False
+    project_path: Path | None = None  # Directory containing the .gpr file
+    project_name: str = "MeleeProject"
+    program_path: str = "/main.dol"  # Path within the Ghidra project
+    dol_path: Path | None = None  # Path to original DOL for initial import
+
+
+class Config(BaseModel):
+    melee: MeleeConfig
+    agent: AgentConfig = AgentConfig()
+    docker: DockerConfig = DockerConfig()
+    ghidra: GhidraConfig = GhidraConfig()
+
+
+DEFAULT_CONFIG_PATH = Path(__file__).parents[2] / "config" / "default.toml"
+
+
+def load_config(path: Path | None = None) -> Config:
+    config_path = path or DEFAULT_CONFIG_PATH
+    with open(config_path, "rb") as f:
+        data = tomllib.load(f)
+    return Config(**data)
