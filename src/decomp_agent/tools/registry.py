@@ -8,6 +8,7 @@ injecting config, and calling the underlying tool functions.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Callable
 
@@ -30,6 +31,19 @@ from decomp_agent.tools.schemas import (
 
 log = structlog.get_logger()
 
+# Regex to strip common hallucinated prefixes from source_file paths.
+# The canonical form is "melee/lb/lbcommand.c" (no "src/" prefix).
+_PATH_PREFIX_RE = re.compile(r"^(?:src/)?(?=melee/|dolphin/|Runtime/|TRK_MINNOW_DOLPHIN/)")
+
+
+def _normalize_source_file(path: str) -> str:
+    """Normalize a source_file path to the canonical object-name format.
+
+    The model sometimes hallucinates prefixes like "src/melee/..." or drops
+    the "melee/" prefix entirely. This strips known bad prefixes.
+    """
+    return _PATH_PREFIX_RE.sub("", path)
+
 
 class ToolRegistry:
     """Holds config and maps tool names to handler callables."""
@@ -48,11 +62,34 @@ class ToolRegistry:
         self._handlers[name] = (schema, handler)
 
     def get_openai_tools(self) -> list[dict]:
-        """Generate the ``tools`` list for the OpenAI chat API."""
+        """Generate the ``tools`` list for the OpenAI chat completions API."""
         tools = []
         for name, (schema, _) in self._handlers.items():
             tool_def = pydantic_function_tool(schema, name=name)
             tools.append(tool_def)
+        return tools
+
+    def get_responses_api_tools(self) -> list[dict]:
+        """Generate the ``tools`` list for the OpenAI Responses API.
+
+        Responses API tools use a flat format::
+
+            {"type": "function", "name": "...", "description": "...",
+             "parameters": {...}, "strict": True}
+
+        Unlike chat completions which nests under a ``function`` key.
+        """
+        tools = []
+        for name, (schema, _) in self._handlers.items():
+            chat_tool = pydantic_function_tool(schema, name=name)
+            fn = chat_tool["function"]
+            tools.append({
+                "type": "function",
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "parameters": fn["parameters"],
+                "strict": fn.get("strict", True),
+            })
         return tools
 
     def dispatch(self, tool_name: str, arguments_json: str) -> str:
@@ -75,6 +112,18 @@ class ToolRegistry:
             params = schema(**args)
         except Exception as e:
             return f"Error: invalid arguments for {tool_name}: {e}"
+
+        # Normalize source_file paths to fix model hallucinations
+        if hasattr(params, "source_file"):
+            original = params.source_file
+            params.source_file = _normalize_source_file(params.source_file)
+            if params.source_file != original:
+                log.info(
+                    "path_normalized",
+                    tool=tool_name,
+                    original=original,
+                    normalized=params.source_file,
+                )
 
         try:
             t0 = time.monotonic()

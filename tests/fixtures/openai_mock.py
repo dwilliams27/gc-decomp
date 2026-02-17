@@ -2,6 +2,8 @@
 
 Returns pre-programmed tool-call sequences so the agent loop runs
 real iteration logic without hitting the OpenAI API.
+
+Mocks the Responses API (client.responses.create) used by loop.py.
 """
 
 from __future__ import annotations
@@ -32,75 +34,88 @@ class ScriptedResponse:
     tokens: int = 500
 
 
-def _build_tool_call(tc: ScriptedToolCall, call_id: str) -> object:
-    """Build a namespace object matching OpenAI SDK ChatCompletionMessageToolCall."""
+def _build_function_call(tc: ScriptedToolCall, call_id: str) -> object:
+    """Build a namespace object matching ResponseFunctionToolCall."""
     return types.SimpleNamespace(
-        id=call_id,
-        type="function",
-        function=types.SimpleNamespace(
-            name=tc.name,
-            arguments=json.dumps(tc.arguments),
-        ),
+        type="function_call",
+        call_id=call_id,
+        name=tc.name,
+        arguments=json.dumps(tc.arguments),
+        id=f"item_{call_id}",
+        status="completed",
+    )
+
+
+def _build_message_output(text: str) -> object:
+    """Build a namespace object matching ResponseOutputMessage."""
+    return types.SimpleNamespace(
+        type="message",
+        role="assistant",
+        content=[types.SimpleNamespace(type="output_text", text=text)],
+        id="msg_output",
+        status="completed",
     )
 
 
 def _build_response(scripted: ScriptedResponse, call_index: int) -> object:
-    """Build a namespace object matching an OpenAI ChatCompletion response."""
-    tool_calls = None
+    """Build a namespace object matching an OpenAI Responses API Response."""
+    output = []
+
     if scripted.tool_calls:
-        tool_calls = [
-            _build_tool_call(tc, f"call_{call_index}_{i}")
-            for i, tc in enumerate(scripted.tool_calls)
-        ]
+        for i, tc in enumerate(scripted.tool_calls):
+            output.append(
+                _build_function_call(tc, f"call_{call_index}_{i}")
+            )
 
-    message = types.SimpleNamespace(
-        role="assistant",
-        content=scripted.content,
-        tool_calls=tool_calls,
-    )
+    if scripted.content:
+        output.append(_build_message_output(scripted.content))
 
-    choice = types.SimpleNamespace(
-        message=message,
-        finish_reason="tool_calls" if tool_calls else "stop",
-    )
+    # If no tool calls and no content, add a default stop message
+    if not output:
+        output.append(_build_message_output("I've completed my analysis."))
 
+    input_toks = scripted.tokens // 2
     usage = types.SimpleNamespace(
-        prompt_tokens=scripted.tokens // 2,
-        completion_tokens=scripted.tokens // 2,
+        input_tokens=input_toks,
+        output_tokens=scripted.tokens - input_toks,
         total_tokens=scripted.tokens,
+        input_tokens_details=types.SimpleNamespace(
+            cached_tokens=input_toks // 2,
+        ),
     )
 
     return types.SimpleNamespace(
-        choices=[choice],
+        id=f"resp_{call_index}",
+        output=output,
+        output_text=scripted.content or "",
         usage=usage,
     )
 
 
 def _build_stop_response() -> object:
     """Build a terminal response with no tool calls (model stops)."""
-    message = types.SimpleNamespace(
-        role="assistant",
-        content="I've completed my analysis.",
-        tool_calls=None,
-    )
-    choice = types.SimpleNamespace(
-        message=message,
-        finish_reason="stop",
-    )
+    output = [_build_message_output("I've completed my analysis.")]
+
     usage = types.SimpleNamespace(
-        prompt_tokens=50,
-        completion_tokens=50,
+        input_tokens=50,
+        output_tokens=50,
         total_tokens=100,
+        input_tokens_details=types.SimpleNamespace(
+            cached_tokens=25,
+        ),
     )
+
     return types.SimpleNamespace(
-        choices=[choice],
+        id="resp_stop",
+        output=output,
+        output_text="I've completed my analysis.",
         usage=usage,
     )
 
 
 @dataclass
-class _Completions:
-    """Mimics client.chat.completions with a create() method."""
+class _Responses:
+    """Mimics client.responses with a create() method."""
 
     responses: list[ScriptedResponse]
     calls: list[dict] = field(default_factory=list)
@@ -117,13 +132,10 @@ class _Completions:
         return _build_stop_response()
 
 
-@dataclass
-class _Chat:
-    completions: _Completions
-
-
 class ScriptedOpenAI:
     """Mock OpenAI client that returns pre-scripted tool call sequences.
+
+    Mocks the Responses API (client.responses.create).
 
     Usage::
 
@@ -139,13 +151,13 @@ class ScriptedOpenAI:
             result = run_agent(...)
 
         # Inspect what was sent to the mock:
-        assert len(mock_client.chat.completions.calls) == 2
+        assert len(mock_client.responses.calls) == 2
     """
 
     def __init__(self, responses: list[ScriptedResponse]) -> None:
-        self.chat = _Chat(completions=_Completions(responses=responses))
+        self.responses = _Responses(responses=responses)
 
     @property
     def calls(self) -> list[dict]:
         """All create() calls recorded."""
-        return self.chat.completions.calls
+        return self.responses.calls

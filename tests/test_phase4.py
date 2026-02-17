@@ -19,7 +19,7 @@ from decomp_agent.agent.context_mgmt import (
     manage_context,
     truncate_tool_result,
 )
-from decomp_agent.agent.loop import AgentResult, _update_best_match
+from decomp_agent.agent.loop import AgentResult, _target_function_matched, _update_best_match
 from decomp_agent.agent.prompts import SYSTEM_PROMPT, build_system_prompt
 from decomp_agent.tools.schemas import (
     CompileAndCheckParams,
@@ -172,6 +172,76 @@ class TestRegistry:
         registry = build_registry(mock_config)
         tools = registry.get_openai_tools()
         names = {t["function"]["name"] for t in tools}
+        expected = {
+            "get_target_assembly",
+            "get_ghidra_decompilation",
+            "get_m2c_decompilation",
+            "get_context",
+            "read_source_file",
+            "write_function",
+            "compile_and_check",
+            "get_diff",
+            "run_permuter",
+            "mark_complete",
+        }
+        assert names == expected
+
+    def test_dispatch_normalizes_source_file(self, mock_config):
+        """dispatch() should strip 'src/' prefix from source_file paths."""
+        from decomp_agent.tools.registry import ToolRegistry
+        from decomp_agent.tools.schemas import MarkCompleteParams
+
+        registry = ToolRegistry(mock_config)
+        captured = {}
+
+        def capturing_handler(params, config):
+            captured["source_file"] = params.source_file
+            return "ok"
+
+        registry.register("mark_complete", MarkCompleteParams, capturing_handler)
+        registry.dispatch(
+            "mark_complete",
+            json.dumps(
+                {"function_name": "foo", "source_file": "src/melee/test.c"}
+            ),
+        )
+        assert captured["source_file"] == "melee/test.c"
+
+    def test_dispatch_preserves_correct_paths(self, mock_config):
+        """dispatch() should not alter already-correct source_file paths."""
+        from decomp_agent.tools.registry import ToolRegistry
+        from decomp_agent.tools.schemas import MarkCompleteParams
+
+        registry = ToolRegistry(mock_config)
+        captured = {}
+
+        def capturing_handler(params, config):
+            captured["source_file"] = params.source_file
+            return "ok"
+
+        registry.register("mark_complete", MarkCompleteParams, capturing_handler)
+        registry.dispatch(
+            "mark_complete",
+            json.dumps(
+                {"function_name": "foo", "source_file": "melee/lb/lbcommand.c"}
+            ),
+        )
+        assert captured["source_file"] == "melee/lb/lbcommand.c"
+
+    def test_responses_api_tools_have_correct_format(self, mock_config):
+        from decomp_agent.tools.registry import build_registry
+
+        registry = build_registry(mock_config)
+        tools = registry.get_responses_api_tools()
+        assert len(tools) == 10
+        for t in tools:
+            assert t["type"] == "function"
+            # Responses API format: name is at top level, not nested
+            assert "name" in t
+            assert "parameters" in t
+            assert "function" not in t  # not nested like chat completions
+
+        names = {t["name"] for t in tools}
         expected = {
             "get_target_assembly",
             "get_ghidra_decompilation",
@@ -377,6 +447,9 @@ class TestAgentResult:
         assert r.best_match_percent == 0.0
         assert r.iterations == 0
         assert r.total_tokens == 0
+        assert r.input_tokens == 0
+        assert r.output_tokens == 0
+        assert r.cached_tokens == 0
         assert r.elapsed_seconds == 0.0
         assert r.final_code is None
         assert r.error is None
@@ -390,38 +463,135 @@ class TestAgentResult:
 
 class TestUpdateBestMatch:
     def test_ignores_non_compile_tools(self):
-        result = _update_best_match("get_diff", "50.0%", 0.0)
+        result = _update_best_match("get_diff", "func_a: 50.0%", 0.0, "func_a")
         assert result == 0.0
 
-    def test_parses_percentage(self):
+    def test_parses_target_percentage(self):
         text = "  func_a: 85.3% (size: 120)\n  func_b: 92.1% (size: 80)"
-        result = _update_best_match("compile_and_check", text, 0.0)
+        result = _update_best_match("compile_and_check", text, 0.0, "func_b")
         assert result == 92.1
+
+    def test_ignores_non_target_percentage(self):
+        text = "  func_a: 85.3% (size: 120)\n  func_b: 92.1% (size: 80)"
+        result = _update_best_match("compile_and_check", text, 0.0, "func_a")
+        assert result == 85.3
 
     def test_all_functions_match(self):
         text = "Compilation successful.\n\nAll functions match!"
-        result = _update_best_match("compile_and_check", text, 50.0)
+        result = _update_best_match("compile_and_check", text, 50.0, "any_func")
         assert result == 100.0
 
     def test_keeps_previous_best(self):
         text = "  func_a: 60.0% (size: 100)"
-        result = _update_best_match("compile_and_check", text, 90.0)
+        result = _update_best_match("compile_and_check", text, 90.0, "func_a")
         assert result == 90.0
 
     def test_compilation_failure(self):
         text = "Compilation failed:\nerror: undeclared identifier"
-        result = _update_best_match("compile_and_check", text, 75.0)
+        result = _update_best_match("compile_and_check", text, 75.0, "func_a")
         assert result == 75.0
 
     def test_match_status_line(self):
         text = "  func_a: MATCH (size: 100)"
-        result = _update_best_match("compile_and_check", text, 0.0)
+        result = _update_best_match("compile_and_check", text, 0.0, "func_a")
         assert result == 100.0
 
-    def test_match_mixed_with_percentages(self):
+    def test_other_func_match_not_counted(self):
+        """Another function's MATCH should not affect target's best_match."""
         text = (
             "  func_a: MATCH (size: 100)\n"
             "  func_b: 85.0% (size: 200)"
         )
-        result = _update_best_match("compile_and_check", text, 0.0)
+        result = _update_best_match("compile_and_check", text, 0.0, "func_b")
+        assert result == 85.0
+
+    def test_target_match_with_other_percentages(self):
+        text = (
+            "  func_a: MATCH (size: 100)\n"
+            "  func_b: 85.0% (size: 200)"
+        )
+        result = _update_best_match("compile_and_check", text, 0.0, "func_a")
         assert result == 100.0
+
+
+# ---------------------------------------------------------------------------
+# _target_function_matched tests
+# ---------------------------------------------------------------------------
+
+
+class TestTargetFunctionMatched:
+    def test_ignores_non_compile_tools(self):
+        assert _target_function_matched("get_diff", "func_a: MATCH", "func_a") is False
+
+    def test_all_functions_match(self):
+        text = "Compilation successful.\n\nAll functions match!"
+        assert _target_function_matched("compile_and_check", text, "anything") is True
+
+    def test_specific_function_match(self):
+        text = "  func_a: MATCH (size: 100)\n  func_b: 85.0% (size: 200)"
+        assert _target_function_matched("compile_and_check", text, "func_a") is True
+
+    def test_different_function_match_not_target(self):
+        text = "  func_a: MATCH (size: 100)\n  func_b: 85.0% (size: 200)"
+        assert _target_function_matched("compile_and_check", text, "func_b") is False
+
+    def test_no_match_at_all(self):
+        text = "  func_a: 60.0% (size: 100)\n  func_b: 85.0% (size: 200)"
+        assert _target_function_matched("compile_and_check", text, "func_a") is False
+
+    def test_compilation_failure(self):
+        text = "Compilation failed:\nerror: undeclared identifier"
+        assert _target_function_matched("compile_and_check", text, "func_a") is False
+
+    def test_multiple_matches_includes_target(self):
+        text = (
+            "  func_a: MATCH (size: 100)\n"
+            "  func_b: MATCH (size: 200)\n"
+            "  func_c: 50.0% (size: 300)"
+        )
+        assert _target_function_matched("compile_and_check", text, "func_b") is True
+
+
+# ---------------------------------------------------------------------------
+# _normalize_source_file tests
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeSourceFile:
+    def test_strips_src_prefix(self):
+        from decomp_agent.tools.registry import _normalize_source_file
+
+        assert _normalize_source_file("src/melee/lb/lbcommand.c") == "melee/lb/lbcommand.c"
+
+    def test_preserves_correct_path(self):
+        from decomp_agent.tools.registry import _normalize_source_file
+
+        assert _normalize_source_file("melee/lb/lbcommand.c") == "melee/lb/lbcommand.c"
+
+    def test_handles_dolphin_path(self):
+        from decomp_agent.tools.registry import _normalize_source_file
+
+        assert _normalize_source_file("src/dolphin/os/os.c") == "dolphin/os/os.c"
+
+    def test_handles_runtime_path(self):
+        from decomp_agent.tools.registry import _normalize_source_file
+
+        assert _normalize_source_file("src/Runtime/global_destructor_chain.c") == "Runtime/global_destructor_chain.c"
+
+    def test_handles_trk_path(self):
+        from decomp_agent.tools.registry import _normalize_source_file
+
+        assert _normalize_source_file("src/TRK_MINNOW_DOLPHIN/main.c") == "TRK_MINNOW_DOLPHIN/main.c"
+
+    def test_ignores_unrecognized_prefix(self):
+        from decomp_agent.tools.registry import _normalize_source_file
+
+        assert _normalize_source_file("src/unknown/file.c") == "src/unknown/file.c"
+
+    def test_double_src_prefix_left_alone(self):
+        from decomp_agent.tools.registry import _normalize_source_file
+
+        # "src/src/melee/..." is not stripped because the lookahead requires
+        # melee/|dolphin/|etc. immediately after the optional "src/".
+        # This is fine — the model won't hallucinate a double prefix.
+        assert _normalize_source_file("src/src/melee/test.c") == "src/src/melee/test.c"
