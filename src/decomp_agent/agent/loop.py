@@ -57,6 +57,7 @@ def _message_to_dict(msg: object) -> dict:
 
 
 _MATCH_PCT_RE = re.compile(r"(\d+(?:\.\d+)?)%")
+_MATCH_LINE_RE = re.compile(r":\s*MATCH\b")
 
 
 def _update_best_match(
@@ -64,8 +65,11 @@ def _update_best_match(
 ) -> float:
     """Parse compile_and_check output to track the best match percentage.
 
-    Looks for "X%" patterns in the result. Returns the max of current_best
-    and any percentage found, or 100.0 if "All functions match!" is present.
+    Recognises three patterns in the output:
+      - "All functions match!" → 100.0
+      - "func_name: MATCH (size: N)" → 100.0
+      - "func_name: 85.3% (size: N)" → 85.3
+    Returns the max of current_best and any value found.
     """
     if tool_name != "compile_and_check":
         return current_best
@@ -74,6 +78,11 @@ def _update_best_match(
         return 100.0
 
     best = current_best
+
+    # "func: MATCH" lines mean 100%
+    if _MATCH_LINE_RE.search(tool_result):
+        best = max(best, 100.0)
+
     for m in _MATCH_PCT_RE.finditer(tool_result):
         pct = float(m.group(1))
         if pct > best:

@@ -76,11 +76,19 @@ class GhidraConfig(BaseModel):
     dol_path: Path | None = None  # Path to original DOL for initial import
 
 
+class OrchestrationConfig(BaseModel):
+    db_path: Path = Path("decomp.db")
+    max_attempts_per_function: int = 3
+    max_function_size: int | None = None
+    batch_size: int = 50
+
+
 class Config(BaseModel):
     melee: MeleeConfig
     agent: AgentConfig = AgentConfig()
     docker: DockerConfig = DockerConfig()
     ghidra: GhidraConfig = GhidraConfig()
+    orchestration: OrchestrationConfig = OrchestrationConfig()
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).parents[2] / "config" / "default.toml"

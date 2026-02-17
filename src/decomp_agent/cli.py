@@ -1,0 +1,166 @@
+"""CLI entry point for decomp-agent."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import click
+from rich.console import Console
+from rich.table import Table
+from sqlmodel import Session, func, select
+
+from decomp_agent.config import load_config
+from decomp_agent.models.db import Function, get_engine, sync_from_report
+
+console = Console()
+
+
+@click.group()
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to config TOML file (default: config/default.toml)",
+)
+@click.pass_context
+def main(ctx: click.Context, config_path: Path | None) -> None:
+    """Automated decompilation agent for Super Smash Bros. Melee."""
+    ctx.ensure_object(dict)
+    ctx.obj["config_path"] = config_path
+
+
+def _load(ctx: click.Context):
+    """Load config and engine from click context."""
+    config = load_config(ctx.obj.get("config_path"))
+    engine = get_engine(config.orchestration.db_path)
+    return config, engine
+
+
+@main.command()
+@click.pass_context
+def init(ctx: click.Context) -> None:
+    """Scan melee repo and populate DB from report.json."""
+    config, engine = _load(ctx)
+
+    console.print("Loading functions from melee repo...")
+    from decomp_agent.melee.functions import get_candidates, get_functions
+
+    functions = get_functions(config)
+    candidates = get_candidates(functions)
+
+    console.print(f"Found {len(functions):,} total functions, {len(candidates):,} candidates")
+
+    with Session(engine) as session:
+        inserted = sync_from_report(session, candidates)
+
+    console.print(f"Synced to DB: {inserted:,} new functions inserted")
+    console.print(f"Database: {config.orchestration.db_path}")
+
+
+@main.command()
+@click.argument("name")
+@click.pass_context
+def run(ctx: click.Context, name: str) -> None:
+    """Run agent on a single function by name."""
+    config, engine = _load(ctx)
+
+    from decomp_agent.orchestrator.runner import run_function
+
+    with Session(engine) as session:
+        function = session.exec(
+            select(Function).where(Function.name == name)
+        ).first()
+
+    if function is None:
+        console.print(f"[red]Function '{name}' not found in DB. Run 'init' first.[/red]")
+        raise SystemExit(1)
+
+    console.print(f"Running agent on [bold]{name}[/bold] ({function.source_file})")
+    result = run_function(function, config, engine)
+
+    if result.matched:
+        console.print(f"[green]MATCHED![/green] in {result.elapsed_seconds:.1f}s")
+    else:
+        console.print(
+            f"[yellow]{result.termination_reason}[/yellow] "
+            f"best={result.best_match_percent:.1f}% "
+            f"iterations={result.iterations} tokens={result.total_tokens:,}"
+        )
+    if result.error:
+        console.print(f"[red]Error: {result.error}[/red]")
+
+
+@main.command()
+@click.option("--limit", default=None, type=int, help="Max functions to attempt")
+@click.option("--max-size", default=None, type=int, help="Max function size in bytes")
+@click.pass_context
+def batch(ctx: click.Context, limit: int | None, max_size: int | None) -> None:
+    """Run agent on candidates in batch mode."""
+    config, engine = _load(ctx)
+
+    from decomp_agent.orchestrator.batch import run_batch
+
+    effective_limit = limit if limit is not None else config.orchestration.batch_size
+    effective_max_size = max_size if max_size is not None else config.orchestration.max_function_size
+
+    console.print(f"Starting batch run (limit={effective_limit}, max_size={effective_max_size})")
+
+    result = run_batch(config, engine, limit=effective_limit, max_size=effective_max_size)
+
+    console.print(f"\n[bold]Batch complete:[/bold]")
+    console.print(f"  Attempted: {result.attempted}")
+    console.print(f"  Matched:   {result.matched}")
+    console.print(f"  Failed:    {result.failed}")
+    console.print(f"  Tokens:    {result.total_tokens:,}")
+    console.print(f"  Elapsed:   {result.elapsed:.1f}s")
+
+
+@main.command()
+@click.pass_context
+def status(ctx: click.Context) -> None:
+    """Show progress summary."""
+    config, engine = _load(ctx)
+
+    with Session(engine) as session:
+        total = session.exec(select(func.count(Function.id))).one()
+        if total == 0:
+            console.print("[yellow]No functions in DB. Run 'init' first.[/yellow]")
+            return
+
+        # Counts by status
+        status_counts: dict[str, int] = {}
+        rows = session.exec(
+            select(Function.status, func.count(Function.id)).group_by(Function.status)
+        ).all()
+        for status_val, count in rows:
+            status_counts[status_val] = count
+
+        # Token spend
+        from decomp_agent.models.db import Attempt
+
+        total_tokens = session.exec(
+            select(func.coalesce(func.sum(Attempt.total_tokens), 0))
+        ).one()
+        total_attempts = session.exec(select(func.count(Attempt.id))).one()
+
+    table = Table(title="Decompilation Progress")
+    table.add_column("Status", style="bold")
+    table.add_column("Count", justify="right")
+
+    for s in ["pending", "in_progress", "matched", "failed", "skipped"]:
+        count = status_counts.get(s, 0)
+        style = {
+            "matched": "green",
+            "failed": "red",
+            "in_progress": "cyan",
+            "pending": "yellow",
+            "skipped": "dim",
+        }.get(s, "")
+        table.add_row(s, f"{count:,}", style=style)
+
+    table.add_row("TOTAL", f"{total:,}", style="bold")
+    console.print(table)
+
+    console.print(f"\nTotal attempts: {total_attempts:,}")
+    console.print(f"Total tokens:   {total_tokens:,}")

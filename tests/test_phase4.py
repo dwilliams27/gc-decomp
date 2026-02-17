@@ -416,5 +416,12 @@ class TestUpdateBestMatch:
     def test_match_status_line(self):
         text = "  func_a: MATCH (size: 100)"
         result = _update_best_match("compile_and_check", text, 0.0)
-        # "MATCH" has no percentage, should keep current best
-        assert result == 0.0
+        assert result == 100.0
+
+    def test_match_mixed_with_percentages(self):
+        text = (
+            "  func_a: MATCH (size: 100)\n"
+            "  func_b: 85.0% (size: 200)"
+        )
+        result = _update_best_match("compile_and_check", text, 0.0)
+        assert result == 100.0

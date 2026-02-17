@@ -87,6 +87,16 @@ class ToolRegistry:
 # ---------------------------------------------------------------------------
 
 
+def _load_report(config: Config):
+    """Load the current report.json if available, or None."""
+    from decomp_agent.melee.report import Report, parse_report
+
+    report_path = config.melee.report_path
+    if report_path.exists():
+        return parse_report(report_path)
+    return None
+
+
 def _handle_get_target_assembly(
     params: GetTargetAssemblyParams, config: Config
 ) -> str:
@@ -124,7 +134,10 @@ def _handle_get_m2c_decompilation(
 def _handle_get_context(params: GetContextParams, config: Config) -> str:
     from decomp_agent.tools.context import get_function_context
 
-    ctx = get_function_context(params.function_name, params.source_file, config)
+    report = _load_report(config)
+    ctx = get_function_context(
+        params.function_name, params.source_file, config, report=report
+    )
     return ctx.format_for_llm()
 
 
