@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 
+import structlog
 from sqlalchemy import Engine
 from sqlmodel import Session
 
@@ -12,7 +12,7 @@ from decomp_agent.agent.loop import AgentResult, run_agent
 from decomp_agent.config import Config
 from decomp_agent.models.db import Function, record_attempt
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 def run_function(function: Function, config: Config, engine: Engine) -> AgentResult:
@@ -38,11 +38,18 @@ def run_function(function: Function, config: Config, engine: Engine) -> AgentRes
         func_name = function.name
         source_file = function.source_file
 
+    log.info(
+        "function_start",
+        function=func_name,
+        attempt=function.attempts + 1,
+        max_attempts=max_attempts,
+    )
+
     # Run the agent
     try:
         result = run_agent(func_name, source_file, config)
     except Exception as e:
-        log.error("Agent crashed on %s: %s", func_name, e)
+        log.error("agent_crash", function=func_name, error=str(e))
         result = AgentResult(
             error=str(e),
             termination_reason="agent_crash",
@@ -66,5 +73,13 @@ def run_function(function: Function, config: Config, engine: Engine) -> AgentRes
 
         function.updated_at = datetime.now(timezone.utc)
         session.commit()
+
+        log.info(
+            "function_complete",
+            function=func_name,
+            matched=result.matched,
+            status=function.status,
+            best_match=result.best_match_percent,
+        )
 
     return result

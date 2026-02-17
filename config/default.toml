@@ -17,3 +17,7 @@ image = "ghcr.io/doldecomp/build-melee:main"
 db_path = "decomp.db"
 max_attempts_per_function = 3
 batch_size = 50
+
+[logging]
+level = "INFO"
+json_format = false

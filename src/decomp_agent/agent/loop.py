@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import re
 import time
 from dataclasses import dataclass, field
 
+import structlog
 from openai import OpenAI
 
 from decomp_agent.agent.context_mgmt import ContextConfig, manage_context
@@ -14,7 +14,7 @@ from decomp_agent.agent.prompts import build_system_prompt
 from decomp_agent.config import Config
 from decomp_agent.tools.registry import build_registry
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 @dataclass
@@ -110,6 +110,7 @@ def run_agent(
     """
     start_time = time.monotonic()
     ctx_config = context_config or ContextConfig()
+    bound_log = log.bind(function=function_name, source_file=source_file)
 
     # Build components
     system_prompt = build_system_prompt(function_name, source_file)
@@ -125,7 +126,7 @@ def run_agent(
 
     for iteration in range(1, max_iterations + 1):
         result.iterations = iteration
-        log.info("Iteration %d/%d", iteration, max_iterations)
+        bound_log.info("iteration_start", iteration=iteration, max=max_iterations)
 
         # Manage context window
         trimmed = manage_context(messages, ctx_config)
@@ -139,7 +140,7 @@ def run_agent(
                 temperature=0.2,
             )
         except Exception as e:
-            log.error("OpenAI API error: %s", e)
+            bound_log.error("api_error", error=str(e))
             result.error = str(e)
             result.termination_reason = "api_error"
             break
@@ -156,7 +157,7 @@ def run_agent(
 
         # Check if model stopped (no tool calls)
         if not assistant_msg.tool_calls:
-            log.info("Model stopped without tool calls")
+            bound_log.info("model_stopped")
             result.termination_reason = "model_stopped"
             break
 
@@ -165,7 +166,7 @@ def run_agent(
             fn_name = tool_call.function.name
             fn_args = tool_call.function.arguments
 
-            log.info("Tool call: %s", fn_name)
+            bound_log.info("tool_call", tool=fn_name)
             tool_result = registry.dispatch(fn_name, fn_args)
 
             # Append tool result to history
@@ -178,25 +179,32 @@ def run_agent(
             )
 
             # Track best match
+            previous_best = result.best_match_percent
             result.best_match_percent = _update_best_match(
                 fn_name, tool_result, result.best_match_percent
             )
+            if result.best_match_percent > previous_best:
+                bound_log.info(
+                    "match_improved",
+                    previous=previous_best,
+                    new=result.best_match_percent,
+                )
 
             # Check for mark_complete
             if fn_name == "mark_complete":
                 result.matched = True
                 result.termination_reason = "matched"
-                log.info("Function marked as complete!")
+                bound_log.info("function_matched")
 
         if result.matched:
             break
 
         # Check token budget
         if result.total_tokens >= config.agent.max_tokens_per_attempt:
-            log.warning(
-                "Token budget exhausted: %d >= %d",
-                result.total_tokens,
-                config.agent.max_tokens_per_attempt,
+            bound_log.warning(
+                "token_budget_exhausted",
+                used=result.total_tokens,
+                budget=config.agent.max_tokens_per_attempt,
             )
             result.termination_reason = "token_budget"
             break
@@ -212,17 +220,18 @@ def run_agent(
             source = read_source_file(src_path)
             result.final_code = get_function_source(source, function_name)
     except Exception:
-        log.warning("Could not read final function code", exc_info=True)
+        bound_log.warning("final_code_read_failed", exc_info=True)
 
     result.elapsed_seconds = time.monotonic() - start_time
 
-    log.info(
-        "Agent finished: reason=%s matched=%s best=%.1f%% iterations=%d tokens=%d",
-        result.termination_reason,
-        result.matched,
-        result.best_match_percent,
-        result.iterations,
-        result.total_tokens,
+    bound_log.info(
+        "agent_finished",
+        reason=result.termination_reason,
+        matched=result.matched,
+        best_match=result.best_match_percent,
+        iterations=result.iterations,
+        tokens=result.total_tokens,
+        elapsed=round(result.elapsed_seconds, 1),
     )
 
     return result

@@ -83,12 +83,19 @@ class OrchestrationConfig(BaseModel):
     batch_size: int = 50
 
 
+class LoggingConfig(BaseModel):
+    level: str = "INFO"
+    log_file: Path | None = None
+    json_format: bool = False
+
+
 class Config(BaseModel):
     melee: MeleeConfig
     agent: AgentConfig = AgentConfig()
     docker: DockerConfig = DockerConfig()
     ghidra: GhidraConfig = GhidraConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
+    logging: LoggingConfig = LoggingConfig()
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).parents[2] / "config" / "default.toml"

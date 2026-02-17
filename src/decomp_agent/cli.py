@@ -23,11 +23,22 @@ console = Console()
     default=None,
     help="Path to config TOML file (default: config/default.toml)",
 )
+@click.option(
+    "--log-level",
+    default=None,
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    help="Log level (default: INFO)",
+)
 @click.pass_context
-def main(ctx: click.Context, config_path: Path | None) -> None:
+def main(ctx: click.Context, config_path: Path | None, log_level: str | None) -> None:
     """Automated decompilation agent for Super Smash Bros. Melee."""
+    from decomp_agent.logging import configure_logging
+
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path
+    ctx.obj["log_level"] = log_level
+
+    configure_logging(level=log_level or "INFO")
 
 
 def _load(ctx: click.Context):
@@ -94,9 +105,15 @@ def run(ctx: click.Context, name: str) -> None:
 @main.command()
 @click.option("--limit", default=None, type=int, help="Max functions to attempt")
 @click.option("--max-size", default=None, type=int, help="Max function size in bytes")
+@click.option("--log-file", default=None, type=click.Path(path_type=Path), help="Path for JSON-lines log file")
 @click.pass_context
-def batch(ctx: click.Context, limit: int | None, max_size: int | None) -> None:
+def batch(ctx: click.Context, limit: int | None, max_size: int | None, log_file: Path | None) -> None:
     """Run agent on candidates in batch mode."""
+    if log_file is not None:
+        from decomp_agent.logging import configure_logging
+
+        configure_logging(level=ctx.obj.get("log_level") or "INFO", log_file=log_file)
+
     config, engine = _load(ctx)
 
     from decomp_agent.orchestrator.batch import run_batch

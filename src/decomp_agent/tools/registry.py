@@ -8,9 +8,10 @@ injecting config, and calling the underlying tool functions.
 from __future__ import annotations
 
 import json
-import logging
+import time
 from typing import Callable
 
+import structlog
 from openai import pydantic_function_tool
 
 from decomp_agent.config import Config
@@ -27,7 +28,7 @@ from decomp_agent.tools.schemas import (
     WriteFunctionParams,
 )
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 class ToolRegistry:
@@ -76,9 +77,18 @@ class ToolRegistry:
             return f"Error: invalid arguments for {tool_name}: {e}"
 
         try:
-            return handler(params, self.config)
+            t0 = time.monotonic()
+            result = handler(params, self.config)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            log.info(
+                "tool_dispatch",
+                tool=tool_name,
+                elapsed_ms=round(elapsed_ms, 1),
+                result_length=len(result),
+            )
+            return result
         except Exception as e:
-            log.exception("Tool %s raised an exception", tool_name)
+            log.exception("tool_error", tool=tool_name, error=str(e))
             return f"Error in {tool_name}: {type(e).__name__}: {e}"
 
 
