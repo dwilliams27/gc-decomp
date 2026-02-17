@@ -60,8 +60,10 @@ def _ctx_file_path(config: Config) -> Path:
 
 
 # Pattern to match function labels in dtk-generated assembly.
-# dtk uses: .global func_name / func_name: or .fn func_name
+# dtk uses: .fn func_name, global  /  .endfn func_name
+# Also supports legacy: .global func_name / func_name:
 _FUNC_LABEL_RE = re.compile(r"^(\w+):\s*$")
+_FN_DIRECTIVE_RE = re.compile(r"^\.fn\s+(\w+)")
 _GLOBAL_RE = re.compile(r"^\s*\.global\s+(\w+)")
 _ENDFN_RE = re.compile(r"^\s*\.(?:endfn|endobj|size)\s+(\w+)")
 
@@ -70,38 +72,47 @@ def extract_function_asm(asm_content: str, function_name: str) -> str | None:
     """Extract a single function's assembly from a dtk-generated .s file.
 
     Returns the assembly text for the function, or None if not found.
+    Handles both `.fn name, global` directives and plain `name:` labels.
     """
     lines = asm_content.splitlines()
     in_function = False
     func_lines: list[str] = []
-    found_global = False
 
     for line in lines:
-        # Check for .global declaration
-        global_match = _GLOBAL_RE.match(line)
-        if global_match and global_match.group(1) == function_name:
-            found_global = True
+        if not in_function:
+            # Check for .fn directive: ".fn func_name, global"
+            fn_match = _FN_DIRECTIVE_RE.match(line)
+            if fn_match and fn_match.group(1) == function_name:
+                in_function = True
+                func_lines.append(line)
+                continue
 
-        # Check for function label
-        label_match = _FUNC_LABEL_RE.match(line)
-        if label_match and label_match.group(1) == function_name:
-            in_function = True
-            func_lines.append(line)
-            continue
-
-        if in_function:
+            # Check for plain label: "func_name:"
+            label_match = _FUNC_LABEL_RE.match(line)
+            if label_match and label_match.group(1) == function_name:
+                in_function = True
+                func_lines.append(line)
+                continue
+        else:
             # Check for end-of-function markers
             endfn_match = _ENDFN_RE.match(line)
             if endfn_match and endfn_match.group(1) == function_name:
                 func_lines.append(line)
                 break
 
-            # A new .global or function label ends the current function
-            if label_match and label_match.group(1) != function_name:
+            # A new .fn directive starts a different function — we're done
+            fn_match = _FN_DIRECTIVE_RE.match(line)
+            if fn_match and fn_match.group(1) != function_name:
                 break
-            new_global = _GLOBAL_RE.match(line)
-            if new_global and new_global.group(1) != function_name:
-                # Next function's .global — we're done
+
+            # A new .global for a different function — we're done
+            global_match = _GLOBAL_RE.match(line)
+            if global_match and global_match.group(1) != function_name:
+                break
+
+            # A new plain label starts a different function — we're done
+            label_match = _FUNC_LABEL_RE.match(line)
+            if label_match and label_match.group(1) != function_name:
                 break
 
             func_lines.append(line)

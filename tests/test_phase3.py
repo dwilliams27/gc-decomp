@@ -155,6 +155,51 @@ my_func:
     assert "mflr r0" in result
 
 
+def test_extract_function_asm_fn_directive():
+    """Handle .fn/.endfn directives (actual dtk output format)."""
+    asm = """\
+.include "macros.inc"
+
+.section .text, "ax"
+
+.fn func_a, global
+/* 80240000 00000000  38 60 00 00 */	li r3, 0
+/* 80240004 00000004  4E 80 00 20 */	blr
+.endfn func_a
+
+.fn func_b, global
+/* 80240008 00000008  38 60 00 01 */	li r3, 1
+/* 8024000C 0000000C  4E 80 00 20 */	blr
+.endfn func_b
+"""
+    result = extract_function_asm(asm, "func_a")
+    assert result is not None
+    assert ".fn func_a" in result
+    assert "li r3, 0" in result
+    assert ".endfn func_a" in result
+    assert "func_b" not in result
+
+
+def test_extract_function_asm_fn_directive_second():
+    """Extract the second function using .fn directives."""
+    asm = """\
+.fn func_a, global
+    li r3, 0
+    blr
+.endfn func_a
+
+.fn func_b, global
+    li r3, 1
+    blr
+.endfn func_b
+"""
+    result = extract_function_asm(asm, "func_b")
+    assert result is not None
+    assert ".fn func_b" in result
+    assert "li r3, 1" in result
+    assert "func_a" not in result
+
+
 def test_m2c_result_properties():
     success = M2CResult(function_name="test", c_code="void test(void) {}")
     assert success.success
