@@ -7,6 +7,7 @@ from pathlib import Path
 
 from decomp_agent.config import Config
 from decomp_agent.melee.report import Report
+from decomp_agent.tools.ctx_filter import filter_ctx
 from decomp_agent.tools.run import run_in_repo
 from decomp_agent.tools.source import find_functions, read_source_file
 
@@ -31,7 +32,11 @@ class FunctionContext:
     includes: list[str] = field(default_factory=list)
 
     def format_for_llm(self, max_ctx_chars: int = 50_000) -> str:
-        """Format context into a string suitable for LLM input."""
+        """Format context into a string suitable for LLM input.
+
+        Note: max_ctx_chars is kept for backward compat but context is
+        already budget-filtered by filter_ctx() during gathering.
+        """
         parts: list[str] = []
 
         parts.append(f"=== Context for {self.function_name} ===")
@@ -39,11 +44,8 @@ class FunctionContext:
         parts.append("")
 
         if self.preprocessed_ctx:
-            ctx = self.preprocessed_ctx
-            if len(ctx) > max_ctx_chars:
-                ctx = ctx[:max_ctx_chars] + "\n... (truncated)"
             parts.append("=== Preprocessed headers and types ===")
-            parts.append(ctx)
+            parts.append(self.preprocessed_ctx)
             parts.append("")
 
         if self.nearby_functions:
@@ -187,9 +189,12 @@ def get_function_context(
         raise FileNotFoundError(f"Source file not found: {src_path}")
     ctx.file_source = read_source_file(src_path)
 
-    # Get preprocessed context (all headers inlined)
+    # Get preprocessed context (all headers inlined), filtered to relevant sections
     if include_ctx:
-        ctx.preprocessed_ctx = _generate_ctx(source_file, config)
+        raw_ctx = _generate_ctx(source_file, config)
+        ctx.preprocessed_ctx = filter_ctx(
+            raw_ctx, source_file, budget_chars=config.agent.max_ctx_chars
+        )
 
     # Get nearby matched functions
     if include_nearby:
