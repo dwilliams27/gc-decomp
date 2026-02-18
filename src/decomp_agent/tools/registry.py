@@ -205,7 +205,7 @@ def _handle_read_source_file(
 ) -> str:
     from decomp_agent.tools.source import read_source_file
 
-    src_path = config.melee.repo_path / "src" / params.source_file
+    src_path = config.melee.resolve_source_path(params.source_file)
     if not src_path.exists():
         return f"Error: source file not found: {src_path}"
     return read_source_file(src_path)
@@ -220,7 +220,7 @@ def _handle_write_function(
         write_source_file,
     )
 
-    src_path = config.melee.repo_path / "src" / params.source_file
+    src_path = config.melee.resolve_source_path(params.source_file)
     if not src_path.exists():
         return f"Error: source file not found: {src_path}"
 

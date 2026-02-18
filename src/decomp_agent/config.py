@@ -21,9 +21,26 @@ class MeleeConfig(BaseModel):
     version: str = "GALE01"
     build_dir: str = "build"
 
+    # Source file prefixes that live outside src/.
+    # Maps prefix -> directory relative to repo_path.
+    _SOURCE_ROOTS: dict[str, str] = {
+        "dolphin/": "extern/dolphin/src",
+    }
+
     @property
     def src_dir(self) -> Path:
         return self.repo_path / "src"
+
+    def resolve_source_path(self, source_file: str) -> Path:
+        """Resolve an object name to its actual filesystem path.
+
+        Most source files live under src/ (e.g. "melee/lb/foo.c" -> src/melee/lb/foo.c).
+        Dolphin SDK files live under extern/dolphin/src/ instead.
+        """
+        for prefix, root in self._SOURCE_ROOTS.items():
+            if source_file.startswith(prefix):
+                return self.repo_path / root / source_file
+        return self.repo_path / "src" / source_file
 
     @property
     def build_path(self) -> Path:

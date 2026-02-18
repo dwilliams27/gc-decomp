@@ -111,7 +111,7 @@ def _get_nearby_matched_functions(
     Returns the source code of up to max_functions matched functions
     from the same file, preferring functions near the target.
     """
-    src_path = config.melee.repo_path / "src" / source_file
+    src_path = config.melee.resolve_source_path(source_file)
     if not src_path.exists():
         raise FileNotFoundError(
             f"Source file not found: {src_path}"
@@ -184,7 +184,7 @@ def get_function_context(
     )
 
     # Read the source file
-    src_path = config.melee.repo_path / "src" / source_file
+    src_path = config.melee.resolve_source_path(source_file)
     if not src_path.exists():
         raise FileNotFoundError(f"Source file not found: {src_path}")
     ctx.file_source = read_source_file(src_path)

@@ -235,7 +235,7 @@ def run_agent(
     try:
         from decomp_agent.tools.source import get_function_source, read_source_file
 
-        src_path = config.melee.repo_path / "src" / source_file
+        src_path = config.melee.resolve_source_path(source_file)
         if src_path.exists():
             source = read_source_file(src_path)
             result.final_code = get_function_source(source, function_name)

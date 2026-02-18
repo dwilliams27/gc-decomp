@@ -111,7 +111,7 @@ def run_permuter(
         )
 
     # Get current C code for the function
-    src_path = config.melee.repo_path / "src" / source_file
+    src_path = config.melee.resolve_source_path(source_file)
     if not src_path.exists():
         return PermuterResult(
             function_name=function_name,
