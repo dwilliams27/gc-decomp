@@ -68,23 +68,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--token-budget", type=int, default=1_000_000)
+    parser.add_argument(
+        "candidates",
+        nargs="*",
+        help="function_name:source_file pairs, e.g. 'foo:melee/bar.c'",
+    )
     args = parser.parse_args()
 
     config = load_config("config/default.toml")
     config.agent.max_tokens_per_attempt = args.token_budget
 
-    candidates = [
-        ("un_80300A88", "melee/if/soundtest.c"),
-        ("vi0401_8031D020", "melee/vi/vi0401.c"),
-        ("ftKb_SpecialN_800F6388", "melee/ft/chara/ftKirby/ftKb_SpecialN.c"),
-        ("fn_801D542C", "melee/gr/grkongo.c"),
-        ("it_3F14_Logic5_Spawned", "melee/it/items/ittarucann.c"),
-        ("itLinkbomb_UnkMotion3_Anim", "melee/it/items/itlinkbomb.c"),
-        ("fn_800DB6C8", "melee/ft/chara/ftCommon/ftCo_Attack100.c"),
-        ("ftCo_Damage_OnExitHitlag", "melee/ft/chara/ftCommon/ftCo_Damage.c"),
-        ("fn_8024ECCC", "melee/mn/mndatadel.c"),
-        ("mpCheckFloor", "melee/mp/mplib.c"),
-    ]
+    if args.candidates:
+        candidates = []
+        for c in args.candidates:
+            name, src = c.split(":", 1)
+            candidates.append((name, src))
+    else:
+        print("Error: provide candidates as function_name:source_file args")
+        sys.exit(1)
 
     print(
         f"Running {len(candidates)} functions with {args.workers} workers, "

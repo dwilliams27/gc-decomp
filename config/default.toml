@@ -1,5 +1,5 @@
 [melee]
-repo_path = "/Users/dwilliams/proj/melee"
+repo_path = "/Users/dwilliams/proj/melee-fork/melee"
 version = "GALE01"
 build_dir = "build"
 

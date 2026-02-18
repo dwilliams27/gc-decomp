@@ -13,7 +13,7 @@
 - `src/decomp_agent/melee/` — Melee repo integration (project parsing, report, functions)
 - `tests/` — Test suite (test_phase1.py, test_phase2.py, test_phase3.py)
 - `config/default.toml` — Default configuration
-- Melee repo: `/Users/dwilliams/proj/melee`
+- Melee repo (fork): `/Users/dwilliams/proj/melee-fork/melee`
 
 ## Key Conventions
 
