@@ -17,6 +17,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Libraries that are SDK/runtime code, not game code. The agent doesn't have
+# the right tooling (no .ctx files, different build setup) to decomp these.
+EXCLUDED_LIBRARIES = frozenset({
+    "thp",
+    "Gekko runtime",
+    "<unknown>",
+})
+
 
 class Function(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
@@ -83,6 +91,8 @@ def get_next_candidate(
     stmt = select(Function).where(
         Function.status.in_(["pending"]),  # type: ignore[attr-defined]
         Function.attempts < max_attempts,
+        Function.current_match_pct < 100.0,  # skip already-matched functions
+        Function.library.notin_(EXCLUDED_LIBRARIES),  # type: ignore[attr-defined]
     )
     if max_size is not None:
         stmt = stmt.where(Function.size <= max_size)
@@ -189,6 +199,8 @@ def get_candidate_batch(
     stmt = select(Function).where(
         Function.status.in_(["pending"]),  # type: ignore[attr-defined]
         Function.attempts < max_attempts,
+        Function.current_match_pct < 100.0,  # skip already-matched functions
+        Function.library.notin_(EXCLUDED_LIBRARIES),  # type: ignore[attr-defined]
     )
     if max_size is not None:
         stmt = stmt.where(Function.size <= max_size)

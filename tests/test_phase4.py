@@ -134,8 +134,17 @@ class TestRegistry:
         result = registry.dispatch("get_target_assembly", '{"function_name": "foo"}')
         assert "invalid arguments" in result.lower() or "Error" in result
 
-    def test_dispatch_mark_complete(self, mock_config):
+    @patch("decomp_agent.tools.build.check_match")
+    def test_dispatch_mark_complete_verified(self, mock_check, mock_config):
+        """mark_complete should verify via check_match and confirm a true match."""
+        from decomp_agent.tools.build import CompileResult, FunctionMatch
         from decomp_agent.tools.registry import build_registry
+
+        mock_check.return_value = CompileResult(
+            object_name="melee/test.c",
+            success=True,
+            functions=[FunctionMatch(name="my_func", fuzzy_match_percent=100.0, size=64)],
+        )
 
         registry = build_registry(mock_config)
         result = registry.dispatch(
@@ -144,7 +153,30 @@ class TestRegistry:
                 {"function_name": "my_func", "source_file": "melee/test.c"}
             ),
         )
-        assert "marked as complete" in result.lower()
+        assert "verified" in result.lower()
+        assert "confirmed match" in result.lower()
+
+    @patch("decomp_agent.tools.build.check_match")
+    def test_dispatch_mark_complete_rejects_non_match(self, mock_check, mock_config):
+        """mark_complete should reject functions that aren't truly matched."""
+        from decomp_agent.tools.build import CompileResult, FunctionMatch
+        from decomp_agent.tools.registry import build_registry
+
+        mock_check.return_value = CompileResult(
+            object_name="melee/test.c",
+            success=True,
+            functions=[FunctionMatch(name="my_func", fuzzy_match_percent=99.96, size=64)],
+        )
+
+        registry = build_registry(mock_config)
+        result = registry.dispatch(
+            "mark_complete",
+            json.dumps(
+                {"function_name": "my_func", "source_file": "melee/test.c"}
+            ),
+        )
+        assert "not matched" in result.lower()
+        assert "99.96" in result
 
     def test_dispatch_handler_exception_surfaced(self, mock_config):
         """Handler exceptions should be returned as error strings, not raised."""

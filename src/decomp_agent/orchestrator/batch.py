@@ -199,7 +199,7 @@ def run_batch(
             c.name,
             c.source_file,
             str(c.size),
-            f"{c.current_match_pct:.1f}%",
+            f"{min(c.current_match_pct, 99.99):.2f}%" if c.current_match_pct < 100.0 else "100%",
         )
 
     console.print(table)

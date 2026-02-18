@@ -246,7 +246,12 @@ def _handle_compile_and_check(
 
     lines = [f"Compilation successful. Match results for {params.source_file}:\n"]
     for func in result.functions:
-        status = "MATCH" if func.is_matched else f"{func.fuzzy_match_percent:.1f}%"
+        if func.is_matched:
+            status = "MATCH"
+        elif func.fuzzy_match_percent >= 99.95:
+            status = f"{min(func.fuzzy_match_percent, 99.99):.2f}%"
+        else:
+            status = f"{func.fuzzy_match_percent:.1f}%"
         lines.append(f"  {func.name}: {status} (size: {func.size})")
 
     if result.all_matched:
@@ -284,10 +289,29 @@ def _handle_run_permuter(params: RunPermuterParams, config: Config) -> str:
 
 
 def _handle_mark_complete(params: MarkCompleteParams, config: Config) -> str:
-    # Phase 5 stub — will integrate with orchestrator to record matched status
+    from decomp_agent.tools.build import check_match
+
+    result = check_match(params.source_file, config)
+    if not result.success:
+        return f"Error: compilation failed, cannot verify match: {result.error}"
+
+    func = result.get_function(params.function_name)
+    if func is None:
+        return (
+            f"Error: function {params.function_name} not found in "
+            f"compile output for {params.source_file}"
+        )
+
+    if not func.is_matched:
+        return (
+            f"Error: {params.function_name} is NOT matched "
+            f"(fuzzy_match_percent={func.fuzzy_match_percent:.4f}%). "
+            f"Keep iterating."
+        )
+
     return (
-        f"Function {params.function_name} in {params.source_file} "
-        f"marked as complete."
+        f"Verified: {params.function_name} in {params.source_file} "
+        f"is a confirmed MATCH."
     )
 
 
