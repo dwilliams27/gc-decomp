@@ -114,6 +114,7 @@ def _run_one(
             batch.failed += 1
             console.print(f"  [red]ERROR[/red]: {result.error}")
         else:
+            batch.failed += 1
             console.print(
                 f"  [yellow]{result.termination_reason}[/yellow] "
                 f"best={result.best_match_percent:.1f}% "
