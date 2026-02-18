@@ -451,7 +451,7 @@ class TestE2EBatchMixedOutcomes:
             patch("decomp_agent.agent.loop.OpenAI", side_effect=lambda: next(clients)),
             patch("decomp_agent.tools.build.run_in_repo", side_effect=mock_run),
         ):
-            batch_result = run_batch(config, engine, limit=3)
+            batch_result = run_batch(config, engine, limit=3, auto_approve=True)
 
         assert batch_result.attempted == 3
         assert batch_result.matched >= 1

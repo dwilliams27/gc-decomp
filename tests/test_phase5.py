@@ -19,6 +19,7 @@ from decomp_agent.melee.project import ObjectStatus
 from decomp_agent.models.db import (
     Attempt,
     Function,
+    get_candidate_batch,
     get_engine,
     get_next_candidate,
     record_attempt,
@@ -108,11 +109,16 @@ def _make_result(
 
 def _mock_config(max_attempts: int = 3, **overrides) -> MagicMock:
     """Create a mock Config with orchestration attributes set."""
+    from decomp_agent.cost import PricingConfig
+
     config = MagicMock()
     config.orchestration.max_attempts_per_function = max_attempts
     config.orchestration.max_function_size = overrides.get("max_function_size")
     config.orchestration.batch_size = overrides.get("batch_size", 50)
     config.orchestration.db_path = overrides.get("db_path", "decomp.db")
+    config.orchestration.default_workers = overrides.get("default_workers", 1)
+    config.orchestration.default_budget = overrides.get("default_budget", None)
+    config.pricing = PricingConfig()
     return config
 
 
@@ -466,7 +472,7 @@ class TestBatch:
 
         from decomp_agent.orchestrator.batch import run_batch
 
-        result = run_batch(_mock_config(), engine, limit=3)
+        result = run_batch(_mock_config(), engine, limit=3, auto_approve=True)
 
         assert result.attempted == 3
 
@@ -480,10 +486,9 @@ class TestBatch:
 
         from decomp_agent.orchestrator.batch import run_batch
 
-        result = run_batch(_mock_config(), engine, limit=50)
+        result = run_batch(_mock_config(), engine, limit=50, auto_approve=True)
 
-        # Only 1 function available but it goes back to pending after attempt,
-        # so it will be retried up to max_attempts times
+        # Only 1 function available; batch fetches candidates upfront now
         assert result.attempted >= 1
 
     @patch("decomp_agent.orchestrator.runner.run_agent")
@@ -499,7 +504,7 @@ class TestBatch:
 
         from decomp_agent.orchestrator.batch import run_batch
 
-        result = run_batch(_mock_config(), engine, limit=10)
+        result = run_batch(_mock_config(), engine, limit=10, auto_approve=True)
 
         assert result.matched == 3
         assert result.attempted == 3
@@ -517,7 +522,7 @@ class TestBatch:
 
         from decomp_agent.orchestrator.batch import run_batch
 
-        result = run_batch(_mock_config(), engine, limit=50, max_size=100)
+        result = run_batch(_mock_config(), engine, limit=50, max_size=100, auto_approve=True)
 
         assert result.attempted == 1  # only small fits
 
@@ -653,3 +658,101 @@ batch_size = 100
         assert str(config.orchestration.db_path) == "custom.db"
         assert config.orchestration.max_attempts_per_function == 5
         assert config.orchestration.batch_size == 100
+
+    def test_new_orchestration_defaults(self):
+        from decomp_agent.config import OrchestrationConfig
+
+        c = OrchestrationConfig()
+        assert c.default_workers == 1
+        assert c.default_budget is None
+
+    def test_config_includes_pricing(self):
+        from decomp_agent.config import Config
+
+        assert "pricing" in Config.model_fields
+
+
+# ---------------------------------------------------------------------------
+# get_candidate_batch tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetCandidateBatch:
+    def test_fetch_multiple_with_limit(self, session):
+        for i in range(10):
+            session.add(_make_function(
+                name=f"batch_{i}",
+                size=100 + i,
+                address=0x80000000 + i,
+            ))
+        session.commit()
+
+        results = get_candidate_batch(session, limit=5)
+        assert len(results) == 5
+
+    def test_respects_max_size(self, session):
+        session.add(_make_function(name="small", size=50))
+        session.add(_make_function(name="big", size=5000, address=0x80001000))
+        session.commit()
+
+        results = get_candidate_batch(session, max_size=100)
+        assert len(results) == 1
+        assert results[0].name == "small"
+
+    def test_library_filter(self, session):
+        session.add(_make_function(name="lb_func", library="lb", size=100))
+        session.add(_make_function(name="ft_func", library="ft", size=100, address=0x80001000))
+        session.add(_make_function(name="melee_func", library="melee", size=100, address=0x80002000))
+        session.commit()
+
+        results = get_candidate_batch(session, library="lb")
+        assert len(results) == 1
+        assert results[0].name == "lb_func"
+
+    def test_match_range_filter(self, session):
+        session.add(_make_function(name="low", current_match_pct=10.0, size=100))
+        session.add(_make_function(name="mid", current_match_pct=50.0, size=100, address=0x80001000))
+        session.add(_make_function(name="high", current_match_pct=90.0, size=100, address=0x80002000))
+        session.commit()
+
+        results = get_candidate_batch(session, min_match=40.0, max_match=60.0)
+        assert len(results) == 1
+        assert results[0].name == "mid"
+
+    def test_skips_non_pending(self, session):
+        session.add(_make_function(name="matched", status="matched", size=100))
+        session.add(_make_function(name="pending", status="pending", size=100, address=0x80001000))
+        session.commit()
+
+        results = get_candidate_batch(session)
+        assert len(results) == 1
+        assert results[0].name == "pending"
+
+    def test_skips_max_attempts(self, session):
+        session.add(_make_function(name="exhausted", attempts=3, size=100))
+        session.add(_make_function(name="fresh", attempts=0, size=100, address=0x80001000))
+        session.commit()
+
+        results = get_candidate_batch(session, max_attempts=3)
+        assert len(results) == 1
+        assert results[0].name == "fresh"
+
+    def test_smallest_first_strategy(self, session):
+        session.add(_make_function(name="big", size=500, address=0x80000000))
+        session.add(_make_function(name="small", size=50, address=0x80001000))
+        session.commit()
+
+        results = get_candidate_batch(session, strategy="smallest_first")
+        assert results[0].name == "small"
+
+    def test_best_match_first_strategy(self, session):
+        session.add(_make_function(name="low", size=100, current_match_pct=20.0))
+        session.add(_make_function(name="high", size=100, current_match_pct=90.0, address=0x80001000))
+        session.commit()
+
+        results = get_candidate_batch(session, strategy="best_match_first")
+        assert results[0].name == "high"
+
+    def test_empty_result(self, session):
+        results = get_candidate_batch(session)
+        assert results == []

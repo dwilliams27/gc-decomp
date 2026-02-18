@@ -61,7 +61,7 @@ def configure_logging(
         console_formatter = structlog.stdlib.ProcessorFormatter(
             processors=[
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                structlog.dev.ConsoleRenderer(),
+                structlog.dev.ConsoleRenderer(pad_level=False),
             ],
         )
 

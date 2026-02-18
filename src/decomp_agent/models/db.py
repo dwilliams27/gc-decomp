@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, event
+from sqlalchemy import func as sa_func
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 if TYPE_CHECKING:
@@ -55,6 +56,14 @@ def get_engine(db_path: Path | str) -> Engine:
     """Create a SQLite engine and ensure all tables exist."""
     url = f"sqlite:///{db_path}" if str(db_path) != ":memory:" else "sqlite://"
     engine = create_engine(url)
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+
     SQLModel.metadata.create_all(engine)
     return engine
 
@@ -159,3 +168,63 @@ def sync_from_report(session: Session, functions: list[FunctionInfo]) -> int:
             session.add(existing)
     session.commit()
     return inserted
+
+
+def get_candidate_batch(
+    session: Session,
+    *,
+    limit: int = 50,
+    max_size: int | None = None,
+    max_attempts: int = 3,
+    strategy: str = "smallest_first",
+    library: str | None = None,
+    min_match: float | None = None,
+    max_match: float | None = None,
+) -> list[Function]:
+    """Fetch multiple candidate functions matching the given filters.
+
+    Same filtering logic as get_next_candidate but returns N results
+    and supports additional library and match-percentage filters.
+    """
+    stmt = select(Function).where(
+        Function.status.in_(["pending"]),  # type: ignore[attr-defined]
+        Function.attempts < max_attempts,
+    )
+    if max_size is not None:
+        stmt = stmt.where(Function.size <= max_size)
+    if library is not None:
+        stmt = stmt.where(Function.library == library)
+    if min_match is not None:
+        stmt = stmt.where(Function.current_match_pct >= min_match)
+    if max_match is not None:
+        stmt = stmt.where(Function.current_match_pct <= max_match)
+
+    if strategy == "smallest_first":
+        stmt = stmt.order_by(Function.size, Function.address)  # type: ignore[arg-type]
+    elif strategy == "best_match_first":
+        stmt = stmt.order_by(Function.current_match_pct.desc(), Function.size)  # type: ignore[arg-type, attr-defined]
+    else:
+        stmt = stmt.order_by(Function.size, Function.address)  # type: ignore[arg-type]
+
+    stmt = stmt.limit(limit)
+    return list(session.exec(stmt).all())
+
+
+def get_historical_avg_tokens(
+    session: Session,
+    size_range: tuple[int, int],
+) -> float | None:
+    """Return average total_tokens for attempts on functions within a size range.
+
+    Returns None if no historical data is available.
+    """
+    low, high = size_range
+    stmt = (
+        select(sa_func.avg(Attempt.total_tokens))
+        .join(Function, Attempt.function_id == Function.id)  # type: ignore[arg-type]
+        .where(Function.size >= low, Function.size <= high)
+    )
+    result = session.exec(stmt).first()  # type: ignore[call-overload]
+    if result is None or result == 0:
+        return None
+    return float(result)

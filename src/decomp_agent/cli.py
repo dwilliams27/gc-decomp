@@ -105,9 +105,28 @@ def run(ctx: click.Context, name: str) -> None:
 @main.command()
 @click.option("--limit", default=None, type=int, help="Max functions to attempt")
 @click.option("--max-size", default=None, type=int, help="Max function size in bytes")
+@click.option("--budget", default=None, type=float, help="Max dollar budget for the batch")
+@click.option("--workers", default=None, type=int, help="Number of parallel workers")
+@click.option("--strategy", default=None, type=click.Choice(["smallest_first", "best_match_first"]), help="Candidate selection strategy")
+@click.option("--library", default=None, type=str, help="Filter to specific library (e.g. 'lb', 'ft')")
+@click.option("--min-match", default=None, type=float, help="Minimum current match percentage")
+@click.option("--max-match", default=None, type=float, help="Maximum current match percentage")
+@click.option("--yes", "auto_approve", is_flag=True, default=False, help="Skip confirmation prompt")
 @click.option("--log-file", default=None, type=click.Path(path_type=Path), help="Path for JSON-lines log file")
 @click.pass_context
-def batch(ctx: click.Context, limit: int | None, max_size: int | None, log_file: Path | None) -> None:
+def batch(
+    ctx: click.Context,
+    limit: int | None,
+    max_size: int | None,
+    budget: float | None,
+    workers: int | None,
+    strategy: str | None,
+    library: str | None,
+    min_match: float | None,
+    max_match: float | None,
+    auto_approve: bool,
+    log_file: Path | None,
+) -> None:
     """Run agent on candidates in batch mode."""
     if log_file is not None:
         from decomp_agent.logging import configure_logging
@@ -120,16 +139,35 @@ def batch(ctx: click.Context, limit: int | None, max_size: int | None, log_file:
 
     effective_limit = limit if limit is not None else config.orchestration.batch_size
     effective_max_size = max_size if max_size is not None else config.orchestration.max_function_size
+    effective_workers = workers if workers is not None else config.orchestration.default_workers
+    effective_budget = budget if budget is not None else config.orchestration.default_budget
+    effective_strategy = strategy or "smallest_first"
 
-    console.print(f"Starting batch run (limit={effective_limit}, max_size={effective_max_size})")
+    console.print(
+        f"Starting batch run (limit={effective_limit}, max_size={effective_max_size}, "
+        f"workers={effective_workers}, budget={effective_budget})"
+    )
 
-    result = run_batch(config, engine, limit=effective_limit, max_size=effective_max_size)
+    result = run_batch(
+        config,
+        engine,
+        limit=effective_limit,
+        max_size=effective_max_size,
+        workers=effective_workers,
+        budget=effective_budget,
+        strategy=effective_strategy,
+        library=library,
+        min_match=min_match,
+        max_match=max_match,
+        auto_approve=auto_approve,
+    )
 
     console.print(f"\n[bold]Batch complete:[/bold]")
     console.print(f"  Attempted: {result.attempted}")
     console.print(f"  Matched:   {result.matched}")
     console.print(f"  Failed:    {result.failed}")
     console.print(f"  Tokens:    {result.total_tokens:,}")
+    console.print(f"  Cost:      ${result.total_cost:.4f}")
     console.print(f"  Elapsed:   {result.elapsed:.1f}s")
 
 

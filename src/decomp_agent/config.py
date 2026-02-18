@@ -13,6 +13,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, model_validator
 
+from decomp_agent.cost import PricingConfig
+
 
 class MeleeConfig(BaseModel):
     repo_path: Path
@@ -81,6 +83,8 @@ class OrchestrationConfig(BaseModel):
     max_attempts_per_function: int = 3
     max_function_size: int | None = None
     batch_size: int = 50
+    default_workers: int = 1
+    default_budget: float | None = None
 
 
 class LoggingConfig(BaseModel):
@@ -96,6 +100,7 @@ class Config(BaseModel):
     ghidra: GhidraConfig = GhidraConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
     logging: LoggingConfig = LoggingConfig()
+    pricing: PricingConfig = PricingConfig()
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).parents[2] / "config" / "default.toml"
