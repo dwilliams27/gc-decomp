@@ -119,6 +119,8 @@ def _mock_config(max_attempts: int = 3, **overrides) -> MagicMock:
     config.orchestration.default_workers = overrides.get("default_workers", 1)
     config.orchestration.default_budget = overrides.get("default_budget", None)
     config.pricing = PricingConfig()
+    # Prevent _save_source from reading files during tests
+    config.melee.resolve_source_path.return_value.exists.return_value = False
     return config
 
 

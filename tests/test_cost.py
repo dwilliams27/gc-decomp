@@ -233,6 +233,8 @@ class TestBudgetEnforcement:
         config.orchestration.default_workers = 1
         config.orchestration.default_budget = None
         config.pricing = PricingConfig()
+        # Prevent _save_source from reading files during test
+        config.melee.resolve_source_path.return_value.exists.return_value = False
 
         result = run_batch(
             config, engine,
