@@ -15,6 +15,10 @@
 - `config/default.toml` — Default configuration
 - Melee repo (fork): `/Users/dwilliams/proj/melee-fork/melee`
 
+## Testing Standard
+
+- **Always validate new features by running them the way the agent would.** Don't just run unit tests — call the actual tool functions through `registry.dispatch()` (or the underlying function directly) with real data and verify the output is what you'd want the LLM to see. Unit tests with synthetic fixtures are not sufficient; real data from the melee build catches issues that synthetic data misses.
+
 ## Key Conventions
 
 - All paths to source files use the "object name" format from configure.py: `"melee/lb/lbcommand.c"`
