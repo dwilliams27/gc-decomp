@@ -10,7 +10,14 @@ import pytest
 
 from decomp_agent.tools.build import CompileResult, FunctionMatch
 from decomp_agent.tools.disasm import (
+    DiffAnalysis,
+    InstructionPair,
+    _align_and_classify,
+    _detect_register_swaps,
+    _extract_mnemonic,
+    _format_diff_analysis,
     _normalize_for_diff,
+    _parse_asm_to_tuples,
     check_match_via_disasm,
     compute_function_match,
     extract_all_functions,
@@ -57,6 +64,46 @@ COMPLETELY_DIFFERENT_ASM = """\
 /* 8016957C 000093F8  38 80 00 03 */\tli r4, 3
 /* 80169580 000093FC  38 A0 00 04 */\tli r5, 4
 .endfn fn_80169574
+"""
+
+# Register-only diff: same mnemonics, different register operands
+REGISTER_ONLY_TARGET = """\
+.fn fn_regtest, global
+/* 80001000 00000000  7C 08 02 A6 */\tmflr r0
+/* 80001004 00000004  90 01 00 04 */\tstw r0, 4(r1)
+/* 80001008 00000008  80 A3 00 00 */\tlwz r5, 0(r3)
+/* 8000100C 0000000C  80 63 00 04 */\tlwz r3, 4(r3)
+/* 80001010 00000010  90 A4 00 00 */\tstw r5, 0(r4)
+/* 80001014 00000014  4E 80 00 20 */\tblr
+.endfn fn_regtest
+"""
+
+REGISTER_ONLY_COMPILED = """\
+.fn fn_regtest, global
+/* 00000000 00000000  7C 08 02 A6 */\tmflr r0
+/* 00000004 00000004  90 01 00 04 */\tstw r0, 4(r1)
+/* 00000008 00000008  80 C3 00 00 */\tlwz r6, 0(r3)
+/* 0000000C 0000000C  80 A3 00 04 */\tlwz r5, 4(r3)
+/* 00000010 00000010  90 C4 00 00 */\tstw r6, 0(r4)
+/* 00000014 00000014  4E 80 00 20 */\tblr
+.endfn fn_regtest
+"""
+
+# Phantom diff: same hex bytes, different symbol names in instruction text
+PHANTOM_TARGET = """\
+.fn fn_phantom, global
+/* 80001000 00000000  3C 60 00 00 */\tlis r3, lbSnap_803BACC8@ha
+/* 80001004 00000004  38 63 00 00 */\taddi r3, r3, lbSnap_803BACC8@l
+/* 80001008 00000008  4E 80 00 20 */\tblr
+.endfn fn_phantom
+"""
+
+PHANTOM_COMPILED = """\
+.fn fn_phantom, global
+/* 00000000 00000000  3C 60 00 00 */\tlis r3, _SDA2_BASE_@ha
+/* 00000004 00000004  38 63 00 00 */\taddi r3, r3, _SDA2_BASE_@l
+/* 00000008 00000008  4E 80 00 20 */\tblr
+.endfn fn_phantom
 """
 
 
@@ -153,6 +200,8 @@ class TestComputeFunctionMatch:
         match = compute_function_match(target, target)
         assert match.fuzzy_match_percent == 100.0
         assert match.size == 16  # 4 instructions * 4 bytes
+        assert match.structural_match_percent == 100.0
+        assert match.mismatch_type == ""
 
     def test_partial_match(self):
         funcs_target = extract_all_functions(SAMPLE_ASM)
@@ -184,11 +233,15 @@ class TestComputeFunctionMatch:
         match = compute_function_match("", "")
         assert match.fuzzy_match_percent == 100.0
         assert match.size == 0
+        assert match.structural_match_percent == 100.0
+        assert match.mismatch_type == ""
 
     def test_one_empty(self):
         funcs = extract_all_functions(SAMPLE_ASM)
         match = compute_function_match(funcs["fn_80169574"], "")
         assert match.fuzzy_match_percent == 0.0
+        assert match.structural_match_percent == 0.0
+        assert match.mismatch_type == "structural"
 
     def test_second_function_exact_match(self):
         """fn_80169600 is identical in both samples."""
@@ -199,9 +252,278 @@ class TestComputeFunctionMatch:
         match = compute_function_match(target, compiled)
         assert match.fuzzy_match_percent == 100.0
 
+    def test_register_only_structural_match(self):
+        """Register-only diffs should have 100% structural match."""
+        funcs_t = extract_all_functions(REGISTER_ONLY_TARGET)
+        funcs_c = extract_all_functions(REGISTER_ONLY_COMPILED)
+        match = compute_function_match(
+            funcs_t["fn_regtest"], funcs_c["fn_regtest"]
+        )
+        assert match.fuzzy_match_percent < 100.0
+        assert match.structural_match_percent == 100.0
+        assert match.mismatch_type == "register_only"
+
+    def test_phantom_diff_exact_match(self):
+        """Phantom diffs (same bytes, different symbols) should be 100% byte match."""
+        funcs_t = extract_all_functions(PHANTOM_TARGET)
+        funcs_c = extract_all_functions(PHANTOM_COMPILED)
+        match = compute_function_match(
+            funcs_t["fn_phantom"], funcs_c["fn_phantom"]
+        )
+        assert match.fuzzy_match_percent == 100.0
+        assert match.structural_match_percent == 100.0
+
 
 # ---------------------------------------------------------------------------
-# Diff output tests
+# _extract_mnemonic tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractMnemonic:
+    def test_simple_mnemonic(self):
+        assert _extract_mnemonic("mflr r0") == "mflr"
+
+    def test_mnemonic_with_operands(self):
+        assert _extract_mnemonic("stw r0, 4(r1)") == "stw"
+
+    def test_mnemonic_with_symbol(self):
+        assert _extract_mnemonic("lis r3, lbSnap_803BACC8@ha") == "lis"
+
+    def test_empty_string(self):
+        assert _extract_mnemonic("") == ""
+
+    def test_whitespace_only(self):
+        assert _extract_mnemonic("   ") == ""
+
+    def test_blr(self):
+        assert _extract_mnemonic("blr") == "blr"
+
+
+# ---------------------------------------------------------------------------
+# _align_and_classify tests
+# ---------------------------------------------------------------------------
+
+
+class TestAlignAndClassify:
+    def test_identical(self):
+        parsed = _parse_asm_to_tuples(
+            extract_all_functions(SAMPLE_ASM)["fn_80169574"]
+        )
+        analysis = _align_and_classify(parsed, parsed)
+        assert analysis.total == 4
+        assert analysis.matching == 4
+        assert analysis.register_only == 0
+        assert analysis.opcode_diffs == 0
+        assert analysis.mismatch_category == ""
+
+    def test_register_only_diff(self):
+        target = _parse_asm_to_tuples(
+            extract_all_functions(REGISTER_ONLY_TARGET)["fn_regtest"]
+        )
+        compiled = _parse_asm_to_tuples(
+            extract_all_functions(REGISTER_ONLY_COMPILED)["fn_regtest"]
+        )
+        analysis = _align_and_classify(target, compiled)
+        assert analysis.matching == 3  # mflr, stw, blr match
+        assert analysis.register_only == 3  # lwz r5->r6, lwz r3->r5, stw r5->r6
+        assert analysis.opcode_diffs == 0
+        assert analysis.mismatch_category == "REGISTER ALLOCATION"
+
+    def test_phantom_diff(self):
+        target = _parse_asm_to_tuples(
+            extract_all_functions(PHANTOM_TARGET)["fn_phantom"]
+        )
+        compiled = _parse_asm_to_tuples(
+            extract_all_functions(PHANTOM_COMPILED)["fn_phantom"]
+        )
+        analysis = _align_and_classify(target, compiled)
+        assert analysis.matching == 3  # all bytes match
+        assert analysis.phantom == 2  # lis and addi have different symbol text
+        assert analysis.register_only == 0
+        assert analysis.mismatch_category == ""
+
+    def test_opcode_diff(self):
+        # Create a case where mnemonics differ
+        target = [("7C 08 02 A6", "mflr r0"), ("80 63 00 00", "lwz r3, 0(r3)")]
+        compiled = [("7C 08 02 A6", "mflr r0"), ("A0 63 00 00", "lhz r3, 0(r3)")]
+        analysis = _align_and_classify(target, compiled)
+        assert analysis.matching == 1
+        assert analysis.opcode_diffs == 1
+        assert analysis.mismatch_category == "WRONG INSTRUCTIONS"
+
+    def test_structural_diff_extra_target(self):
+        target = [
+            ("7C 08 02 A6", "mflr r0"),
+            ("90 01 00 04", "stw r0, 4(r1)"),
+            ("4E 80 00 20", "blr"),
+        ]
+        compiled = [
+            ("7C 08 02 A6", "mflr r0"),
+            ("4E 80 00 20", "blr"),
+        ]
+        analysis = _align_and_classify(target, compiled)
+        assert analysis.extra_target == 1
+        assert analysis.mismatch_category == "STRUCTURAL DIFFERENCE"
+
+    def test_structural_diff_extra_compiled(self):
+        target = [
+            ("7C 08 02 A6", "mflr r0"),
+            ("4E 80 00 20", "blr"),
+        ]
+        compiled = [
+            ("7C 08 02 A6", "mflr r0"),
+            ("90 01 00 04", "stw r0, 4(r1)"),
+            ("4E 80 00 20", "blr"),
+        ]
+        analysis = _align_and_classify(target, compiled)
+        assert analysis.extra_compiled == 1
+        assert analysis.mismatch_category == "STRUCTURAL DIFFERENCE"
+
+    def test_mixed_diff(self):
+        target = [
+            ("7C 08 02 A6", "mflr r0"),
+            ("80 A3 00 00", "lwz r5, 0(r3)"),  # register diff
+            ("80 63 00 00", "lwz r3, 0(r3)"),   # opcode diff
+        ]
+        compiled = [
+            ("7C 08 02 A6", "mflr r0"),
+            ("80 C3 00 00", "lwz r6, 0(r3)"),  # register diff
+            ("A0 63 00 00", "lhz r3, 0(r3)"),  # opcode diff
+        ]
+        analysis = _align_and_classify(target, compiled)
+        assert analysis.register_only >= 1
+        assert analysis.opcode_diffs >= 1
+        assert analysis.mismatch_category == "MIXED"
+
+
+# ---------------------------------------------------------------------------
+# _detect_register_swaps tests
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRegisterSwaps:
+    def test_simple_swap(self):
+        pairs = [
+            InstructionPair(
+                index=0,
+                target_hex="80 A3 00 00", compiled_hex="80 C3 00 00",
+                target_insn="lwz r5, 0(r3)", compiled_insn="lwz r6, 0(r3)",
+                mismatch_type="register",
+            ),
+            InstructionPair(
+                index=1,
+                target_hex="90 A4 00 00", compiled_hex="90 C4 00 00",
+                target_insn="stw r5, 0(r4)", compiled_insn="stw r6, 0(r4)",
+                mismatch_type="register",
+            ),
+        ]
+        swaps = _detect_register_swaps(pairs)
+        assert len(swaps) == 1
+        assert "target r5 -> compiled r6" in swaps[0]
+
+    def test_no_register_mismatches(self):
+        pairs = [
+            InstructionPair(
+                index=0,
+                target_hex="7C 08 02 A6", compiled_hex="7C 08 02 A6",
+                target_insn="mflr r0", compiled_insn="mflr r0",
+                mismatch_type="match",
+            ),
+        ]
+        swaps = _detect_register_swaps(pairs)
+        assert swaps == []
+
+    def test_multiple_swaps(self):
+        pairs = [
+            InstructionPair(
+                index=0,
+                target_hex="80 A3 00 00", compiled_hex="80 C3 00 00",
+                target_insn="lwz r5, 0(r3)", compiled_insn="lwz r6, 0(r3)",
+                mismatch_type="register",
+            ),
+            InstructionPair(
+                index=1,
+                target_hex="80 63 00 04", compiled_hex="80 A3 00 04",
+                target_insn="lwz r3, 4(r3)", compiled_insn="lwz r5, 4(r3)",
+                mismatch_type="register",
+            ),
+        ]
+        swaps = _detect_register_swaps(pairs)
+        assert len(swaps) == 2
+
+
+# ---------------------------------------------------------------------------
+# _format_diff_analysis tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDiffAnalysis:
+    def test_all_match(self):
+        analysis = DiffAnalysis(
+            total=4, matching=4, phantom=0, register_only=0,
+            opcode_diffs=0, extra_target=0, extra_compiled=0,
+        )
+        result = _format_diff_analysis(analysis)
+        assert result == "All instructions match."
+
+    def test_register_only_format(self):
+        target = _parse_asm_to_tuples(
+            extract_all_functions(REGISTER_ONLY_TARGET)["fn_regtest"]
+        )
+        compiled = _parse_asm_to_tuples(
+            extract_all_functions(REGISTER_ONLY_COMPILED)["fn_regtest"]
+        )
+        analysis = _align_and_classify(target, compiled)
+        result = _format_diff_analysis(analysis)
+
+        assert "=== Diff Summary ===" in result
+        assert "REGISTER ALLOCATION" in result
+        assert "all opcodes identical" in result
+        assert "=== Instruction Diff ===" in result
+        assert "[register]" in result
+        assert "[opcode]" not in result
+
+    def test_phantom_filtered(self):
+        target = _parse_asm_to_tuples(
+            extract_all_functions(PHANTOM_TARGET)["fn_phantom"]
+        )
+        compiled = _parse_asm_to_tuples(
+            extract_all_functions(PHANTOM_COMPILED)["fn_phantom"]
+        )
+        analysis = _align_and_classify(target, compiled)
+        result = _format_diff_analysis(analysis)
+        # All bytes match, so this should say all match
+        assert result == "All instructions match."
+
+    def test_context_collapsing(self):
+        """More than 3 consecutive matches should be collapsed."""
+        # 6 matching + 1 register diff
+        target = [
+            ("7C 08 02 A6", "mflr r0"),
+            ("90 01 00 04", "stw r0, 4(r1)"),
+            ("94 21 FF E0", "stwu r1, -0x20(r1)"),
+            ("BF 61 00 0C", "stmw r27, 0xc(r1)"),
+            ("80 A3 00 00", "lwz r5, 0(r3)"),  # will differ
+            ("38 60 00 00", "li r3, 0"),
+            ("4E 80 00 20", "blr"),
+        ]
+        compiled = [
+            ("7C 08 02 A6", "mflr r0"),
+            ("90 01 00 04", "stw r0, 4(r1)"),
+            ("94 21 FF E0", "stwu r1, -0x20(r1)"),
+            ("BF 61 00 0C", "stmw r27, 0xc(r1)"),
+            ("80 C3 00 00", "lwz r6, 0(r3)"),  # register diff
+            ("38 60 00 00", "li r3, 0"),
+            ("4E 80 00 20", "blr"),
+        ]
+        analysis = _align_and_classify(target, compiled)
+        result = _format_diff_analysis(analysis)
+        assert "... (" in result
+        assert "matching instructions" in result
+
+
+# ---------------------------------------------------------------------------
+# Diff output tests (old format preserved for _normalize_for_diff)
 # ---------------------------------------------------------------------------
 
 
@@ -223,33 +545,24 @@ class TestDiffOutput:
                 lineterm="",
             )
         )
-        # Identical → no diff output
+        # Identical -> no diff output
         assert diff == ""
 
-    def test_diff_format(self):
-        funcs_target = extract_all_functions(SAMPLE_ASM)
-        funcs_compiled = extract_all_functions(SAMPLE_ASM_MODIFIED)
-        target = funcs_target["fn_80169574"]
-        compiled = funcs_compiled["fn_80169574"]
-        target_lines = _normalize_for_diff(target)
-        compiled_lines = _normalize_for_diff(compiled)
-
-        import difflib
-
-        diff = "\n".join(
-            difflib.unified_diff(
-                target_lines,
-                compiled_lines,
-                fromfile="target",
-                tofile="compiled",
-                lineterm="",
-            )
+    def test_diff_analysis_format(self):
+        """New analysis-based diff format has summary and instruction diff."""
+        target = _parse_asm_to_tuples(
+            extract_all_functions(SAMPLE_ASM)["fn_80169574"]
         )
-        assert "--- target" in diff
-        assert "+++ compiled" in diff
-        # The changed instruction should appear
-        assert "-" in diff  # removed line
-        assert "+" in diff  # added line
+        compiled = _parse_asm_to_tuples(
+            extract_all_functions(SAMPLE_ASM_MODIFIED)["fn_80169574"]
+        )
+        analysis = _align_and_classify(target, compiled)
+        result = _format_diff_analysis(analysis)
+        # Should have the analysis header
+        assert "=== Diff Summary ===" in result
+        assert "=== Instruction Diff ===" in result
+        # The changed instruction (stwu) should appear
+        assert "stwu" in result
 
     def test_normalize_for_diff(self):
         funcs = extract_all_functions(SAMPLE_ASM)
@@ -335,6 +648,34 @@ class TestCheckMatchViaDisasm:
         fn2 = result.get_function("fn_80169600")
         assert fn2 is not None
         assert fn2.fuzzy_match_percent == 100.0
+
+    @patch("decomp_agent.tools.disasm.compile_object")
+    @patch("decomp_agent.tools.disasm.disassemble_object")
+    def test_structural_match_fields_propagated(self, mock_disasm, mock_compile, tmp_path):
+        """Verify structural_match_percent and mismatch_type are set in results."""
+        config = _make_config(tmp_path)
+        mock_compile.return_value = CompileResult(
+            object_name="melee/gm/gm_1601.c", success=True
+        )
+
+        target_dir = tmp_path / "build" / "GALE01" / "obj" / "melee" / "gm"
+        target_dir.mkdir(parents=True)
+        (target_dir / "gm_1601.o").touch()
+
+        compiled_dir = tmp_path / "build" / "GALE01" / "src" / "melee" / "gm"
+        compiled_dir.mkdir(parents=True)
+        (compiled_dir / "gm_1601.o").touch()
+
+        # Use register-only diff for target, same for compiled
+        mock_disasm.side_effect = [REGISTER_ONLY_TARGET, REGISTER_ONLY_COMPILED]
+
+        result = check_match_via_disasm("melee/gm/gm_1601.c", config)
+
+        assert result.success
+        fn = result.get_function("fn_regtest")
+        assert fn is not None
+        assert fn.structural_match_percent == 100.0
+        assert fn.mismatch_type == "register_only"
 
     @patch("decomp_agent.tools.disasm.compile_object")
     def test_compile_failure(self, mock_compile, tmp_path):

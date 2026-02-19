@@ -252,7 +252,32 @@ def _handle_compile_and_check(
             status = f"{min(func.fuzzy_match_percent, 99.99):.2f}%"
         else:
             status = f"{func.fuzzy_match_percent:.1f}%"
-        lines.append(f"  {func.name}: {status} (size: {func.size})")
+
+        # Annotate with structural match info for non-matched functions
+        annotation = ""
+        if not func.is_matched and func.mismatch_type:
+            if func.mismatch_type == "register_only":
+                annotation = (
+                    f" ({func.structural_match_percent:.0f}% structural"
+                    f" — register allocation only)"
+                )
+            elif func.mismatch_type == "opcode":
+                annotation = (
+                    f" ({func.structural_match_percent:.0f}% structural"
+                    f" — wrong instructions)"
+                )
+            elif func.mismatch_type == "structural":
+                annotation = (
+                    f" ({func.structural_match_percent:.0f}% structural"
+                    f" — structural difference)"
+                )
+            elif func.mismatch_type == "mixed":
+                annotation = (
+                    f" ({func.structural_match_percent:.0f}% structural"
+                    f" — mixed issues)"
+                )
+
+        lines.append(f"  {func.name}: {status}{annotation} (size: {func.size})")
 
     if result.all_matched:
         lines.append("\nAll functions match!")

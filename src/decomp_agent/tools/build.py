@@ -16,6 +16,8 @@ class FunctionMatch:
     name: str
     fuzzy_match_percent: float
     size: int
+    structural_match_percent: float = 0.0  # mnemonic-level match
+    mismatch_type: str = ""  # "register_only", "opcode", "structural", "mixed", ""
 
     @property
     def is_matched(self) -> bool:

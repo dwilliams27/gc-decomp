@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import re
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from decomp_agent.config import Config
@@ -25,6 +26,47 @@ _INSTRUCTION_RE = re.compile(
 # Pattern to match .fn directives
 _FN_DIRECTIVE_RE = re.compile(r"^\.fn\s+(\w+)")
 _ENDFN_RE = re.compile(r"^\s*\.endfn\s+(\w+)")
+
+# Pattern to extract register references from instruction operands
+_REGISTER_RE = re.compile(r"\b([rf]\d+)\b")
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses for diff analysis
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InstructionPair:
+    """A pair of aligned instructions from target and compiled."""
+
+    index: int
+    target_hex: str
+    compiled_hex: str
+    target_insn: str
+    compiled_insn: str
+    mismatch_type: str  # "match", "phantom", "register", "opcode", "extra_target", "extra_compiled"
+
+
+@dataclass
+class DiffAnalysis:
+    """Result of analyzing the diff between target and compiled assembly."""
+
+    total: int  # total instruction count (max of target, compiled)
+    matching: int  # byte-identical instructions
+    phantom: int  # same bytes, different symbol text
+    register_only: int  # same mnemonic, different register operands
+    opcode_diffs: int  # different mnemonics
+    extra_target: int  # instructions only in target
+    extra_compiled: int  # instructions only in compiled
+    pairs: list[InstructionPair] = field(default_factory=list)
+    register_swaps: list[str] = field(default_factory=list)
+    mismatch_category: str = ""  # "REGISTER ALLOCATION", "WRONG INSTRUCTIONS", "STRUCTURAL DIFFERENCE", "MIXED"
+
+
+# ---------------------------------------------------------------------------
+# Core disassembly functions
+# ---------------------------------------------------------------------------
 
 
 def disassemble_object(obj_path: Path, config: Config) -> str:
@@ -135,11 +177,335 @@ def parse_instruction(line: str) -> tuple[str, str] | None:
     return (hex_bytes, instruction)
 
 
+# ---------------------------------------------------------------------------
+# Diff analysis helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_mnemonic(insn_text: str) -> str:
+    """Get the opcode mnemonic from instruction text.
+
+    Examples:
+        "mflr r0" -> "mflr"
+        "stw r0, 4(r1)" -> "stw"
+        "lis r3, lbSnap_803BACC8@ha" -> "lis"
+        "" -> ""
+    """
+    parts = insn_text.strip().split(None, 1)
+    return parts[0] if parts else ""
+
+
+def _parse_asm_to_tuples(asm_text: str) -> list[tuple[str, str]]:
+    """Parse assembly text into list of (hex_bytes, instruction_text) tuples."""
+    result = []
+    for line in asm_text.splitlines():
+        parsed = parse_instruction(line)
+        if parsed:
+            result.append(parsed)
+    return result
+
+
+def _align_and_classify(
+    target_parsed: list[tuple[str, str]],
+    compiled_parsed: list[tuple[str, str]],
+) -> DiffAnalysis:
+    """Align target and compiled instructions using SequenceMatcher on hex bytes,
+    then classify each pair.
+
+    Returns a DiffAnalysis with all counts and classified pairs.
+    """
+    target_hex = [t[0] for t in target_parsed]
+    compiled_hex = [c[0] for c in compiled_parsed]
+
+    matcher = difflib.SequenceMatcher(None, target_hex, compiled_hex)
+    pairs: list[InstructionPair] = []
+
+    matching = 0
+    phantom = 0
+    register_only = 0
+    opcode_diffs = 0
+    extra_target = 0
+    extra_compiled = 0
+    idx = 0
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for ti, ci in zip(range(i1, i2), range(j1, j2)):
+                t_hex, t_insn = target_parsed[ti]
+                c_hex, c_insn = compiled_parsed[ci]
+                # Even "equal" hex may have different symbol text — that's a phantom
+                if t_insn != c_insn:
+                    mtype = "phantom"
+                    phantom += 1
+                else:
+                    mtype = "match"
+                matching += 1
+                pairs.append(InstructionPair(
+                    index=idx, target_hex=t_hex, compiled_hex=c_hex,
+                    target_insn=t_insn, compiled_insn=c_insn,
+                    mismatch_type=mtype,
+                ))
+                idx += 1
+        elif tag == "replace":
+            # Pair up replacements; handle length differences
+            t_range = list(range(i1, i2))
+            c_range = list(range(j1, j2))
+            paired = min(len(t_range), len(c_range))
+            for k in range(paired):
+                t_hex, t_insn = target_parsed[t_range[k]]
+                c_hex, c_insn = compiled_parsed[c_range[k]]
+                t_mnem = _extract_mnemonic(t_insn)
+                c_mnem = _extract_mnemonic(c_insn)
+                if t_hex == c_hex:
+                    # Same bytes but landed in a replace block — phantom
+                    mtype = "phantom"
+                    phantom += 1
+                    matching += 1
+                elif t_mnem == c_mnem:
+                    mtype = "register"
+                    register_only += 1
+                else:
+                    mtype = "opcode"
+                    opcode_diffs += 1
+                pairs.append(InstructionPair(
+                    index=idx, target_hex=t_hex, compiled_hex=c_hex,
+                    target_insn=t_insn, compiled_insn=c_insn,
+                    mismatch_type=mtype,
+                ))
+                idx += 1
+            # Remaining unpaired from target
+            for k in range(paired, len(t_range)):
+                t_hex, t_insn = target_parsed[t_range[k]]
+                extra_target += 1
+                pairs.append(InstructionPair(
+                    index=idx, target_hex=t_hex, compiled_hex="",
+                    target_insn=t_insn, compiled_insn="",
+                    mismatch_type="extra_target",
+                ))
+                idx += 1
+            # Remaining unpaired from compiled
+            for k in range(paired, len(c_range)):
+                c_hex, c_insn = compiled_parsed[c_range[k]]
+                extra_compiled += 1
+                pairs.append(InstructionPair(
+                    index=idx, target_hex="", compiled_hex=c_hex,
+                    target_insn="", compiled_insn=c_insn,
+                    mismatch_type="extra_compiled",
+                ))
+                idx += 1
+        elif tag == "delete":
+            for ti in range(i1, i2):
+                t_hex, t_insn = target_parsed[ti]
+                extra_target += 1
+                pairs.append(InstructionPair(
+                    index=idx, target_hex=t_hex, compiled_hex="",
+                    target_insn=t_insn, compiled_insn="",
+                    mismatch_type="extra_target",
+                ))
+                idx += 1
+        elif tag == "insert":
+            for ci in range(j1, j2):
+                c_hex, c_insn = compiled_parsed[ci]
+                extra_compiled += 1
+                pairs.append(InstructionPair(
+                    index=idx, target_hex="", compiled_hex=c_hex,
+                    target_insn="", compiled_insn=c_insn,
+                    mismatch_type="extra_compiled",
+                ))
+                idx += 1
+
+    total = max(len(target_parsed), len(compiled_parsed))
+
+    # Determine mismatch category
+    has_reg = register_only > 0
+    has_opcode = opcode_diffs > 0
+    has_structural = (extra_target + extra_compiled) > 0
+    diff_count = register_only + opcode_diffs + extra_target + extra_compiled
+
+    if diff_count == 0:
+        mismatch_category = ""
+    elif has_reg and not has_opcode and not has_structural:
+        mismatch_category = "REGISTER ALLOCATION"
+    elif has_opcode and not has_reg and not has_structural:
+        mismatch_category = "WRONG INSTRUCTIONS"
+    elif has_structural and not has_reg and not has_opcode:
+        mismatch_category = "STRUCTURAL DIFFERENCE"
+    else:
+        mismatch_category = "MIXED"
+
+    # Detect register swaps
+    register_swaps = _detect_register_swaps(pairs)
+
+    return DiffAnalysis(
+        total=total,
+        matching=matching,
+        phantom=phantom,
+        register_only=register_only,
+        opcode_diffs=opcode_diffs,
+        extra_target=extra_target,
+        extra_compiled=extra_compiled,
+        pairs=pairs,
+        register_swaps=register_swaps,
+        mismatch_category=mismatch_category,
+    )
+
+
+def _detect_register_swaps(pairs: list[InstructionPair]) -> list[str]:
+    """Parse register references from mismatched instruction pairs to find
+    consistent register mappings (target rX -> compiled rY).
+
+    Returns list of strings like "target r5 -> compiled r6".
+    """
+    # Collect register mapping evidence from register-only mismatches
+    mapping_evidence: dict[str, dict[str, int]] = {}  # target_reg -> {compiled_reg -> count}
+
+    for pair in pairs:
+        if pair.mismatch_type != "register":
+            continue
+
+        target_regs = _REGISTER_RE.findall(pair.target_insn)
+        compiled_regs = _REGISTER_RE.findall(pair.compiled_insn)
+
+        if len(target_regs) != len(compiled_regs):
+            continue
+
+        for t_reg, c_reg in zip(target_regs, compiled_regs):
+            if t_reg != c_reg:
+                if t_reg not in mapping_evidence:
+                    mapping_evidence[t_reg] = {}
+                mapping_evidence[t_reg][c_reg] = mapping_evidence[t_reg].get(c_reg, 0) + 1
+
+    # Filter to consistent mappings (one target reg -> one compiled reg)
+    swaps = []
+    for t_reg, c_regs in sorted(mapping_evidence.items()):
+        # Pick the most common mapping
+        best_c_reg = max(c_regs, key=c_regs.get)
+        total_evidence = sum(c_regs.values())
+        best_count = c_regs[best_c_reg]
+        # Only report if the mapping is consistent (>50% of evidence)
+        if best_count > total_evidence / 2:
+            swaps.append(f"target {t_reg} -> compiled {best_c_reg}")
+
+    return swaps
+
+
+def _format_diff_analysis(analysis: DiffAnalysis) -> str:
+    """Produce the final diff output string: summary header + instruction diff.
+
+    Summary is pure data extraction (counts, classification, register swaps).
+    No fix suggestions — those belong in the system prompt.
+    """
+    diff_count = (
+        analysis.register_only + analysis.opcode_diffs
+        + analysis.extra_target + analysis.extra_compiled
+    )
+    if diff_count == 0:
+        return "All instructions match."
+
+    lines: list[str] = []
+
+    # === Diff Summary ===
+    lines.append("=== Diff Summary ===")
+    diff_count = (
+        analysis.register_only + analysis.opcode_diffs
+        + analysis.extra_target + analysis.extra_compiled
+    )
+    lines.append(
+        f"{analysis.total} instructions total, "
+        f"{analysis.matching} match, {diff_count} differ"
+    )
+
+    if analysis.phantom > 0:
+        lines.append(f"({analysis.phantom} phantom diffs filtered — same bytes, different symbols)")
+
+    if analysis.mismatch_category:
+        cat_detail = f"Mismatch type: {analysis.mismatch_category}"
+        if analysis.mismatch_category == "REGISTER ALLOCATION":
+            cat_detail += " — all opcodes identical, only register operands differ"
+        elif analysis.mismatch_category == "MIXED":
+            parts = []
+            if analysis.register_only:
+                parts.append(f"{analysis.register_only} register")
+            if analysis.opcode_diffs:
+                parts.append(f"{analysis.opcode_diffs} opcode")
+            if analysis.extra_target or analysis.extra_compiled:
+                parts.append(
+                    f"{analysis.extra_target + analysis.extra_compiled} structural"
+                )
+            cat_detail += f" ({', '.join(parts)})"
+        lines.append(cat_detail)
+
+    if analysis.register_swaps:
+        lines.append("Register mapping: " + ", ".join(analysis.register_swaps))
+
+    lines.append("")
+
+    # === Instruction Diff ===
+    lines.append("=== Instruction Diff ===")
+
+    # Format pairs with context collapsing
+    consecutive_matches = 0
+    deferred_match_count = 0
+    i = 0
+    while i < len(analysis.pairs):
+        pair = analysis.pairs[i]
+
+        if pair.mismatch_type in ("match", "phantom"):
+            # Count consecutive matches
+            run_start = i
+            while (
+                i < len(analysis.pairs)
+                and analysis.pairs[i].mismatch_type in ("match", "phantom")
+            ):
+                i += 1
+            run_len = i - run_start
+
+            if run_len <= 3:
+                # Show all context lines
+                for j in range(run_start, i):
+                    p = analysis.pairs[j]
+                    lines.append(f"  {p.target_hex}  {p.target_insn}")
+            else:
+                # Show first, collapse middle, show last
+                p = analysis.pairs[run_start]
+                lines.append(f"  {p.target_hex}  {p.target_insn}")
+                collapsed = run_len - 2
+                lines.append(f"  ... ({collapsed} matching instructions) ...")
+                p = analysis.pairs[i - 1]
+                lines.append(f"  {p.target_hex}  {p.target_insn}")
+        elif pair.mismatch_type == "register":
+            lines.append(f"- {pair.target_hex}  {pair.target_insn}                [register]")
+            lines.append(f"+ {pair.compiled_hex}  {pair.compiled_insn}")
+            i += 1
+        elif pair.mismatch_type == "opcode":
+            lines.append(f"- {pair.target_hex}  {pair.target_insn}                [opcode]")
+            lines.append(f"+ {pair.compiled_hex}  {pair.compiled_insn}")
+            i += 1
+        elif pair.mismatch_type == "extra_target":
+            lines.append(f"- {pair.target_hex}  {pair.target_insn}                [missing]")
+            i += 1
+        elif pair.mismatch_type == "extra_compiled":
+            lines.append(f"+ {pair.compiled_hex}  {pair.compiled_insn}                [extra]")
+            i += 1
+        else:
+            i += 1
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Match computation
+# ---------------------------------------------------------------------------
+
+
 def compute_function_match(target_asm: str, compiled_asm: str) -> FunctionMatch:
     """Compare target and compiled assembly to compute match percentage.
 
-    - Exact match: all hex bytes match → 100.0%
-    - Fuzzy match: SequenceMatcher on individual machine code bytes → ratio * 100
+    - Exact match: all hex bytes match -> 100.0%
+    - Fuzzy match: SequenceMatcher on individual machine code bytes -> ratio * 100
+
+    Also computes structural_match_percent (mnemonic-level match) and
+    mismatch_type classification.
 
     Uses byte-level comparison (not instruction-string-level) so that a single
     register difference (e.g. r5 vs r6) only penalizes the 1-2 bytes that
@@ -150,46 +516,85 @@ def compute_function_match(target_asm: str, compiled_asm: str) -> FunctionMatch:
         compiled_asm: Compiled function assembly text.
 
     Returns:
-        FunctionMatch with name="", fuzzy_match_percent, and size.
+        FunctionMatch with name="", fuzzy_match_percent, size,
+        structural_match_percent, and mismatch_type.
     """
-    target_bytes = []
-    for line in target_asm.splitlines():
-        parsed = parse_instruction(line)
-        if parsed:
-            target_bytes.append(parsed[0])
+    target_parsed = _parse_asm_to_tuples(target_asm)
+    compiled_parsed = _parse_asm_to_tuples(compiled_asm)
 
-    compiled_bytes = []
-    for line in compiled_asm.splitlines():
-        parsed = parse_instruction(line)
-        if parsed:
-            compiled_bytes.append(parsed[0])
+    target_bytes = [t[0] for t in target_parsed]
+    compiled_bytes = [c[0] for c in compiled_parsed]
 
     size = len(target_bytes) * 4
 
     if not target_bytes and not compiled_bytes:
-        return FunctionMatch(name="", fuzzy_match_percent=100.0, size=0)
+        return FunctionMatch(
+            name="", fuzzy_match_percent=100.0, size=0,
+            structural_match_percent=100.0, mismatch_type="",
+        )
 
     if not target_bytes or not compiled_bytes:
-        return FunctionMatch(name="", fuzzy_match_percent=0.0, size=size)
+        return FunctionMatch(
+            name="", fuzzy_match_percent=0.0, size=size,
+            structural_match_percent=0.0, mismatch_type="structural",
+        )
 
     # Exact match: compare raw hex bytes per instruction
     if target_bytes == compiled_bytes:
-        return FunctionMatch(name="", fuzzy_match_percent=100.0, size=size)
+        return FunctionMatch(
+            name="", fuzzy_match_percent=100.0, size=size,
+            structural_match_percent=100.0, mismatch_type="",
+        )
 
     # Fuzzy match: compare at the individual byte level so a single register
     # difference only costs 1-2 bytes, not an entire instruction.
     target_flat = [b for insn in target_bytes for b in insn.split()]
     compiled_flat = [b for insn in compiled_bytes for b in insn.split()]
     ratio = difflib.SequenceMatcher(None, target_flat, compiled_flat).ratio()
+
+    # Structural match: compare mnemonic sequences
+    target_mnemonics = [_extract_mnemonic(t[1]) for t in target_parsed]
+    compiled_mnemonics = [_extract_mnemonic(c[1]) for c in compiled_parsed]
+
+    if target_mnemonics == compiled_mnemonics:
+        structural_pct = 100.0
+        mismatch_type = "register_only"
+    else:
+        structural_ratio = difflib.SequenceMatcher(
+            None, target_mnemonics, compiled_mnemonics
+        ).ratio()
+        structural_pct = round(structural_ratio * 100, 4)
+        # Classify based on the analysis
+        if structural_pct == 100.0:
+            mismatch_type = "register_only"
+        elif len(target_mnemonics) != len(compiled_mnemonics):
+            mismatch_type = "structural"
+        else:
+            mismatch_type = "opcode"
+
     return FunctionMatch(
-        name="", fuzzy_match_percent=round(ratio * 100, 4), size=size
+        name="",
+        fuzzy_match_percent=round(ratio * 100, 4),
+        size=size,
+        structural_match_percent=structural_pct,
+        mismatch_type=mismatch_type,
     )
+
+
+# ---------------------------------------------------------------------------
+# Diff output (public API)
+# ---------------------------------------------------------------------------
 
 
 def get_function_diff(
     function_name: str, source_file: str, config: Config
 ) -> str:
-    """Get a unified diff between target and compiled assembly for a function.
+    """Get an analyzed diff between target and compiled assembly for a function.
+
+    Returns a structured diff with:
+    - Summary header: instruction counts, mismatch classification, register swaps
+    - Instruction diff: aligned pairs with [register]/[opcode]/[missing]/[extra] tags
+    - Phantom diffs (same bytes, different symbols) are filtered out
 
     Args:
         function_name: Name of the function to diff.
@@ -197,7 +602,7 @@ def get_function_diff(
         config: Project configuration.
 
     Returns:
-        Unified diff string with --- target / +++ compiled headers.
+        Analyzed diff string with summary + instruction diff.
 
     Raises:
         RuntimeError: If compiled .o doesn't exist, or function not found.
@@ -242,18 +647,12 @@ def get_function_diff(
             f"Function '{function_name}' not found in compiled object {compiled_obj}"
         )
 
-    # Normalize: extract just instructions for diffing
-    target_lines = _normalize_for_diff(target_func)
-    compiled_lines = _normalize_for_diff(compiled_func)
+    # Parse and analyze
+    target_parsed = _parse_asm_to_tuples(target_func)
+    compiled_parsed = _parse_asm_to_tuples(compiled_func)
+    analysis = _align_and_classify(target_parsed, compiled_parsed)
 
-    diff = difflib.unified_diff(
-        target_lines,
-        compiled_lines,
-        fromfile="target",
-        tofile="compiled",
-        lineterm="",
-    )
-    return "\n".join(diff)
+    return _format_diff_analysis(analysis)
 
 
 def _normalize_for_diff(asm_text: str) -> list[str]:
@@ -265,6 +664,11 @@ def _normalize_for_diff(asm_text: str) -> list[str]:
             hex_b, insn = parsed
             lines.append(f"{hex_b}  {insn}")
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Integration: compile + disassemble + compare
+# ---------------------------------------------------------------------------
 
 
 def check_match_via_disasm(
@@ -335,6 +739,8 @@ def check_match_via_disasm(
                 name=func_name,
                 fuzzy_match_percent=match.fuzzy_match_percent,
                 size=match.size,
+                structural_match_percent=match.structural_match_percent,
+                mismatch_type=match.mismatch_type,
             )
         )
 
