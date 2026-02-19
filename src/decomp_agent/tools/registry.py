@@ -301,10 +301,10 @@ def _handle_run_permuter(params: RunPermuterParams, config: Config) -> str:
     if result.error:
         return f"Permuter error: {result.error}"
     if result.success:
-        return (
-            f"Permuter found a perfect match after {result.iterations} iterations!\n"
-            f"Best code:\n{result.best_code}"
-        )
+        msg = f"Permuter found a perfect match after {result.iterations} iterations!"
+        if result.best_code:
+            msg += f"\nBest code:\n{result.best_code}"
+        return msg
     if result.improved:
         return (
             f"Permuter improved score to {result.best_score} after "
