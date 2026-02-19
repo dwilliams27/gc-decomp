@@ -17,7 +17,9 @@ Setup (one-time):
 from __future__ import annotations
 
 import logging
+import re
 import shutil
+import struct
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +28,55 @@ from typing import Any
 from decomp_agent.config import Config
 
 log = logging.getLogger(__name__)
+
+# Regex to extract hex address from function names like "lbSnap_8001DF20" or "fn_80038700"
+_FUNC_ADDR_RE = re.compile(r"_([0-9A-Fa-f]{8})$")
+
+
+class _DOLAddressMap:
+    """Maps GameCube virtual addresses to flat file offsets.
+
+    When Ghidra imports a DOL without the GameCube Loader extension,
+    it loads the file as a flat binary starting at address 0. The DOL
+    header contains section tables that map file offsets to virtual
+    addresses (0x8000xxxx). This class parses that header and provides
+    the reverse mapping so we can look up functions by their virtual
+    address in the flat-loaded project.
+    """
+
+    def __init__(self, dol_path: Path) -> None:
+        with open(dol_path, "rb") as f:
+            header = f.read(0xE4)
+
+        if len(header) < 0xE4:
+            raise RuntimeError(f"DOL file too small: {dol_path}")
+
+        # Parse section tables: 7 text + 11 data = 18 sections
+        text_offsets = struct.unpack(">7I", header[0x00:0x1C])
+        data_offsets = struct.unpack(">11I", header[0x1C:0x48])
+        text_vaddrs = struct.unpack(">7I", header[0x48:0x64])
+        data_vaddrs = struct.unpack(">11I", header[0x64:0x90])
+        text_sizes = struct.unpack(">7I", header[0x90:0xAC])
+        data_sizes = struct.unpack(">11I", header[0xAC:0xD8])
+
+        # Build list of (vaddr_start, vaddr_end, file_offset) for non-empty sections
+        self._sections: list[tuple[int, int, int]] = []
+        for off, va, sz in zip(text_offsets, text_vaddrs, text_sizes):
+            if sz > 0:
+                self._sections.append((va, va + sz, off))
+        for off, va, sz in zip(data_offsets, data_vaddrs, data_sizes):
+            if sz > 0:
+                self._sections.append((va, va + sz, off))
+
+    def vaddr_to_flat(self, vaddr: int) -> int | None:
+        """Convert a virtual address to the flat file offset used by Ghidra.
+
+        Returns None if the address doesn't fall within any DOL section.
+        """
+        for start, end, file_offset in self._sections:
+            if start <= vaddr < end:
+                return file_offset + (vaddr - start)
+        return None
 
 # Module-level singleton — JVM startup is expensive (~10-30s), so we
 # initialize once and reuse across all function decompilations.
@@ -70,6 +121,8 @@ class _GhidraSession:
     """
 
     def __init__(self, config: Config) -> None:
+        import os
+
         ghidra_cfg = config.ghidra
 
         if ghidra_cfg.project_path is None:
@@ -83,6 +136,22 @@ class _GhidraSession:
             raise RuntimeError(
                 f"Ghidra project directory not found: {project_path}"
             )
+
+        # Set GHIDRA_INSTALL_DIR for pyghidra if not already set
+        if "GHIDRA_INSTALL_DIR" not in os.environ:
+            install_dir = ghidra_cfg.install_dir
+            if install_dir is None:
+                # Try common Homebrew location
+                homebrew_path = Path("/opt/homebrew/opt/ghidra/libexec")
+                if homebrew_path.is_dir():
+                    install_dir = homebrew_path
+                else:
+                    raise RuntimeError(
+                        "GHIDRA_INSTALL_DIR not set and ghidra.install_dir "
+                        "not configured. Set one of them to the Ghidra "
+                        "installation directory."
+                    )
+            os.environ["GHIDRA_INSTALL_DIR"] = str(install_dir)
 
         try:
             import pyghidra
@@ -112,6 +181,30 @@ class _GhidraSession:
         self._ifc = DecompInterface()
         self._ifc.setOptions(DecompileOptions())
         self._ifc.openProgram(self._program)
+
+        # Build DOL address map for vaddr → flat offset translation.
+        # Without the GameCube Loader extension, Ghidra imports the DOL
+        # as a flat binary at address 0, so virtual addresses (0x8000xxxx)
+        # need to be translated to flat file offsets.
+        dol_path = ghidra_cfg.dol_path
+        if dol_path is None:
+            dol_path = (
+                config.melee.repo_path
+                / "orig"
+                / config.melee.version
+                / "sys"
+                / "main.dol"
+            )
+        if dol_path.exists():
+            self._addr_map = _DOLAddressMap(dol_path)
+            log.info("DOL address map loaded from %s", dol_path)
+        else:
+            self._addr_map = None
+            log.warning(
+                "DOL file not found at %s — virtual address lookup disabled",
+                dol_path,
+            )
+
         log.info("Ghidra session ready.")
 
     def get_function_by_name(self, name: str) -> Any:
@@ -125,10 +218,29 @@ class _GhidraSession:
         return self._program.getFunctionManager().getFunctionAt(addr)
 
     def get_function_by_address(self, address: int) -> Any:
-        """Look up a Ghidra Function object by entry-point address."""
+        """Look up a Ghidra Function by entry-point virtual address.
+
+        Handles the address translation needed when the DOL was imported
+        without the GameCube Loader (flat binary at address 0). Tries:
+        1. Direct lookup at the given address (works if GameCube Loader was used)
+        2. Translated flat offset via DOL address map
+        """
         addr_space = self._program.getAddressFactory().getDefaultAddressSpace()
+
+        # Try direct lookup first (works if DOL was loaded with correct base)
         addr = addr_space.getAddress(address)
-        return self._program.getFunctionManager().getFunctionAt(addr)
+        func = self._program.getFunctionManager().getFunctionAt(addr)
+        if func is not None:
+            return func
+
+        # Translate virtual address to flat file offset
+        if self._addr_map is not None:
+            flat = self._addr_map.vaddr_to_flat(address)
+            if flat is not None:
+                addr = addr_space.getAddress(flat)
+                return self._program.getFunctionManager().getFunctionAt(addr)
+
+        return None
 
     def decompile(self, func: Any) -> GhidraResult:
         """Decompile a Ghidra Function and return structured results."""
@@ -180,6 +292,17 @@ class _GhidraSession:
         self._project_cm.__exit__(None, None, None)
 
 
+def _extract_address(function_name: str) -> int | None:
+    """Extract the hex address from a function name like 'lbSnap_8001DF20'.
+
+    Returns the address as an integer, or None if no address found.
+    """
+    m = _FUNC_ADDR_RE.search(function_name)
+    if m is None:
+        return None
+    return int(m.group(1), 16)
+
+
 def _get_session(config: Config) -> _GhidraSession:
     """Get or create the module-level Ghidra session singleton."""
     global _session
@@ -218,6 +341,15 @@ def get_ghidra_decompilation(
         return GhidraResult(function_name=function_name, error=str(e))
 
     func = session.get_function_by_name(function_name)
+
+    # Fallback: extract address from function name (e.g. "lbSnap_8001DF20")
+    # and look up by address. Ghidra projects without symbol imports only
+    # have auto-generated names like "FUN_8001df20".
+    if func is None:
+        addr = _extract_address(function_name)
+        if addr is not None:
+            func = session.get_function_by_address(addr)
+
     if func is None:
         return GhidraResult(
             function_name=function_name,
@@ -267,7 +399,7 @@ def setup_ghidra_project(config: Config) -> bool:
     analyze = shutil.which("analyzeHeadless")
     if analyze is None:
         # Try common Homebrew location
-        homebrew_path = Path("/opt/homebrew/opt/ghidra/lib/ghidra/support/analyzeHeadless")
+        homebrew_path = Path("/opt/homebrew/opt/ghidra/libexec/support/analyzeHeadless")
         if homebrew_path.exists():
             analyze = str(homebrew_path)
         else:
@@ -277,7 +409,7 @@ def setup_ghidra_project(config: Config) -> bool:
     # Determine DOL path
     dol_path = ghidra_cfg.dol_path
     if dol_path is None:
-        dol_path = config.melee.repo_path / "orig" / config.melee.version / "main.dol"
+        dol_path = config.melee.repo_path / "orig" / config.melee.version / "sys" / "main.dol"
     if not dol_path.exists():
         log.error("DOL file not found: %s", dol_path)
         return False
@@ -293,7 +425,7 @@ def setup_ghidra_project(config: Config) -> bool:
         str(project_path),
         ghidra_cfg.project_name,
         "-import", str(dol_path),
-        "-processor", "PowerPC:BE:32:Gekko_Broadway:default",
+        "-processor", "PowerPC:BE:32:default",
         "-overwrite",
     ]
 

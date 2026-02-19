@@ -92,6 +92,15 @@ def _target_function_matched(
     return False
 
 
+def _tokens_bar(used: int, budget: int, width: int = 10) -> str:
+    """Render a small visual bar showing token budget consumption."""
+    if budget <= 0:
+        return "[" + "░" * width + "]"
+    ratio = min(used / budget, 1.0)
+    filled = round(ratio * width)
+    return "[" + "█" * filled + "░" * (width - filled) + "]"
+
+
 def run_agent(
     function_name: str,
     source_file: str,
@@ -123,7 +132,11 @@ def run_agent(
 
     result = AgentResult()
     max_iterations = config.agent.max_iterations
+    token_budget = config.agent.max_tokens_per_attempt
     previous_response_id: str | None = None
+
+    def bar() -> str:
+        return _tokens_bar(result.total_tokens, token_budget)
 
     # First turn: user message with the assignment
     current_input: str | list[dict] = (
@@ -134,7 +147,7 @@ def run_agent(
     for iteration in range(1, max_iterations + 1):
         result.iterations = iteration
         bound_log.info(
-            "iteration_start",
+            f"{bar()} iteration_start",
             iteration=iteration,
             max=max_iterations,
             match=result.best_match_percent,
@@ -154,7 +167,7 @@ def run_agent(
         try:
             response = client.responses.create(**kwargs)
         except Exception as e:
-            bound_log.error("api_error", match=result.best_match_percent, error=str(e))
+            bound_log.error(f"{bar()} api_error", match=result.best_match_percent, error=str(e))
             result.error = str(e)
             result.termination_reason = "api_error"
             break
@@ -178,14 +191,14 @@ def run_agent(
 
         # Check if model stopped (no tool calls)
         if not function_calls:
-            bound_log.info("model_stopped", match=result.best_match_percent)
+            bound_log.info(f"{bar()} model_stopped", match=result.best_match_percent)
             result.termination_reason = "model_stopped"
             break
 
         # Dispatch each function call
         tool_outputs: list[dict] = []
         for fc in function_calls:
-            bound_log.info("tool_call", tool=fc.name, match=result.best_match_percent)
+            bound_log.info(f"{bar()} tool_call", tool=fc.name, match=result.best_match_percent)
             tool_result = registry.dispatch(fc.name, fc.arguments)
 
             tool_outputs.append({
@@ -201,7 +214,7 @@ def run_agent(
             )
             if result.best_match_percent > previous_best:
                 bound_log.info(
-                    "match_improved",
+                    f"{bar()} match_improved",
                     previous=previous_best,
                     new=result.best_match_percent,
                 )
@@ -210,13 +223,13 @@ def run_agent(
             if _target_function_matched(fc.name, tool_result, function_name):
                 result.matched = True
                 result.termination_reason = "matched"
-                bound_log.info("function_matched", trigger="compile_and_check")
+                bound_log.info(f"{bar()} function_matched", trigger="compile_and_check")
 
             # Also accept explicit mark_complete — but only if verified
             if fc.name == "mark_complete" and "confirmed MATCH" in tool_result:
                 result.matched = True
                 result.termination_reason = "matched"
-                bound_log.info("function_matched", trigger="mark_complete")
+                bound_log.info(f"{bar()} function_matched", trigger="mark_complete")
 
         if result.matched:
             break
@@ -227,10 +240,10 @@ def run_agent(
         # Check token budget
         if result.total_tokens >= config.agent.max_tokens_per_attempt:
             bound_log.warning(
-                "token_budget_exhausted",
+                f"{bar()} token_budget_exhausted",
                 match=result.best_match_percent,
                 used=result.total_tokens,
-                budget=config.agent.max_tokens_per_attempt,
+                budget=token_budget,
             )
             result.termination_reason = "token_budget"
             break
@@ -251,7 +264,7 @@ def run_agent(
     result.elapsed_seconds = time.monotonic() - start_time
 
     bound_log.info(
-        "agent_finished",
+        f"{bar()} agent_finished",
         reason=result.termination_reason,
         matched=result.matched,
         best_match=result.best_match_percent,

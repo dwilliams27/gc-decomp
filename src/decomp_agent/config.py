@@ -90,6 +90,7 @@ class DockerConfig(BaseModel):
 
 class GhidraConfig(BaseModel):
     enabled: bool = False
+    install_dir: Path | None = None  # Ghidra installation directory
     project_path: Path | None = None  # Directory containing the .gpr file
     project_name: str = "MeleeProject"
     program_path: str = "/main.dol"  # Path within the Ghidra project
