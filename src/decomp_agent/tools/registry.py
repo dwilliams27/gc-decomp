@@ -51,6 +51,7 @@ class ToolRegistry:
     def __init__(self, config: Config) -> None:
         self.config = config
         self._handlers: dict[str, tuple[type, Callable[..., str]]] = {}
+        self.log_prefix: str = ""
 
     def register(
         self,
@@ -130,14 +131,14 @@ class ToolRegistry:
             result = handler(params, self.config)
             elapsed_ms = (time.monotonic() - t0) * 1000
             log.info(
-                "tool_dispatch",
+                f"{self.log_prefix}tool_dispatch",
                 tool=tool_name,
                 elapsed_ms=round(elapsed_ms, 1),
                 result_length=len(result),
             )
             return result
         except Exception as e:
-            log.exception("tool_error", tool=tool_name, error=str(e))
+            log.exception(f"{self.log_prefix}tool_error", tool=tool_name, error=str(e))
             return f"Error in {tool_name}: {type(e).__name__}: {e}"
 
 

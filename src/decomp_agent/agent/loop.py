@@ -196,6 +196,7 @@ def run_agent(
             break
 
         # Dispatch each function call
+        registry.log_prefix = f"{bar()} "
         tool_outputs: list[dict] = []
         for fc in function_calls:
             bound_log.info(f"{bar()} tool_call", tool=fc.name, match=result.best_match_percent)
