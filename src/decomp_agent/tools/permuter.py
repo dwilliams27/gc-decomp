@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -59,15 +60,6 @@ def _find_strip_other_fns() -> Path | None:
         return None
     strip = permuter.parent / "strip_other_fns.py"
     return strip if strip.exists() else None
-
-
-def _get_target_object(source_file: str, config: Config) -> Path | None:
-    """Get the path to the target .o file (from the original DOL)."""
-    obj_name = source_file.replace(".c", ".o")
-    target_o = config.melee.build_path / "obj" / obj_name
-    if target_o.exists():
-        return target_o
-    return None
 
 
 def _get_binutils(config: Config) -> Path | None:
@@ -179,28 +171,83 @@ def _extract_mwcc_command(source_file: str, config: Config) -> str | None:
     return f'wine "{sjiswrap}" "{compiler}" {cflags} -c'
 
 
+def _extract_cpp_flags(mwcc_cmd: str) -> list[str]:
+    """Extract include paths and defines from MWCC command for cpp.
+
+    MWCC uses -i for includes, -D for defines. We convert -i to -I for cpp.
+    """
+    parts = shlex.split(mwcc_cmd)
+    cpp_flags: list[str] = []
+    i = 0
+    while i < len(parts):
+        p = parts[i]
+        if p.startswith("-D"):
+            cpp_flags.append(p)
+        elif p == "-i":  # Exactly -i, not -inline etc.
+            if i + 1 < len(parts):
+                cpp_flags.extend(["-I", parts[i + 1]])
+                i += 1
+        i += 1
+    return cpp_flags
+
+
+def _preprocess_source(
+    stripped_path: Path, config: Config, source_file: str
+) -> str:
+    """Preprocess stripped source into a self-contained C file for the permuter.
+
+    The permuter's C parser (pycparser) needs all types to be defined.
+    We run the C preprocessor to expand all #include directives, producing
+    a file with all types inline. We also stub out GCC extensions that
+    pycparser can't handle (__attribute__, _Static_assert, etc.).
+    """
+    mwcc_cmd = _extract_mwcc_command(source_file, config)
+    if mwcc_cmd is None:
+        raise RuntimeError(
+            f"Could not extract MWCC command for {source_file} from build.ninja"
+        )
+
+    cpp_flags = _extract_cpp_flags(mwcc_cmd)
+
+    cpp_cmd = [
+        "cc", "-E", "-P", "-nostdinc", "-undef",
+        "-DPERMUTER",
+        # Stub out GCC extensions that pycparser can't handle
+        "-D_Static_assert(x, y)=",
+        "-D__attribute__(x)=",
+        "-DGLOBAL_ASM(...)=",
+        "-D__asm__(...)=",
+    ] + cpp_flags + [str(stripped_path)]
+
+    result = subprocess.run(
+        cpp_cmd,
+        capture_output=True,
+        text=True,
+        cwd=str(config.melee.repo_path),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to preprocess {stripped_path}: {result.stderr[:500]}"
+        )
+    return result.stdout
+
+
 def _build_compile_sh(
-    function_name: str,
     source_file: str,
     config: Config,
-    work_dir: Path,
-    splice_helper: Path,
-    stripped_src_name: str,
 ) -> str:
     """Generate compile.sh for the permuter.
 
-    The permuter invokes: ./compile.sh base.c -o output.o
+    The permuter invokes: ./compile.sh <permuted.c> -o <output.o>
 
-    Strategy:
-    1. Copy pre-stripped source (with only target function) into repo src dir
-    2. Splice modified function code from base.c into the copy
-    3. Compile with MWCC (standalone, not ninja)
-    4. Move output .o to requested location
-    5. Clean up the temp source file
+    The permuted file is a preprocessed C file with all types inline and
+    the function modified. We copy it into the repo's src/ directory
+    (needed for MWCC's -cwd source) and compile directly.
     """
     repo = config.melee.repo_path
     src_dir = Path(source_file).parent  # e.g. "melee/lb"
-    temp_src = f"src/{src_dir}/_permuter_{Path(source_file).stem}.c"
+    temp_src_stem = f"_permuter_{Path(source_file).stem}"
+    temp_src = f"src/{src_dir}/{temp_src_stem}.c"
 
     # Extract MWCC command from build.ninja (returns a raw shell string)
     mwcc_line = _extract_mwcc_command(source_file, config)
@@ -211,81 +258,27 @@ def _build_compile_sh(
 
     return f"""#!/bin/bash
 set -e
+
 INPUT="$1"
 shift; shift
 OUTPUT="$1"
 
 REPO="{repo}"
 TEMP_SRC="$REPO/{temp_src}"
-STRIPPED="{work_dir / stripped_src_name}"
 
-# Copy stripped source (single function + headers) into repo
-cp "$STRIPPED" "$TEMP_SRC"
+# Clean up temp source on exit (even on failure)
+trap 'rm -f "$TEMP_SRC"' EXIT
 
-# Splice modified function into the copy
-python3 "{splice_helper}" "$INPUT" "$TEMP_SRC" "{function_name}"
+# Copy the permuted (preprocessed) source into repo for MWCC
+cp "$INPUT" "$TEMP_SRC"
 
-# Compile with MWCC
-cd "$REPO" && {mwcc_line} "{temp_src}" -o "$OUTPUT" 2>/dev/null
-
-# Clean up
-rm -f "$TEMP_SRC"
+# MWCC's -o flag takes a DIRECTORY, not a file path.
+# It outputs <input_stem>.o into that directory.
+OUTDIR=$(mktemp -d)
+cd "$REPO" && {mwcc_line} "{temp_src}" -o "$OUTDIR"
+mv "$OUTDIR/{temp_src_stem}.o" "$OUTPUT"
+rm -rf "$OUTDIR"
 """
-
-
-# Standalone splice helper written to work_dir/_splice.py
-_SPLICE_HELPER = r'''"""Splice a modified function into a source file."""
-import re
-import sys
-
-
-def replace_function(source, func_name, new_code):
-    pattern = (
-        r"(?:^|\n)"
-        + r"([a-zA-Z_][\w\s*]*?"
-        + re.escape(func_name)
-        + r"\s*\([^)]*\)\s*)\{"
-    )
-    m = re.search(pattern, source)
-    if not m:
-        return None
-
-    start = m.start()
-    if source[start] == "\n":
-        start += 1
-
-    brace_start = source.index("{", m.end() - 1)
-    depth = 0
-    pos = brace_start
-    while pos < len(source):
-        if source[pos] == "{":
-            depth += 1
-        elif source[pos] == "}":
-            depth -= 1
-            if depth == 0:
-                break
-        pos += 1
-    end = pos + 1
-
-    return source[:start] + new_code + source[end:]
-
-
-if __name__ == "__main__":
-    input_c, src_path, func_name = sys.argv[1], sys.argv[2], sys.argv[3]
-
-    with open(input_c) as f:
-        new_func = f.read()
-    with open(src_path) as f:
-        source = f.read()
-
-    updated = replace_function(source, func_name, new_func)
-    if updated is None:
-        print(f"Error: {func_name} not found in {src_path}", file=sys.stderr)
-        sys.exit(1)
-
-    with open(src_path, "w") as f:
-        f.write(updated)
-'''
 
 
 def run_permuter(
@@ -297,8 +290,13 @@ def run_permuter(
 ) -> PermuterResult:
     """Run decomp-permuter on a function to find matching permutations.
 
-    Sets up a permuter scratch directory with single-function .o files,
-    then runs the permuter with --stop-on-zero.
+    Sets up a permuter scratch directory with:
+    - base.c: preprocessed source (all types + target function)
+    - target.o: assembled from DTK asm
+    - compile.sh: copies permuted source into repo, compiles with MWCC
+    - settings.toml: permuter config
+
+    Then runs the permuter with --stop-on-zero.
     """
     permuter_path = _find_permuter()
     if permuter_path is None:
@@ -322,7 +320,7 @@ def run_permuter(
             error="binutils not found. Run: ninja build/binutils",
         )
 
-    # Get current function source
+    # Get current function source (validates the function exists)
     src_path = config.melee.resolve_source_path(source_file)
     if not src_path.exists():
         return PermuterResult(
@@ -351,20 +349,8 @@ def run_permuter(
     with tempfile.TemporaryDirectory(prefix="permuter_") as tmpdir:
         work_dir = Path(tmpdir)
 
-        # 1. Write base.c (single function code)
-        (work_dir / "base.c").write_text(func_code, encoding="utf-8")
-
-        # 2. Assemble target asm → single-function target.o
-        target_o = work_dir / "target.o"
-        if not _assemble_target(target_asm, function_name, target_o, binutils):
-            return PermuterResult(
-                function_name=function_name,
-                error="Failed to assemble target assembly into .o file",
-            )
-
-        # 3. Create stripped source (headers + only target function)
-        stripped_name = f"_stripped_{Path(source_file).stem}.c"
-        stripped_path = work_dir / stripped_name
+        # 1. Create stripped source (headers + only target function)
+        stripped_path = work_dir / f"_stripped_{Path(source_file).stem}.c"
         shutil.copy2(src_path, stripped_path)
         result = subprocess.run(
             ["python3", str(strip_fns), str(stripped_path), function_name],
@@ -377,16 +363,29 @@ def run_permuter(
                 error=f"strip_other_fns.py failed: {result.stderr}",
             )
 
-        # 4. Write splice helper
-        splice_helper = work_dir / "_splice.py"
-        splice_helper.write_text(_SPLICE_HELPER, encoding="utf-8")
-
-        # 5. Write compile.sh
+        # 2. Preprocess stripped source into base.c
+        #    The permuter's C parser (pycparser) needs all types defined.
         try:
-            compile_script = _build_compile_sh(
-                function_name, source_file, config, work_dir,
-                splice_helper, stripped_name,
+            preprocessed = _preprocess_source(
+                stripped_path, config, source_file
             )
+        except RuntimeError as e:
+            return PermuterResult(
+                function_name=function_name, error=str(e)
+            )
+        (work_dir / "base.c").write_text(preprocessed, encoding="utf-8")
+
+        # 3. Assemble target asm -> single-function target.o
+        target_o = work_dir / "target.o"
+        if not _assemble_target(target_asm, function_name, target_o, binutils):
+            return PermuterResult(
+                function_name=function_name,
+                error="Failed to assemble target assembly into .o file",
+            )
+
+        # 4. Write compile.sh
+        try:
+            compile_script = _build_compile_sh(source_file, config)
         except RuntimeError as e:
             return PermuterResult(
                 function_name=function_name, error=str(e)
@@ -395,12 +394,14 @@ def run_permuter(
         compile_sh.write_text(compile_script, encoding="utf-8")
         compile_sh.chmod(0o755)
 
-        # 6. Write settings.toml
+        # 5. Write settings.toml (permuter reads compiler_type, not compiler)
         (work_dir / "settings.toml").write_text(
-            'compiler = "mwcc"\n', encoding="utf-8"
+            f'func_name = "{function_name}"\n'
+            f'compiler_type = "mwcc"\n',
+            encoding="utf-8",
         )
 
-        # 7. Add binutils to PATH and run permuter
+        # 6. Add binutils to PATH and run permuter
         env = os.environ.copy()
         env["PATH"] = str(binutils) + ":" + env.get("PATH", "")
 
