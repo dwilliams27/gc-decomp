@@ -133,7 +133,12 @@ def run_agent(
 
     for iteration in range(1, max_iterations + 1):
         result.iterations = iteration
-        bound_log.info("iteration_start", iteration=iteration, max=max_iterations)
+        bound_log.info(
+            "iteration_start",
+            iteration=iteration,
+            max=max_iterations,
+            match=result.best_match_percent,
+        )
 
         # Call the Responses API
         kwargs: dict = {
@@ -149,7 +154,7 @@ def run_agent(
         try:
             response = client.responses.create(**kwargs)
         except Exception as e:
-            bound_log.error("api_error", error=str(e))
+            bound_log.error("api_error", match=result.best_match_percent, error=str(e))
             result.error = str(e)
             result.termination_reason = "api_error"
             break
@@ -173,14 +178,14 @@ def run_agent(
 
         # Check if model stopped (no tool calls)
         if not function_calls:
-            bound_log.info("model_stopped")
+            bound_log.info("model_stopped", match=result.best_match_percent)
             result.termination_reason = "model_stopped"
             break
 
         # Dispatch each function call
         tool_outputs: list[dict] = []
         for fc in function_calls:
-            bound_log.info("tool_call", tool=fc.name)
+            bound_log.info("tool_call", tool=fc.name, match=result.best_match_percent)
             tool_result = registry.dispatch(fc.name, fc.arguments)
 
             tool_outputs.append({
@@ -207,8 +212,8 @@ def run_agent(
                 result.termination_reason = "matched"
                 bound_log.info("function_matched", trigger="compile_and_check")
 
-            # Also accept explicit mark_complete
-            if fc.name == "mark_complete":
+            # Also accept explicit mark_complete — but only if verified
+            if fc.name == "mark_complete" and "confirmed MATCH" in tool_result:
                 result.matched = True
                 result.termination_reason = "matched"
                 bound_log.info("function_matched", trigger="mark_complete")
@@ -223,6 +228,7 @@ def run_agent(
         if result.total_tokens >= config.agent.max_tokens_per_attempt:
             bound_log.warning(
                 "token_budget_exhausted",
+                match=result.best_match_percent,
                 used=result.total_tokens,
                 budget=config.agent.max_tokens_per_attempt,
             )

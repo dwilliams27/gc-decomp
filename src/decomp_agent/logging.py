@@ -8,9 +8,19 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
+
+
+def _add_short_timestamp(
+    logger: object, method_name: str, event_dict: dict
+) -> dict:
+    """Add a compact HH:MM:SS.cc timestamp (centisecond precision)."""
+    now = datetime.now(timezone.utc).astimezone()
+    event_dict["timestamp"] = now.strftime("%H:%M:%S.") + f"{now.microsecond // 10000:02d}"
+    return event_dict
 
 
 def configure_logging(
@@ -33,7 +43,7 @@ def configure_logging(
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
-        structlog.processors.TimeStamper(fmt="iso"),
+        _add_short_timestamp,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
     ]

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from decomp_agent.config import Config
 from decomp_agent.tools.run import run_in_repo
@@ -102,101 +100,12 @@ def compile_object(object_name: str, config: Config) -> CompileResult:
 
 
 def check_match(object_name: str, config: Config) -> CompileResult:
-    """Compile an object and check match status via the report.
+    """Compile an object and check match status via dtk disassembly.
 
-    Builds the object, regenerates report.json, and reads per-function
-    match data for this unit.
+    Compiles the single object, then disassembles both target and compiled
+    .o files to compute per-function match percentages. Much faster than
+    the old report.json approach (single object vs rebuilding all 968).
     """
-    # First compile
-    compile_result = compile_object(object_name, config)
-    if not compile_result.success:
-        return compile_result
+    from decomp_agent.tools.disasm import check_match_via_disasm
 
-    # Regenerate report
-    report_rel = f"{config.melee.build_dir}/{config.melee.version}/report.json"
-    try:
-        result = run_in_repo(["ninja", report_rel], config=config)
-    except subprocess.TimeoutExpired:
-        compile_result.error = "Report generation timed out"
-        return compile_result
-
-    if result.returncode != 0:
-        compile_result.error = f"Report generation failed: {result.stderr}"
-        return compile_result
-
-    # Parse report for this unit
-    report_path = config.melee.report_path
-    if not report_path.exists():
-        compile_result.error = "report.json not found after generation"
-        return compile_result
-
-    with open(report_path) as f:
-        report_data = json.load(f)
-
-    unit_name = _object_to_unit_name(object_name)
-    for unit in report_data.get("units", []):
-        if unit["name"] == unit_name:
-            for func_data in unit.get("functions", []):
-                if func_data is None:
-                    continue
-                compile_result.functions.append(
-                    FunctionMatch(
-                        name=func_data["name"],
-                        fuzzy_match_percent=float(
-                            func_data.get("fuzzy_match_percent", 0)
-                        ),
-                        size=int(func_data.get("size", 0)),
-                    )
-                )
-            break
-
-    return compile_result
-
-
-def get_diff(object_name: str, config: Config) -> str:
-    """Get detailed assembly diff for an object using objdiff-cli.
-
-    Returns the diff output as a string, showing instruction-level
-    differences between the compiled and target objects.
-    """
-    unit_name = _object_to_unit_name(object_name)
-
-    # objdiff-cli diff reads objdiff.json for target/base paths
-    try:
-        result = run_in_repo(
-            ["objdiff-cli", "diff", "-u", unit_name], config=config
-        )
-    except subprocess.TimeoutExpired:
-        return "Diff timed out"
-    except FileNotFoundError:
-        return "objdiff-cli not found"
-
-    if result.returncode != 0:
-        return f"Diff failed: {result.stderr or result.stdout}"
-
-    return result.stdout
-
-
-def get_function_diff(
-    object_name: str, function_name: str, config: Config
-) -> str:
-    """Get assembly diff for a specific function.
-
-    Tries to use objdiff-cli's function-level diff if available,
-    falls back to full unit diff.
-    """
-    unit_name = _object_to_unit_name(object_name)
-
-    try:
-        result = run_in_repo(
-            ["objdiff-cli", "diff", "-u", unit_name, "-s", function_name],
-            config=config,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return get_diff(object_name, config)
-
-    if result.returncode != 0:
-        # Fall back to full diff
-        return get_diff(object_name, config)
-
-    return result.stdout
+    return check_match_via_disasm(object_name, config)

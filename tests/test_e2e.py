@@ -14,7 +14,6 @@ Uses the Responses API (client.responses.create) via ScriptedOpenAI mock.
 from __future__ import annotations
 
 import json
-import subprocess
 import types as _types
 from pathlib import Path
 from unittest.mock import patch
@@ -30,7 +29,7 @@ from decomp_agent.melee.project import ObjectStatus
 from decomp_agent.orchestrator.batch import run_batch
 from decomp_agent.orchestrator.runner import run_function
 
-from tests.fixtures.fake_repo import create_fake_repo, write_report
+from tests.fixtures.fake_repo import create_fake_repo
 from tests.fixtures.openai_mock import ScriptedOpenAI, ScriptedResponse, ScriptedToolCall
 
 
@@ -68,49 +67,46 @@ def _seed_db(engine, repo_path: Path, config: Config) -> list[Function]:
         return list(session.exec(select(Function)).all())
 
 
-def _make_run_in_repo_mock(repo_path: Path, report_side_effects: dict[int, dict[str, float]] | None = None):
-    """Create a run_in_repo mock that handles ninja build + report commands.
+_DEFAULT_SIZES = {"simple_init": 40, "simple_add": 8, "simple_loop": 48}
+
+
+def _make_check_match_mock(match_side_effects: dict[int, dict[str, float]] | None = None):
+    """Create a check_match_via_disasm mock that returns controlled CompileResults.
 
     Args:
-        repo_path: Path to the fixture repo.
-        report_side_effects: Map from call index (of report commands) to
-            match overrides to write. If None, writes 100% for all funcs
-            on every report command.
+        match_side_effects: Map from call index to per-function match overrides.
+            If None, returns 100% for all functions on every call.
     """
-    report_call_count = [0]
+    from decomp_agent.tools.build import CompileResult, FunctionMatch
 
-    def mock_run_in_repo(args: list[str], config: Config, timeout: int = 120):
-        result = subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+    call_count = [0]
 
-        # Detect ninja report command
-        if "ninja" in args and any("report.json" in a for a in args):
-            idx = report_call_count[0]
-            report_call_count[0] += 1
+    def mock_check_match(object_name: str, config: Config) -> CompileResult:
+        idx = call_count[0]
+        call_count[0] += 1
 
-            if report_side_effects and idx in report_side_effects:
-                overrides = report_side_effects[idx]
-            else:
-                # Default: 100% match for everything
-                overrides = {
-                    "simple_init": 100.0,
-                    "simple_add": 100.0,
-                    "simple_loop": 100.0,
-                }
-            write_report(repo_path, overrides)
-            return result
+        if match_side_effects and idx in match_side_effects:
+            overrides = match_side_effects[idx]
+        else:
+            overrides = {
+                "simple_init": 100.0,
+                "simple_add": 100.0,
+                "simple_loop": 100.0,
+            }
 
-        # Detect ninja build command (just succeed)
-        if "ninja" in args:
-            return result
+        functions = []
+        for name, pct in overrides.items():
+            functions.append(FunctionMatch(
+                name=name,
+                fuzzy_match_percent=pct,
+                size=_DEFAULT_SIZES.get(name, 20),
+            ))
 
-        # Detect objdiff-cli diff command
-        if "objdiff-cli" in args:
-            result.stdout = "  simple_init: +li r5, 0 / -li r5, 1\n"
-            return result
+        return CompileResult(
+            object_name=object_name, success=True, functions=functions
+        )
 
-        return result
-
-    return mock_run_in_repo
+    return mock_check_match
 
 
 # ---------------------------------------------------------------------------
@@ -162,11 +158,11 @@ class TestE2EHappyPathMatch:
             ]),
         ])
 
-        mock_run = _make_run_in_repo_mock(repo_path)
+        mock_match = _make_check_match_mock()
 
         with (
             patch("decomp_agent.agent.loop.OpenAI", return_value=scripted),
-            patch("decomp_agent.tools.build.run_in_repo", side_effect=mock_run),
+            patch("decomp_agent.tools.disasm.check_match_via_disasm", side_effect=mock_match),
         ):
             result = run_function(target_func, config, engine)
 
@@ -234,8 +230,8 @@ class TestE2EMaxIterationsRetryThenFail:
                 ]),
             ] * 3  # 3 iterations
 
-        # Report side effects: ascending but never 100%
-        report_effects = {
+        # Match side effects: ascending but never 100%
+        match_effects = {
             0: {"simple_loop": 60.0, "simple_init": 55.0, "simple_add": 60.0},
             1: {"simple_loop": 75.0, "simple_init": 55.0, "simple_add": 60.0},
             2: {"simple_loop": 80.0, "simple_init": 55.0, "simple_add": 60.0},
@@ -244,13 +240,13 @@ class TestE2EMaxIterationsRetryThenFail:
             5: {"simple_loop": 82.0, "simple_init": 55.0, "simple_add": 60.0},
         }
 
-        mock_run = _make_run_in_repo_mock(repo_path, report_effects)
+        mock_match = _make_check_match_mock(match_effects)
 
         # --- Attempt 1 ---
         script1 = ScriptedOpenAI(_make_attempt_script())
         with (
             patch("decomp_agent.agent.loop.OpenAI", return_value=script1),
-            patch("decomp_agent.tools.build.run_in_repo", side_effect=mock_run),
+            patch("decomp_agent.tools.disasm.check_match_via_disasm", side_effect=mock_match),
         ):
             result1 = run_function(target_func, config, engine)
 
@@ -275,9 +271,10 @@ class TestE2EMaxIterationsRetryThenFail:
             ).first()
 
         script2 = ScriptedOpenAI(_make_attempt_script())
+        mock_match2 = _make_check_match_mock(match_effects)
         with (
             patch("decomp_agent.agent.loop.OpenAI", return_value=script2),
-            patch("decomp_agent.tools.build.run_in_repo", side_effect=mock_run),
+            patch("decomp_agent.tools.disasm.check_match_via_disasm", side_effect=mock_match2),
         ):
             result2 = run_function(target_func, config, engine)
 
@@ -435,21 +432,23 @@ class TestE2EBatchMixedOutcomes:
 
         clients = iter([script_match, script_stop, script_exhaust])
 
-        report_effects = {
+        match_effects = {
             # First call for simple_add: 100% match
             0: {"simple_add": 100.0, "simple_init": 55.0, "simple_loop": 50.0},
+            # mark_complete for simple_add
+            1: {"simple_add": 100.0, "simple_init": 55.0, "simple_loop": 50.0},
             # Subsequent calls for simple_loop: never 100%
-            1: {"simple_loop": 70.0, "simple_init": 55.0, "simple_add": 100.0},
-            2: {"simple_loop": 72.0, "simple_init": 55.0, "simple_add": 100.0},
-            3: {"simple_loop": 74.0, "simple_init": 55.0, "simple_add": 100.0},
-            4: {"simple_loop": 76.0, "simple_init": 55.0, "simple_add": 100.0},
-            5: {"simple_loop": 78.0, "simple_init": 55.0, "simple_add": 100.0},
+            2: {"simple_loop": 70.0, "simple_init": 55.0, "simple_add": 100.0},
+            3: {"simple_loop": 72.0, "simple_init": 55.0, "simple_add": 100.0},
+            4: {"simple_loop": 74.0, "simple_init": 55.0, "simple_add": 100.0},
+            5: {"simple_loop": 76.0, "simple_init": 55.0, "simple_add": 100.0},
+            6: {"simple_loop": 78.0, "simple_init": 55.0, "simple_add": 100.0},
         }
-        mock_run = _make_run_in_repo_mock(repo_path, report_effects)
+        mock_match = _make_check_match_mock(match_effects)
 
         with (
             patch("decomp_agent.agent.loop.OpenAI", side_effect=lambda: next(clients)),
-            patch("decomp_agent.tools.build.run_in_repo", side_effect=mock_run),
+            patch("decomp_agent.tools.disasm.check_match_via_disasm", side_effect=mock_match),
         ):
             batch_result = run_batch(config, engine, limit=3, auto_approve=True)
 
@@ -509,14 +508,14 @@ class TestE2EManyIterationsSurvive:
         responses.append(ScriptedResponse(content="Giving up."))
 
         scripted = ScriptedOpenAI(responses)
-        mock_run = _make_run_in_repo_mock(repo_path, {
+        mock_match = _make_check_match_mock({
             i: {"simple_init": 70.0 + i, "simple_add": 60.0, "simple_loop": 50.0}
             for i in range(10)
         })
 
         with (
             patch("decomp_agent.agent.loop.OpenAI", return_value=scripted),
-            patch("decomp_agent.tools.build.run_in_repo", side_effect=mock_run),
+            patch("decomp_agent.tools.disasm.check_match_via_disasm", side_effect=mock_match),
         ):
             result = run_agent(
                 "simple_init",

@@ -263,9 +263,9 @@ def _handle_compile_and_check(
 
 
 def _handle_get_diff(params: GetDiffParams, config: Config) -> str:
-    from decomp_agent.tools.build import get_function_diff
+    from decomp_agent.tools.disasm import get_function_diff
 
-    return get_function_diff(params.source_file, params.function_name, config)
+    return get_function_diff(params.function_name, params.source_file, config)
 
 
 def _handle_run_permuter(params: RunPermuterParams, config: Config) -> str:

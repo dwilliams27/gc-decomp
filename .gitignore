@@ -7,3 +7,5 @@ dist/
 data/
 .env
 *.db
+*.db.bak
+build.ninja
