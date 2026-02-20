@@ -132,6 +132,32 @@ functions from headers.
 - **Struct access order** affects codegen — access fields in declaration \
 order when possible.
 
+### BSS/static variable layout
+
+The .o file lays out static and BSS variables in **declaration order**. \
+If get_diff shows every mismatch is `addi rX, rY, 0xNN` where the compiled \
+offset differs from the target by a **constant delta** (e.g. target uses \
+offset 0x0 but compiled uses 0x10 for every access), this is NOT a code \
+problem — it's a **BSS layout problem**. The variable is at the wrong \
+position in the section because of how statics are ordered in the file.
+
+How to diagnose: if all offset differences in the diff are the same \
+constant (e.g. all +0x10, or all +0xF8), the function body is correct \
+but a `static` variable above it in the file has the wrong size or is in \
+the wrong position.
+
+How to fix:
+- Use read_source_file to examine ALL static/BSS variable declarations \
+in the file, not just the function body.
+- **Reorder** static variable declarations so the target variable ends \
+up at the right offset relative to the section base.
+- **Add padding** (`static u8 pad[N];`) between variables to match the \
+original layout.
+- **Adjust struct sizes** if a static struct declaration has the wrong \
+total size, shifting everything after it.
+- The fix is always OUTSIDE the function body — in the file-level \
+declarations above.
+
 ## Tools
 
 - get_target_assembly(function_name, source_file) — Target PowerPC assembly
