@@ -82,8 +82,14 @@ def disassemble_object(obj_path: Path, config: Config) -> str:
     Raises:
         RuntimeError: If dtk fails or output is missing.
     """
-    with tempfile.NamedTemporaryFile(suffix=".s", delete=False) as tmp:
-        output_path = Path(tmp.name)
+    # When Docker is enabled, the output file must be inside the repo
+    # (bind-mounted) so both the container and host can access it.
+    # Host /tmp is not visible inside the container.
+    if config.docker.enabled:
+        output_path = config.melee.repo_path / "build" / "_dtk_disasm_tmp.s"
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".s", delete=False) as tmp:
+            output_path = Path(tmp.name)
 
     dtk_path = f"{config.melee.build_dir}/tools/dtk"
 
@@ -96,8 +102,14 @@ def disassemble_object(obj_path: Path, config: Config) -> str:
     else:
         obj_rel = str(obj_path)
 
+    # Output path must be relative to repo for Docker
+    if config.docker.enabled:
+        out_arg = str(output_path.relative_to(config.melee.repo_path))
+    else:
+        out_arg = str(output_path)
+
     result = run_in_repo(
-        [dtk_path, "elf", "disasm", obj_rel, str(output_path)],
+        [dtk_path, "elf", "disasm", obj_rel, out_arg],
         config=config,
         timeout=30,
     )
