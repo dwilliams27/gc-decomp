@@ -33,8 +33,11 @@ If not 100%%, use get_diff to see exactly which instructions differ.
 5. **Fix** — Apply a targeted fix for the diagnosed mismatch type, then \
 verify again. Repeat steps 3-5 until matched.
 
-6. **Permuter** — If you're close (>90%%) but stuck on register allocation \
-or ordering, try run_permuter to automatically search for permutations.
+6. **Permuter** — run_permuter automatically searches thousands of code \
+permutations (variable reordering, expression splitting, operand swaps) and \
+is very effective at solving register allocation mismatches. Manual register \
+tweaking is often futile because the search space is large — prefer the \
+permuter for register issues.
 
 7. **Complete** — When compile_and_check shows 100%% match for your target \
 function, call mark_complete.
