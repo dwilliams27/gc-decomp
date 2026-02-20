@@ -7,6 +7,7 @@ as a replacement for the broken objdiff-cli (which requires a TTY).
 from __future__ import annotations
 
 import difflib
+import os
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -86,7 +87,9 @@ def disassemble_object(obj_path: Path, config: Config) -> str:
     # (bind-mounted) so both the container and host can access it.
     # Host /tmp is not visible inside the container.
     if config.docker.enabled:
-        output_path = config.melee.repo_path / "build" / "_dtk_disasm_tmp.s"
+        # Use a unique filename to avoid races with concurrent workers
+        unique = f"_dtk_disasm_{os.getpid()}_{id(obj_path)}.s"
+        output_path = config.melee.repo_path / "build" / unique
     else:
         with tempfile.NamedTemporaryFile(suffix=".s", delete=False) as tmp:
             output_path = Path(tmp.name)
