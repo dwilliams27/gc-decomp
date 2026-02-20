@@ -83,6 +83,7 @@ class _DOLAddressMap:
 # initialize once and reuse across all function decompilations.
 _session: _GhidraSession | None = None
 _session_lock = threading.Lock()
+_session_error: str | None = None  # Cached init failure — never retry
 
 
 @dataclass
@@ -307,11 +308,27 @@ def _extract_address(function_name: str) -> int | None:
 
 def _get_session(config: Config) -> _GhidraSession:
     """Get or create the module-level Ghidra session singleton."""
-    global _session
-    with _session_lock:
+    global _session, _session_error
+
+    # Fast path: already failed, don't even acquire lock
+    if _session_error is not None:
+        raise RuntimeError(_session_error)
+
+    # Try to acquire lock with timeout to avoid deadlocking all workers
+    if not _session_lock.acquire(timeout=60):
+        raise RuntimeError("Timed out waiting for Ghidra session lock")
+    try:
+        if _session_error is not None:
+            raise RuntimeError(_session_error)
         if _session is None:
-            _session = _GhidraSession(config)
+            try:
+                _session = _GhidraSession(config)
+            except Exception as e:
+                _session_error = f"Ghidra initialization failed: {e}"
+                raise RuntimeError(_session_error) from e
         return _session
+    finally:
+        _session_lock.release()
 
 
 def close_session() -> None:

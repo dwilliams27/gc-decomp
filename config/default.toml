@@ -15,7 +15,7 @@ container_name = "melee-build"
 image = "ghcr.io/doldecomp/build-melee:main"
 
 [ghidra]
-enabled = true
+enabled = false
 project_path = "/Users/dwilliams/proj/melee-fork/melee/.ghidra"
 project_name = "MeleeProject"
 program_path = "/main.dol"

@@ -200,6 +200,8 @@ def generate_m2c_context(config: Config) -> None:
             f"Is the melee repo set up correctly?"
         )
 
+    # m2ctx.py runs the C preprocessor, which needs the build toolchain.
+    # This needs to run in Docker if enabled.
     result = run_in_repo(
         ["python3", str(m2ctx_script), "--quiet", "--preprocessor"],
         config=config,
@@ -253,8 +255,16 @@ def run_m2c(
     # Add function name and asm file
     m2c_args.extend(["--function", function_name, str(asm_path)])
 
+    # Run m2c on the host, not in Docker — m2c is a pure Python tool
+    # that just reads the .s file and doesn't need the build toolchain.
     try:
-        result = run_in_repo(m2c_args, config=config, timeout=60)
+        result = subprocess.run(
+            m2c_args,
+            cwd=config.melee.repo_path,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
     except subprocess.TimeoutExpired:
         return M2CResult(
             function_name=function_name,
