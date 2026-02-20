@@ -143,6 +143,7 @@ def run_batch(
     library: str | None = None,
     min_match: float | None = None,
     max_match: float | None = None,
+    unique_files: bool = False,
     auto_approve: bool = False,
 ) -> BatchResult:
     """Run the agent on candidates with parallelism and budget control.
@@ -168,6 +169,9 @@ def run_batch(
 
     # 1. Fetch candidates
     with Session(engine) as session:
+        # Auto-dedup by source file when using multiple workers to avoid
+        # per-file lock serialization that would waste worker slots.
+        effective_unique_files = unique_files or workers > 1
         candidates = get_candidate_batch(
             session,
             limit=limit,
@@ -176,6 +180,7 @@ def run_batch(
             library=library,
             min_match=min_match,
             max_match=max_match,
+            unique_files=effective_unique_files,
         )
 
         if not candidates:

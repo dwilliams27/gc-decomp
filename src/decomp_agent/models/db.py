@@ -216,11 +216,15 @@ def get_candidate_batch(
     library: str | None = None,
     min_match: float | None = None,
     max_match: float | None = None,
+    unique_files: bool = False,
 ) -> list[Function]:
     """Fetch multiple candidate functions matching the given filters.
 
     Same filtering logic as get_next_candidate but returns N results
     and supports additional library and match-percentage filters.
+
+    If unique_files is True, returns at most one function per source file
+    to maximize parallelism (avoids per-file lock serialization).
     """
     stmt = select(Function).where(
         Function.status.in_(["pending"]),  # type: ignore[attr-defined]
@@ -243,8 +247,21 @@ def get_candidate_batch(
     else:
         stmt = stmt.order_by(Function.size, Function.address)  # type: ignore[arg-type]
 
-    stmt = stmt.limit(limit)
-    return list(session.exec(stmt).all())
+    if not unique_files:
+        stmt = stmt.limit(limit)
+        return list(session.exec(stmt).all())
+
+    # Fetch more than needed, then dedup by source file
+    all_candidates = list(session.exec(stmt).all())
+    seen_files: set[str] = set()
+    result: list[Function] = []
+    for func in all_candidates:
+        if func.source_file not in seen_files:
+            seen_files.add(func.source_file)
+            result.append(func)
+            if len(result) >= limit:
+                break
+    return result
 
 
 def get_historical_avg_tokens(
