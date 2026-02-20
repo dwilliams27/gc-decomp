@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decomp_agent.config import Config
+
+_ORIENT_GHIDRA = """\
+   - get_ghidra_decompilation: Get Ghidra's type-aware decompilation for \
+understanding semantics.
+"""
+
+_TOOL_GHIDRA = """\
+- get_ghidra_decompilation(function_name) — Ghidra's C decompilation
+"""
+
 SYSTEM_PROMPT = """\
 You are an expert GameCube decompilation engineer matching C code to PowerPC \
 assembly compiled by Metrowerks CodeWarrior. Your goal is to produce C code \
@@ -13,8 +27,7 @@ that compiles to byte-identical assembly as the original game binary.
    - get_target_assembly: See the PowerPC instructions you must match.
    - get_context: Get headers, types, structs, and nearby matched functions.
    - get_m2c_decompilation: Get an auto-generated C starting point from m2c.
-   - get_ghidra_decompilation: Get Ghidra's type-aware decompilation for \
-understanding semantics.
+{ghidra_orient}\
    - read_source_file: See the current state of the source file.
 
 2. **Write** — Use write_function to replace the function stub/implementation \
@@ -91,8 +104,8 @@ Wrong load/store width means the pointer type or cast is wrong.
 
 ### Control flow patterns
 
-- `do { } while()` = branch at bottom only
-- `while() { }` = branch at top AND bottom
+- `do {{ }} while()` = branch at bottom only
+- `while() {{ }}` = branch at top AND bottom
 - `for` = `while` with init; count branches to identify which the target uses
 - `x = c ? a : b` (ternary) uses conditional move; `if/else` uses \
 branch-around — NOT interchangeable
@@ -122,7 +135,7 @@ order when possible.
 ## Tools
 
 - get_target_assembly(function_name, source_file) — Target PowerPC assembly
-- get_ghidra_decompilation(function_name) — Ghidra's C decompilation
+{ghidra_tool}\
 - get_m2c_decompilation(function_name, source_file) — m2c auto-decompilation
 - get_context(function_name, source_file) — Headers, types, nearby matches
 - read_source_file(source_file) — Current source file contents
@@ -134,8 +147,15 @@ order when possible.
 """
 
 
-def build_system_prompt(function_name: str, source_file: str) -> str:
+def build_system_prompt(
+    function_name: str, source_file: str, config: Config | None = None
+) -> str:
     """Build the full system prompt with the specific function assignment."""
+    ghidra_enabled = config is not None and config.ghidra.enabled
+    prompt = SYSTEM_PROMPT.format(
+        ghidra_orient=_ORIENT_GHIDRA if ghidra_enabled else "",
+        ghidra_tool=_TOOL_GHIDRA if ghidra_enabled else "",
+    )
     assignment = (
         f"\n## Your Assignment\n\n"
         f"Match the function **{function_name}** in source file "
@@ -144,4 +164,4 @@ def build_system_prompt(function_name: str, source_file: str) -> str:
         f"yourself, then iteratively write and verify until you achieve a "
         f"100% match."
     )
-    return SYSTEM_PROMPT + assignment
+    return prompt + assignment

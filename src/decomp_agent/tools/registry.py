@@ -342,17 +342,18 @@ def _handle_mark_complete(params: MarkCompleteParams, config: Config) -> str:
 
 
 def build_registry(config: Config) -> ToolRegistry:
-    """Create a fully-populated ToolRegistry with all 10 tools."""
+    """Create a fully-populated ToolRegistry with all available tools."""
     registry = ToolRegistry(config)
 
     registry.register(
         "get_target_assembly", GetTargetAssemblyParams, _handle_get_target_assembly
     )
-    registry.register(
-        "get_ghidra_decompilation",
-        GetGhidraDecompilationParams,
-        _handle_get_ghidra_decompilation,
-    )
+    if config.ghidra.enabled:
+        registry.register(
+            "get_ghidra_decompilation",
+            GetGhidraDecompilationParams,
+            _handle_get_ghidra_decompilation,
+        )
     registry.register(
         "get_m2c_decompilation",
         GetM2CDecompilationParams,

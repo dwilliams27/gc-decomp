@@ -132,7 +132,7 @@ def run_agent(
     bound_log = log.bind(function=function_name, source_file=source_file)
 
     # Build components
-    system_prompt = build_system_prompt(function_name, source_file)
+    system_prompt = build_system_prompt(function_name, source_file, config)
     registry = build_registry(config)
     tools = registry.get_responses_api_tools()
 

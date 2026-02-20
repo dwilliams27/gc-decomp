@@ -105,12 +105,24 @@ def mock_config():
 
 
 class TestRegistry:
-    def test_build_registry_has_10_tools(self, mock_config):
+    def test_build_registry_has_9_tools_without_ghidra(self, mock_config):
         from decomp_agent.tools.registry import build_registry
 
         registry = build_registry(mock_config)
         tools = registry.get_openai_tools()
+        assert len(tools) == 9
+        tool_names = {t["function"]["name"] for t in tools}
+        assert "get_ghidra_decompilation" not in tool_names
+
+    def test_build_registry_has_10_tools_with_ghidra(self, mock_config):
+        from decomp_agent.tools.registry import build_registry
+
+        mock_config.ghidra.enabled = True
+        registry = build_registry(mock_config)
+        tools = registry.get_openai_tools()
         assert len(tools) == 10
+        tool_names = {t["function"]["name"] for t in tools}
+        assert "get_ghidra_decompilation" in tool_names
 
     def test_dispatch_unknown_tool(self, mock_config):
         from decomp_agent.tools.registry import build_registry
@@ -206,7 +218,6 @@ class TestRegistry:
         names = {t["function"]["name"] for t in tools}
         expected = {
             "get_target_assembly",
-            "get_ghidra_decompilation",
             "get_m2c_decompilation",
             "get_context",
             "read_source_file",
@@ -265,7 +276,7 @@ class TestRegistry:
 
         registry = build_registry(mock_config)
         tools = registry.get_responses_api_tools()
-        assert len(tools) == 10
+        assert len(tools) == 9  # Ghidra disabled in mock_config
         for t in tools:
             assert t["type"] == "function"
             # Responses API format: name is at top level, not nested
@@ -276,7 +287,6 @@ class TestRegistry:
         names = {t["name"] for t in tools}
         expected = {
             "get_target_assembly",
-            "get_ghidra_decompilation",
             "get_m2c_decompilation",
             "get_context",
             "read_source_file",
@@ -450,10 +460,9 @@ class TestPrompts:
         prompt = build_system_prompt("my_func", "melee/test.c")
         assert "Your Assignment" in prompt
 
-    def test_system_prompt_lists_all_tools(self):
+    def test_system_prompt_lists_core_tools(self):
         tool_names = [
             "get_target_assembly",
-            "get_ghidra_decompilation",
             "get_m2c_decompilation",
             "get_context",
             "read_source_file",
@@ -463,8 +472,11 @@ class TestPrompts:
             "run_permuter",
             "mark_complete",
         ]
+        # Build prompt without Ghidra
+        prompt = build_system_prompt("test", "melee/test.c")
         for name in tool_names:
-            assert name in SYSTEM_PROMPT, f"Tool {name} missing from prompt"
+            assert name in prompt, f"Tool {name} missing from prompt"
+        assert "get_ghidra_decompilation" not in prompt
 
 
 # ---------------------------------------------------------------------------
