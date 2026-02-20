@@ -12,22 +12,44 @@ if TYPE_CHECKING:
     from decomp_agent.models.db import Function
 
 
+class ModelPricing(BaseModel):
+    input_per_million: float = 0.0
+    cached_input_per_million: float = 0.0
+    output_per_million: float = 0.0
+
+
 class PricingConfig(BaseModel):
-    input_per_million: float = 1.75
-    cached_input_per_million: float = 0.175
-    output_per_million: float = 14.00
+    models: dict[str, ModelPricing] = {}
+
+    def get_model_pricing(self, model: str) -> ModelPricing:
+        """Look up pricing for a model. Raises KeyError if not found."""
+        if model not in self.models:
+            raise KeyError(
+                f"No pricing configured for model '{model}'. "
+                f"Add [pricing.models.\"{model}\"] to config. "
+                f"Known models: {list(self.models.keys())}"
+            )
+        return self.models[model]
 
 
 def calculate_cost(result: AgentResult, pricing: PricingConfig) -> float:
-    """Compute actual dollar cost from an AgentResult's token counts."""
-    input_cost = result.input_tokens * pricing.input_per_million / 1_000_000
-    cached_cost = result.cached_tokens * pricing.cached_input_per_million / 1_000_000
-    output_cost = result.output_tokens * pricing.output_per_million / 1_000_000
+    """Compute actual dollar cost from an AgentResult's token counts.
+
+    Returns 0.0 if the result has no model set (e.g. agent crashed before
+    any API call). Raises KeyError if the model is set but not in the
+    pricing table.
+    """
+    if not result.model:
+        return 0.0
+    model_pricing = pricing.get_model_pricing(result.model)
+    input_cost = result.input_tokens * model_pricing.input_per_million / 1_000_000
+    cached_cost = result.cached_tokens * model_pricing.cached_input_per_million / 1_000_000
+    output_cost = result.output_tokens * model_pricing.output_per_million / 1_000_000
     return input_cost + cached_cost + output_cost
 
 
 def estimate_function_cost(
-    size: int, session: Session, pricing: PricingConfig
+    size: int, model: str, session: Session, pricing: PricingConfig
 ) -> float:
     """Estimate the cost to decompile a function of the given size.
 
@@ -35,6 +57,8 @@ def estimate_function_cost(
     otherwise falls back to a heuristic of size * 15 tokens.
     """
     from decomp_agent.models.db import get_historical_avg_tokens
+
+    model_pricing = pricing.get_model_pricing(model)
 
     # Look at functions within +/- 50% of this size
     low = max(1, int(size * 0.5))
@@ -51,16 +75,16 @@ def estimate_function_cost(
     cached_tokens = total_tokens * 0.1
     output_tokens = total_tokens * 0.2
 
-    input_cost = input_tokens * pricing.input_per_million / 1_000_000
-    cached_cost = cached_tokens * pricing.cached_input_per_million / 1_000_000
-    output_cost = output_tokens * pricing.output_per_million / 1_000_000
+    input_cost = input_tokens * model_pricing.input_per_million / 1_000_000
+    cached_cost = cached_tokens * model_pricing.cached_input_per_million / 1_000_000
+    output_cost = output_tokens * model_pricing.output_per_million / 1_000_000
     return input_cost + cached_cost + output_cost
 
 
 def estimate_batch_cost(
-    candidates: list[Function], session: Session, pricing: PricingConfig
+    candidates: list[Function], model: str, session: Session, pricing: PricingConfig
 ) -> float:
     """Estimate total cost for a batch of candidate functions."""
     return sum(
-        estimate_function_cost(c.size, session, pricing) for c in candidates
+        estimate_function_cost(c.size, model, session, pricing) for c in candidates
     )

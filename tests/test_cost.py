@@ -10,12 +10,20 @@ from sqlmodel import Session
 
 from decomp_agent.agent.loop import AgentResult
 from decomp_agent.cost import (
+    ModelPricing,
     PricingConfig,
     calculate_cost,
     estimate_batch_cost,
     estimate_function_cost,
 )
 from decomp_agent.models.db import Attempt, Function, get_engine
+
+TEST_MODEL = "test-model"
+TEST_PRICING = ModelPricing(
+    input_per_million=1.75,
+    cached_input_per_million=0.175,
+    output_per_million=14.00,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +33,7 @@ from decomp_agent.models.db import Attempt, Function, get_engine
 
 @pytest.fixture
 def pricing():
-    return PricingConfig()
+    return PricingConfig(models={TEST_MODEL: TEST_PRICING})
 
 
 @pytest.fixture
@@ -43,6 +51,7 @@ def _make_result(
     input_tokens: int = 0,
     output_tokens: int = 0,
     cached_tokens: int = 0,
+    model: str = TEST_MODEL,
     **kwargs,
 ) -> AgentResult:
     return AgentResult(
@@ -50,6 +59,7 @@ def _make_result(
         output_tokens=output_tokens,
         cached_tokens=cached_tokens,
         total_tokens=input_tokens + output_tokens + cached_tokens,
+        model=model,
         **kwargs,
     )
 
@@ -112,14 +122,28 @@ class TestCalculateCost:
         assert cost == pytest.approx(0.35)
 
     def test_custom_pricing(self):
-        pricing = PricingConfig(
-            input_per_million=3.0,
-            cached_input_per_million=0.3,
-            output_per_million=15.0,
+        pricing = PricingConfig(models={
+            "custom-model": ModelPricing(
+                input_per_million=3.0,
+                cached_input_per_million=0.3,
+                output_per_million=15.0,
+            ),
+        })
+        result = _make_result(
+            input_tokens=1_000_000, output_tokens=1_000_000, model="custom-model"
         )
-        result = _make_result(input_tokens=1_000_000, output_tokens=1_000_000)
         cost = calculate_cost(result, pricing)
         assert cost == pytest.approx(18.0)
+
+    def test_no_model_returns_zero(self, pricing):
+        """Agent crash with no model set should return 0 cost."""
+        result = _make_result(input_tokens=1000, model="")
+        assert calculate_cost(result, pricing) == 0.0
+
+    def test_unknown_model_raises(self, pricing):
+        result = _make_result(input_tokens=1000, model="unknown-model")
+        with pytest.raises(KeyError, match="No pricing configured"):
+            calculate_cost(result, pricing)
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +154,6 @@ class TestCalculateCost:
 class TestEstimateFunctionCost:
     def test_with_historical_data(self, session, pricing):
         """When historical data exists, use it instead of the heuristic."""
-        # Insert a function and an attempt with known tokens
         func = _make_function(name="hist_func", size=200)
         session.add(func)
         session.commit()
@@ -146,17 +169,13 @@ class TestEstimateFunctionCost:
         session.add(attempt)
         session.commit()
 
-        # Estimate for a function of similar size (200 is within 100-300 range)
-        cost = estimate_function_cost(200, session, pricing)
-        # Should use historical avg of 10000 tokens
-        # 7000 input, 1000 cached, 2000 output (using 70/10/20 split of 10000)
+        cost = estimate_function_cost(200, TEST_MODEL, session, pricing)
         assert cost > 0
 
     def test_no_historical_data(self, session, pricing):
         """Without history, falls back to size * 15 heuristic."""
-        cost = estimate_function_cost(100, session, pricing)
+        cost = estimate_function_cost(100, TEST_MODEL, session, pricing)
         # 100 * 15 = 1500 tokens
-        # 1050 input * 1.75/1M + 150 cached * 0.175/1M + 300 output * 14.00/1M
         expected_tokens = 1500
         input_t = expected_tokens * 0.7
         cached_t = expected_tokens * 0.1
@@ -170,8 +189,8 @@ class TestEstimateFunctionCost:
 
     def test_larger_function_costs_more(self, session, pricing):
         """Larger functions should cost more (heuristic)."""
-        small_cost = estimate_function_cost(50, session, pricing)
-        large_cost = estimate_function_cost(500, session, pricing)
+        small_cost = estimate_function_cost(50, TEST_MODEL, session, pricing)
+        large_cost = estimate_function_cost(500, TEST_MODEL, session, pricing)
         assert large_cost > small_cost
 
 
@@ -183,13 +202,13 @@ class TestEstimateFunctionCost:
 class TestEstimateBatchCost:
     def test_batch_cost_is_sum(self, session, pricing):
         funcs = [_make_function(name=f"f{i}", size=100 * (i + 1), address=0x80000000 + i) for i in range(3)]
-        batch_cost = estimate_batch_cost(funcs, session, pricing)
+        batch_cost = estimate_batch_cost(funcs, TEST_MODEL, session, pricing)
 
-        individual_sum = sum(estimate_function_cost(f.size, session, pricing) for f in funcs)
+        individual_sum = sum(estimate_function_cost(f.size, TEST_MODEL, session, pricing) for f in funcs)
         assert batch_cost == pytest.approx(individual_sum)
 
     def test_empty_batch(self, session, pricing):
-        assert estimate_batch_cost([], session, pricing) == 0.0
+        assert estimate_batch_cost([], TEST_MODEL, session, pricing) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +220,6 @@ class TestBudgetEnforcement:
     @patch("decomp_agent.orchestrator.runner.run_agent")
     def test_batch_stops_when_budget_exceeded(self, mock_run_agent, engine):
         """Batch should stop processing when budget is exceeded."""
-        # Each call returns a result with known token counts
         mock_run_agent.return_value = AgentResult(
             matched=False,
             best_match_percent=50.0,
@@ -212,6 +230,7 @@ class TestBudgetEnforcement:
             cached_tokens=10_000,
             elapsed_seconds=5.0,
             termination_reason="max_iterations",
+            model="gpt-5.2-codex",
         )
 
         with Session(engine) as session:
@@ -231,7 +250,14 @@ class TestBudgetEnforcement:
         config = MagicMock()
         config.orchestration.default_workers = 1
         config.orchestration.default_budget = None
-        config.pricing = PricingConfig()
+        config.agent.model = "gpt-5.2-codex"
+        config.pricing = PricingConfig(models={
+            "gpt-5.2-codex": ModelPricing(
+                input_per_million=1.75,
+                cached_input_per_million=0.175,
+                output_per_million=14.00,
+            ),
+        })
         # Prevent _save_source from reading files during test
         config.melee.resolve_source_path.return_value.exists.return_value = False
 

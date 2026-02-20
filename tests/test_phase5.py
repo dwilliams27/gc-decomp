@@ -109,7 +109,7 @@ def _make_result(
 
 def _mock_config(**overrides) -> MagicMock:
     """Create a mock Config with orchestration attributes set."""
-    from decomp_agent.cost import PricingConfig
+    from decomp_agent.cost import ModelPricing, PricingConfig
 
     config = MagicMock()
     config.orchestration.max_function_size = overrides.get("max_function_size")
@@ -117,7 +117,14 @@ def _mock_config(**overrides) -> MagicMock:
     config.orchestration.db_path = overrides.get("db_path", "decomp.db")
     config.orchestration.default_workers = overrides.get("default_workers", 1)
     config.orchestration.default_budget = overrides.get("default_budget", None)
-    config.pricing = PricingConfig()
+    config.agent.model = "test-model"
+    config.pricing = PricingConfig(models={
+        "test-model": ModelPricing(
+            input_per_million=1.75,
+            cached_input_per_million=0.175,
+            output_per_million=14.00,
+        ),
+    })
     # Prevent _save_source from reading files during tests
     config.melee.resolve_source_path.return_value.exists.return_value = False
     return config
@@ -249,7 +256,7 @@ class TestRecordAttempt:
         session.commit()
 
         result = _make_result(best_match_percent=80.0)
-        attempt = record_attempt(session, func, result)
+        attempt = record_attempt(session, func, result, cost=0.05)
 
         assert attempt.id is not None
         assert attempt.best_match_pct == 80.0
@@ -263,7 +270,7 @@ class TestRecordAttempt:
         session.commit()
 
         result = _make_result(best_match_percent=50.0)
-        record_attempt(session, func, result)
+        record_attempt(session, func, result, cost=0.0)
 
         assert func.current_match_pct == 90.0
 
@@ -273,7 +280,7 @@ class TestRecordAttempt:
         session.commit()
 
         result = _make_result()
-        record_attempt(session, func, result)
+        record_attempt(session, func, result, cost=0.0)
 
         assert func.attempts == 3
 

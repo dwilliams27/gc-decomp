@@ -189,7 +189,7 @@ def run_batch(
             return batch
 
         # 2. Estimate costs
-        estimated_cost = estimate_batch_cost(candidates, session, config.pricing)
+        estimated_cost = estimate_batch_cost(candidates, config.agent.model, session, config.pricing)
 
     # 3. Display preview table
     table = Table(title="Batch Preview")

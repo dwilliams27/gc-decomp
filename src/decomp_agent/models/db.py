@@ -62,6 +62,7 @@ class Attempt(SQLModel, table=True):
     reasoning_effort: str = ""
     match_history: str | None = None  # JSON: [[iteration, match_pct], ...]
     tool_counts: str | None = None  # JSON: {"tool_name": count, ...}
+    cost: float = 0.0  # Dollar cost of this attempt
 
 
 def get_engine(db_path: Path | str) -> Engine:
@@ -88,6 +89,7 @@ def _migrate(engine: Engine) -> None:
         ("attempt", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"),
         ("attempt", "match_history", "TEXT"),
         ("attempt", "tool_counts", "TEXT"),
+        ("attempt", "cost", "REAL NOT NULL DEFAULT 0.0"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -132,6 +134,7 @@ def record_attempt(
     session: Session,
     function: Function,
     result: AgentResult,
+    cost: float,
 ) -> Attempt:
     """Create an Attempt record and update the Function from an AgentResult."""
     import json
@@ -156,6 +159,7 @@ def record_attempt(
         reasoning_effort=result.reasoning_effort,
         match_history=json.dumps(result.match_history) if result.match_history else None,
         tool_counts=json.dumps(result.tool_counts) if result.tool_counts else None,
+        cost=cost,
     )
     session.add(attempt)
 

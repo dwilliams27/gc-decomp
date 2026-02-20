@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from decomp_agent.config import Config, MeleeConfig
+from decomp_agent.cost import ModelPricing, PricingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +224,13 @@ def create_fake_repo(tmp_path: Path) -> tuple[Path, Config]:
     # Build the Config
     config = Config(
         melee=MeleeConfig(repo_path=repo),
+        pricing=PricingConfig(models={
+            "gpt-5.2-codex": ModelPricing(
+                input_per_million=1.75,
+                cached_input_per_million=0.175,
+                output_per_million=14.00,
+            ),
+        }),
     )
 
     return repo, config

@@ -11,6 +11,7 @@ from sqlmodel import Session
 
 from decomp_agent.agent.loop import AgentResult, run_agent
 from decomp_agent.config import Config
+from decomp_agent.cost import calculate_cost
 from decomp_agent.models.db import Function, record_attempt
 
 log = structlog.get_logger()
@@ -100,10 +101,11 @@ def run_function(
                 )
 
         # Record attempt and update status
+        cost = calculate_cost(result, config.pricing)
         with Session(engine) as session:
             session.add(function)
             session.refresh(function)
-            record_attempt(session, function, result)
+            record_attempt(session, function, result, cost)
 
             if result.matched:
                 function.status = "matched"
