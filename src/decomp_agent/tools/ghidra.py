@@ -21,6 +21,7 @@ import re
 import shutil
 import struct
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,7 @@ class _DOLAddressMap:
 # Module-level singleton — JVM startup is expensive (~10-30s), so we
 # initialize once and reuse across all function decompilations.
 _session: _GhidraSession | None = None
+_session_lock = threading.Lock()
 
 
 @dataclass
@@ -306,9 +308,10 @@ def _extract_address(function_name: str) -> int | None:
 def _get_session(config: Config) -> _GhidraSession:
     """Get or create the module-level Ghidra session singleton."""
     global _session
-    if _session is None:
-        _session = _GhidraSession(config)
-    return _session
+    with _session_lock:
+        if _session is None:
+            _session = _GhidraSession(config)
+        return _session
 
 
 def close_session() -> None:

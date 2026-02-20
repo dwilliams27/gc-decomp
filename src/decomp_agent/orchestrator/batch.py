@@ -71,14 +71,15 @@ def _run_one(
                     termination_reason="budget_exceeded",
                 )
 
-    log.info("batch_function_start", index=index, function=func_name, size=func_size)
+    worker_label = f"[{index}/{total}]"
+    log.info("batch_function_start", worker=worker_label, function=func_name, size=func_size)
     console.print(
-        f"\n[bold][{index}/{total}][/bold] {func_name} "
+        f"\n[bold]{worker_label}[/bold] {func_name} "
         f"(size={func_size}, current={function.current_match_pct:.1f}%)"
     )
 
     try:
-        result = run_function(function, config, engine)
+        result = run_function(function, config, engine, worker_label=worker_label)
     except Exception as e:
         log.error("batch_function_error", function=func_name, error=str(e))
         fr = FunctionResult(name=func_name, error=str(e), termination_reason="exception")

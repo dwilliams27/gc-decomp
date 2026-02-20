@@ -114,6 +114,7 @@ def run_agent(
     config: Config,
     *,
     context_config: ContextConfig | None = None,
+    worker_label: str = "",
 ) -> AgentResult:
     """Run the agent loop to match a single function.
 
@@ -146,8 +147,10 @@ def run_agent(
     token_budget = config.agent.max_tokens_per_attempt
     previous_response_id: str | None = None
 
+    prefix = f"{worker_label} " if worker_label else ""
+
     def bar() -> str:
-        return _tokens_bar(result.total_tokens, token_budget)
+        return f"{prefix}{_tokens_bar(result.total_tokens, token_budget)}"
 
     # First turn: user message with the assignment
     current_input: str | list[dict] = (
