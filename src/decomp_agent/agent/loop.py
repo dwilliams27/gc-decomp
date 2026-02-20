@@ -6,6 +6,7 @@ previous_response_id for multi-turn conversation state management.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -37,6 +38,12 @@ class AgentResult:
     error: str | None = None
     termination_reason: str = ""
     """One of: matched, model_stopped, max_iterations, token_budget, api_error"""
+    model: str = ""
+    reasoning_effort: str = ""
+    match_history: list[tuple[int, float]] = field(default_factory=list)
+    """List of (iteration, match_pct) snapshots when match % changes."""
+    tool_counts: dict[str, int] = field(default_factory=dict)
+    """Count of each tool called during this attempt."""
 
 
 _FUNC_MATCH_RE = re.compile(r"(\w+):\s*MATCH\b")
@@ -130,7 +137,11 @@ def run_agent(
 
     client = OpenAI()
 
-    result = AgentResult()
+    reasoning_effort = "high"
+    result = AgentResult(
+        model=config.agent.model,
+        reasoning_effort=reasoning_effort,
+    )
     max_iterations = config.agent.max_iterations
     token_budget = config.agent.max_tokens_per_attempt
     previous_response_id: str | None = None
@@ -160,7 +171,7 @@ def run_agent(
             "tools": tools,
             "input": current_input,
             "truncation": "auto",
-            "reasoning": {"effort": "high"},
+            "reasoning": {"effort": reasoning_effort},
         }
         if previous_response_id is not None:
             kwargs["previous_response_id"] = previous_response_id
@@ -201,6 +212,7 @@ def run_agent(
         tool_outputs: list[dict] = []
         for fc in function_calls:
             bound_log.info(f"{bar()} tool_call", tool=fc.name, match=result.best_match_percent)
+            result.tool_counts[fc.name] = result.tool_counts.get(fc.name, 0) + 1
             tool_result = registry.dispatch(fc.name, fc.arguments)
 
             tool_outputs.append({
@@ -215,6 +227,7 @@ def run_agent(
                 fc.name, tool_result, result.best_match_percent, function_name
             )
             if result.best_match_percent > previous_best:
+                result.match_history.append((iteration, result.best_match_percent))
                 bound_log.info(
                     f"{bar()} match_improved",
                     previous=previous_best,

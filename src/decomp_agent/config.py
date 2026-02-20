@@ -78,7 +78,7 @@ class MeleeConfig(BaseModel):
 class AgentConfig(BaseModel):
     model: str = "gpt-5.2-codex"
     max_iterations: int = 30
-    max_tokens_per_attempt: int = 100_000
+    max_tokens_per_attempt: int = 2_000_000
     max_ctx_chars: int = 20_000
 
 

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Engine, event
+from sqlalchemy import Engine, event, text as sa_text
 from sqlalchemy import func as sa_func
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -58,6 +58,10 @@ class Attempt(SQLModel, table=True):
     termination_reason: str = ""
     final_code: str | None = None
     error: str | None = None
+    model: str = ""
+    reasoning_effort: str = ""
+    match_history: str | None = None  # JSON: [[iteration, match_pct], ...]
+    tool_counts: str | None = None  # JSON: {"tool_name": count, ...}
 
 
 def get_engine(db_path: Path | str) -> Engine:
@@ -73,7 +77,27 @@ def get_engine(db_path: Path | str) -> Engine:
         cursor.close()
 
     SQLModel.metadata.create_all(engine)
+    _migrate(engine)
     return engine
+
+
+def _migrate(engine: Engine) -> None:
+    """Add columns that may be missing from older databases."""
+    migrations = [
+        ("attempt", "model", "TEXT NOT NULL DEFAULT ''"),
+        ("attempt", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"),
+        ("attempt", "match_history", "TEXT"),
+        ("attempt", "tool_counts", "TEXT"),
+    ]
+    with engine.connect() as conn:
+        for table, column, col_type in migrations:
+            try:
+                conn.execute(
+                    sa_text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                )
+            except Exception:
+                pass  # Column already exists
+        conn.commit()
 
 
 def get_next_candidate(
@@ -110,6 +134,8 @@ def record_attempt(
     result: AgentResult,
 ) -> Attempt:
     """Create an Attempt record and update the Function from an AgentResult."""
+    import json
+
     now = datetime.now(timezone.utc)
     attempt = Attempt(
         function_id=function.id,  # type: ignore[arg-type]
@@ -126,6 +152,10 @@ def record_attempt(
         termination_reason=result.termination_reason,
         final_code=result.final_code,
         error=result.error,
+        model=result.model,
+        reasoning_effort=result.reasoning_effort,
+        match_history=json.dumps(result.match_history) if result.match_history else None,
+        tool_counts=json.dumps(result.tool_counts) if result.tool_counts else None,
     )
     session.add(attempt)
 
