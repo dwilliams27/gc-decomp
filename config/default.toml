@@ -10,7 +10,7 @@ max_tokens_per_attempt = 500000
 max_ctx_chars = 20000
 
 [docker]
-enabled = false
+enabled = true
 container_name = "melee-build"
 image = "ghcr.io/doldecomp/build-melee:main"
 

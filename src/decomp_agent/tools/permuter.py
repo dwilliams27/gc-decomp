@@ -168,7 +168,7 @@ def _extract_mwcc_command(source_file: str, config: Config) -> str | None:
     # like -pragma "cats off"
     sjiswrap = repo / "build" / "tools" / "sjiswrap.exe"
     compiler = repo / "build" / "compilers" / mw_version / "mwcceppc.exe"
-    return f'wine "{sjiswrap}" "{compiler}" {cflags} -c'
+    return f'"{sjiswrap}" "{compiler}" {cflags} -c'
 
 
 def _extract_cpp_flags(mwcc_cmd: str) -> list[str]:
@@ -266,7 +266,38 @@ def _build_compile_sh(
             f"Could not extract MWCC command for {source_file} from build.ninja"
         )
 
-    return f"""#!/bin/bash
+    if config.docker.enabled:
+        container = shlex.quote(config.docker.container_name)
+        outdir_rel = "build/_permuter_out"
+        return f"""#!/bin/bash
+set -e
+
+INPUT="$1"
+shift; shift
+OUTPUT="$1"
+
+REPO="{repo}"
+TEMP_SRC="$REPO/{temp_src}"
+OUTDIR="$REPO/{outdir_rel}"
+
+# Clean up on exit
+trap 'rm -f "$TEMP_SRC"; rm -rf "$OUTDIR"' EXIT
+
+rm -rf "$OUTDIR"
+mkdir -p "$OUTDIR"
+
+# Copy original stripped source (with proper #includes) into repo
+cp "{stripped_src}" "$TEMP_SRC"
+
+# Extract modified function from permuted file and splice into the copy
+python3 "{splice_helper}" "$INPUT" "$TEMP_SRC" "{function_name}"
+
+# Compile with MWCC via Docker (wibo inside container is ~5x faster than wine)
+docker exec -w "$REPO" {container} wibo {mwcc_line} "{temp_src}" -o "{outdir_rel}"
+mv "$OUTDIR/{temp_src_stem}.o" "$OUTPUT"
+"""
+    else:
+        return f"""#!/bin/bash
 set -e
 
 INPUT="$1"
@@ -288,7 +319,7 @@ python3 "{splice_helper}" "$INPUT" "$TEMP_SRC" "{function_name}"
 # MWCC's -o flag takes a DIRECTORY, not a file path.
 # It outputs <input_stem>.o into that directory.
 OUTDIR=$(mktemp -d)
-cd "$REPO" && {mwcc_line} "{temp_src}" -o "$OUTDIR"
+cd "$REPO" && wine {mwcc_line} "{temp_src}" -o "$OUTDIR"
 mv "$OUTDIR/{temp_src_stem}.o" "$OUTPUT"
 rm -rf "$OUTDIR"
 """

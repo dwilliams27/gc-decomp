@@ -2,6 +2,8 @@
 
 ## Critical Rules
 
+- **Ask the human to install missing tools/software.** When you hit a blocker that requires installing a CLI tool, authenticating a service, setting an env var, or any other setup that the human can do in 30 seconds — stop and ask them immediately. Don't try to work around it, build from source, or find alternative approaches. The fastest path is always: tell the human exactly what to run.
+
 - **NEVER add silent fallbacks or hardcoded workarounds.** If something essential is missing (a tool, a config value, a file), the code must fail hard with a clear error message. Silent fallbacks hide real issues and create a patchwork of bandaids that make debugging impossible. It is always better to crash with a useful error than to silently proceed with partial functionality.
 
 - **Do not hide missing setup behind graceful degradation.** If Ghidra isn't configured, m2c isn't installed, or the build environment isn't ready — raise an error, don't return a stub result and pretend everything is fine. The caller (the agent loop) needs to know what's actually available.
