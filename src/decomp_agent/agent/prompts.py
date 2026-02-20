@@ -23,15 +23,13 @@ with your best attempt at matching C code.
 3. **Verify** — Use compile_and_check to compile and see match percentages. \
 If not 100%%, use get_diff to see exactly which instructions differ.
 
-4. **Diagnose** — Read the diff analysis header. Identify the mismatch type:
-   - REGISTER ALLOCATION → apply register allocation fixes below
-   - WRONG INSTRUCTIONS → check casts, types, operators
-   - STRUCTURAL DIFFERENCE → check loop type, ternary, inline, volatile
-   - MIXED → address each mismatch category separately
-   Do NOT rewrite blindly. Identify the specific problem first.
+4. **Analyze the diff** — Study the actual assembly differences. Reason \
+about what C code would produce each target instruction. Each [register], \
+[opcode], [extra], and [missing] tag is a clue — think about what compiler \
+behavior produces that specific difference.
 
-5. **Fix** — Apply a targeted fix for the diagnosed mismatch type, then \
-verify again. Repeat steps 3-5 until matched.
+5. **Fix** — Apply a targeted fix, then verify again. Repeat steps 3-5 \
+until matched.
 
 6. **Permuter** — run_permuter automatically searches thousands of code \
 permutations (variable reordering, expression splitting, operand swaps) and \
@@ -43,95 +41,83 @@ permuter for register issues.
 function, call mark_complete.
 
 8. **Give up** — If after many iterations you cannot get past a plateau, \
-stop calling tools. Explain the mismatch type and what fixes you tried.
+stop calling tools. Explain what you tried and what the remaining diff looks \
+like.
 
-## Register Allocation Fixes
-(When diff shows REGISTER ALLOCATION — all opcodes match, only registers differ)
+## Metrowerks CodeWarrior Reference
 
-- **Declaration order**: CodeWarrior assigns registers in declaration order. \
-Swap local variable declarations to swap register assignments.
-- **Introduce temp variables**: If no locals exist, create one to anchor a \
-sub-expression into a specific register:
-    Before: `s->a = global->field->x + global->field->y;`
-    After:  `Type* p = global->field; s->a = p->x + p->y;`
-- **Split compound expressions**: Break one statement into two to change \
-which values are live simultaneously:
-    Before: `obj->a = src->x + src->y * 2;`
-    After:  `int tmp = src->y * 2; obj->a = src->x + tmp;`
-- **Reorder struct stores**: The order you assign to struct fields affects \
-which registers hold which values. Try swapping assignment order.
-- **Expression evaluation order**: In `a + b`, the compiler evaluates `a` \
-first, allocating it a lower register. Swap operand order to swap registers.
-- **Reorder function arguments**: When arguments are computed inline, \
-their evaluation order affects register allocation.
+### How MWCC allocates registers
 
-## Opcode/Instruction Fixes
-(When diff shows WRONG INSTRUCTIONS — different mnemonics)
+CodeWarrior assigns registers to local variables in **declaration order**. \
+The first local gets the first available register, the second gets the next, \
+etc. This means:
 
-- **Cast mismatch**: (s32) generates `extsb`/`extsh`; (u32) generates \
-`clrlwi`/`rlwinm`. If the target has sign-extension and you don't (or vice \
-versa), fix the cast.
-- **Wrong load/store width**: `lbz`=u8, `lhz`=u16, `lwz`=u32, `lha`=s16. \
-Match pointer type and cast.
-- **Missing frsp**: `(f32)` cast or float assignment forces `frsp`.
-- **Wrong comparison**: `cmpwi`=signed, `cmplwi`=unsigned. Fix signedness.
-- **Inverted branch**: `beq` vs `bne` means your condition is inverted.
-- **Comparison operand order**: `if (0 == x)` vs `if (x == 0)` swaps \
-cmpwi operands.
+- **Swapping declarations swaps registers.** If you need `ptr` in r4 \
+instead of r5, declare it earlier.
+- **Introducing a local variable anchors a value into a register.** \
+If a global address or sub-expression appears in a register in the target \
+but you're accessing it directly, create a local pointer:
+    `struct Foo* p = &global_foo; p->x = val;`
+  instead of:
+    `global_foo.x = val;`
+- **Splitting expressions changes register lifetimes.** Breaking one \
+statement into two with a temp variable changes which values are live \
+simultaneously and how registers are allocated.
+- **Expression evaluation order matters.** In `a + b`, the compiler \
+evaluates `a` first, assigning it a lower register.
+- **An extra `mr` instruction means the compiler is copying a value into \
+the register it actually needs.** This usually means a value should be \
+computed or loaded directly into that register — introduce or reorder a \
+local variable so the compiler puts it there in the first place.
 
-## Structural Fixes
-(When diff shows STRUCTURAL DIFFERENCE — extra/missing instructions)
+### Load/store and type correspondence
 
-- **Loop type**: `do { } while()` = branch at bottom only. `while() { }` \
-= branch at top AND bottom. `for` = `while` with init. Count branches to \
-identify which pattern the target uses.
-- **Ternary vs if/else**: `x = c ? a : b` uses conditional move/select. \
-`if/else` uses branch-around. NOT interchangeable.
-- **Inline functions**: Extra instruction blocks may be inlined functions \
-from headers. Check for `static inline` functions that should/shouldn't \
-be called.
+`lbz`=u8, `lhz`=u16, `lwz`=u32, `lha`=s16, `lfs`=f32, `lfd`=f64. \
+Wrong load/store width means the pointer type or cast is wrong.
+
+### Cast instructions
+
+- `extsb`/`extsh` = sign extension → `(s8)` or `(s16)` cast
+- `clrlwi`/`rlwinm` for masking = unsigned cast → `(u8)`, `(u16)`
+- `frsp` = float precision reduction → `(f32)` cast or float assignment
+- `fctiwz` = float-to-int truncation → `(int)float_var`
+
+### Comparison instructions
+
+- `cmpwi`/`cmpw` = signed comparison
+- `cmplwi`/`cmplw` = unsigned comparison
+- `beq` vs `bne` = condition may be inverted
+- Operand order: `if (0 == x)` vs `if (x == 0)` swaps cmpwi operands
+
+### Control flow patterns
+
+- `do { } while()` = branch at bottom only
+- `while() { }` = branch at top AND bottom
+- `for` = `while` with init; count branches to identify which the target uses
+- `x = c ? a : b` (ternary) uses conditional move; `if/else` uses \
+branch-around — NOT interchangeable
+- Small switches (<~8 cases): cascading `cmpwi`/`beq`/`bge` chains
+- Large switches: jump table via `rlwinm` -> `lwzx` -> `mtctr` -> `bctr`
+- Counter loops: `subfic` -> `mtctr` -> `bdnz`
+
+### Other MWCC patterns
+
+- **Int-to-float**: `xoris rX, rX, 0x8000` -> `lis` -> `stw` -> `stw` \
+-> `lfd` -> `fsubs` = explicit `(f32)` or `(f64)` cast needed.
+- **Float-to-int**: `fctiwz` -> `stfd` -> `lwz` = `(int)float_var`.
+- **Fused multiply-add**: `a * b + c` → `fmadds`. Splitting into a temp \
+variable may prevent fusion.
+- **Bitfield assignment**: `rlwimi rX, rY, shift, start, end` = C bitfield \
+struct write. `extrwi`/`rlwinm` = bitfield read.
+- **Register move via addi**: `addi rX, rY, 0x0` is equivalent to \
+`mr rX, rY`.
+- **Inverse sqrt**: `frsqrte` + `fmul`/`fnmsub` refinement = \
+Newton-Raphson for `1.0f / sqrtf(x)`.
 - **Volatile**: Extra loads/stores suggest missing `volatile` qualifier.
-- **Missing return**: Void functions need explicit `return;` for early exits.
-
-## CodeWarrior-Specific Idioms
-
-These patterns are generated by MWCC and won't be guessed from generic C \
-knowledge:
-
-- **Int-to-float cast**: `(f32)int_var` or `(f64)int_var` compiles to: \
-`xoris rX, rX, 0x8000` -> `lis rZ, 0x4330` -> `stw` -> `stw` -> `lfd` \
--> `fsubs`. If you see this pattern in the target, you need an explicit \
-int-to-float cast in C.
-- **Float-to-int cast**: `(int)float_var` compiles to: `fctiwz fX, fY` \
--> `stfd fX, stack` -> `lwz rZ, stack+4`. The stfd+lwz extracts the \
-integer result from the FP register.
-- **Inverse sqrt idiom**: `1.0f / sqrtf(x)` or the SDK's `frsqrte` + \
-3-4 rounds of `fmul`/`fnmsub` refinement. This is a Newton-Raphson \
-approximation. Look for `frsqrte` followed by a repeating \
-fmul/fmul/fnmsub/fmul pattern.
-- **Bit field assignment**: `rlwimi rX, rY, shift, start, end` sets \
-specific bits. Maps to C bitfield struct assignment: \
-`obj->x40_b3 = value;` Bit positions in rlwimi correspond to the \
-bitfield's position in the struct. `extrwi`/`rlwinm` extracts bits.
-- **Small switch statements**: CodeWarrior compiles switches with few \
-cases (<~8) as cascading `cmpwi`/`beq`/`bge` chains (binary search \
-pattern), NOT as jump tables. Larger switches use jump tables \
-(`rlwinm` -> `lwzx` -> `mtctr` -> `bctr`).
-- **Counter loops**: `subfic` -> `mtctr` -> `bdnz` is a counter-based \
-loop. Usually from `for (i = start; i < end; i++)` or explicit iteration \
-with known count.
-- **Register move via addi**: `addi r30, r3, 0x0` is equivalent to \
-`mr r30, r3`. CodeWarrior generates both forms depending on context.
-- **fmadds/fmsubs**: `a * b + c` may compile to `fmadds` (fused \
-multiply-add). Writing `a * b + c` vs `tmp = a * b; tmp + c` can change \
-whether the compiler uses the fused instruction.
-
-## General Tips
-
+- **Inline functions**: Extra instruction blocks may be `static inline` \
+functions from headers.
 - **Struct access order** affects codegen — access fields in declaration \
 order when possible.
-- **Constants**: Immediate values may need hex (0x1234) vs decimal.
-- **Inline functions** from headers may need `static inline` to match.
 
 ## Tools
 

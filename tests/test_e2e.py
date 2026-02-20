@@ -209,7 +209,6 @@ class TestE2EMaxIterationsRetryThenFail:
     def test_exhausts_iterations_and_retries(self, tmp_path):
         repo_path, config = create_fake_repo(tmp_path)
         config.agent.max_iterations = 3
-        config.orchestration.max_attempts_per_function = 2
         engine = get_engine(":memory:")
         functions = _seed_db(engine, repo_path, config)
 
@@ -280,12 +279,12 @@ class TestE2EMaxIterationsRetryThenFail:
 
         assert result2.matched is False
 
-        # Check DB after attempt 2: status should be failed (max attempts reached)
+        # Check DB after attempt 2: status stays pending (no max attempts limit)
         with Session(engine) as session:
             loaded = session.exec(
                 select(Function).where(Function.name == "simple_loop")
             ).first()
-            assert loaded.status == "failed"
+            assert loaded.status == "pending"
             assert loaded.attempts == 2
 
 
@@ -297,18 +296,10 @@ class TestE2EMaxIterationsRetryThenFail:
 class TestE2EAgentCrashRecordsError:
     def test_crash_in_loop_records_error(self, tmp_path):
         repo_path, config = create_fake_repo(tmp_path)
-        config.orchestration.max_attempts_per_function = 3
         engine = get_engine(":memory:")
         functions = _seed_db(engine, repo_path, config)
 
         target_func = next(f for f in functions if f.name == "simple_init")
-
-        # Update to attempts=2 so next failure triggers "failed" status
-        with Session(engine) as session:
-            session.add(target_func)
-            target_func.attempts = 2
-            session.commit()
-            session.refresh(target_func)
 
         # Mock that returns a response with empty output list
         # This causes the loop to see no function_calls, so it stops
@@ -364,8 +355,8 @@ class TestE2EAgentCrashRecordsError:
             loaded = session.exec(
                 select(Function).where(Function.name == "simple_init")
             ).first()
-            assert loaded.status == "failed"
-            assert loaded.attempts == 3
+            assert loaded.status == "pending"
+            assert loaded.attempts == 1
 
             # Attempt row should exist
             attempt = session.exec(
@@ -383,7 +374,6 @@ class TestE2EBatchMixedOutcomes:
     def test_batch_processes_multiple_functions(self, tmp_path):
         repo_path, config = create_fake_repo(tmp_path)
         config.agent.max_iterations = 5
-        config.orchestration.max_attempts_per_function = 1
         engine = get_engine(":memory:")
         _seed_db(engine, repo_path, config)
 
@@ -465,14 +455,14 @@ class TestE2EBatchMixedOutcomes:
             init_func = session.exec(
                 select(Function).where(Function.name == "simple_init")
             ).first()
-            # model_stopped with max_attempts=1 -> failed
-            assert init_func.status == "failed"
+            # model_stopped — stays pending for retry
+            assert init_func.status == "pending"
 
             loop_func = session.exec(
                 select(Function).where(Function.name == "simple_loop")
             ).first()
-            # max_iterations with max_attempts=1 -> failed
-            assert loop_func.status == "failed"
+            # max_iterations — stays pending for retry
+            assert loop_func.status == "pending"
 
 
 # ---------------------------------------------------------------------------

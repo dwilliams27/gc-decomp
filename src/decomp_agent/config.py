@@ -99,7 +99,6 @@ class GhidraConfig(BaseModel):
 
 class OrchestrationConfig(BaseModel):
     db_path: Path = Path("decomp.db")
-    max_attempts_per_function: int = 3
     max_function_size: int | None = None
     batch_size: int = 50
     default_workers: int = 1

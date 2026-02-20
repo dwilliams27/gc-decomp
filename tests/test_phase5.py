@@ -107,12 +107,11 @@ def _make_result(
     )
 
 
-def _mock_config(max_attempts: int = 3, **overrides) -> MagicMock:
+def _mock_config(**overrides) -> MagicMock:
     """Create a mock Config with orchestration attributes set."""
     from decomp_agent.cost import PricingConfig
 
     config = MagicMock()
-    config.orchestration.max_attempts_per_function = max_attempts
     config.orchestration.max_function_size = overrides.get("max_function_size")
     config.orchestration.batch_size = overrides.get("batch_size", 50)
     config.orchestration.db_path = overrides.get("db_path", "decomp.db")
@@ -317,12 +316,6 @@ class TestGetNextCandidate:
 
         assert get_next_candidate(session) is None
 
-    def test_respects_max_attempts(self, session):
-        session.add(_make_function(name="func_a", attempts=3))
-        session.commit()
-
-        assert get_next_candidate(session, max_attempts=3) is None
-
     def test_respects_max_size(self, session):
         session.add(_make_function(name="big_func", size=5000))
         session.add(_make_function(name="small_func", size=50))
@@ -387,7 +380,7 @@ class TestRunner:
             assert loaded.attempts == 1
 
     @patch("decomp_agent.orchestrator.runner.run_agent")
-    def test_failed_after_max_attempts(self, mock_run_agent, engine):
+    def test_error_stays_pending_for_retry(self, mock_run_agent, engine):
         mock_run_agent.return_value = _make_result(
             error="API error", termination_reason="api_error"
         )
@@ -406,7 +399,7 @@ class TestRunner:
             loaded = session.exec(
                 select(Function).where(Function.name == "runner_fail")
             ).first()
-            assert loaded.status == "failed"
+            assert loaded.status == "pending"
             assert loaded.attempts == 3
 
     @patch("decomp_agent.orchestrator.runner.run_agent")
@@ -453,7 +446,7 @@ class TestRunner:
             loaded = session.exec(
                 select(Function).where(Function.name == "runner_crash")
             ).first()
-            assert loaded.status == "failed"
+            assert loaded.status == "pending"
             assert loaded.attempts == 3
 
 
@@ -631,7 +624,6 @@ class TestOrchestrationConfig:
 
         c = OrchestrationConfig()
         assert c.db_path.name == "decomp.db"
-        assert c.max_attempts_per_function == 3
         assert c.max_function_size is None
         assert c.batch_size == 50
 
@@ -648,7 +640,6 @@ repo_path = "/Users/dwilliams/proj/melee"
 
 [orchestration]
 db_path = "custom.db"
-max_attempts_per_function = 5
 batch_size = 100
 """
         toml_file = tmp_path / "test.toml"
@@ -658,7 +649,6 @@ batch_size = 100
 
         config = load_config(toml_file)
         assert str(config.orchestration.db_path) == "custom.db"
-        assert config.orchestration.max_attempts_per_function == 5
         assert config.orchestration.batch_size == 100
 
     def test_new_orchestration_defaults(self):
@@ -729,15 +719,6 @@ class TestGetCandidateBatch:
         results = get_candidate_batch(session)
         assert len(results) == 1
         assert results[0].name == "pending"
-
-    def test_skips_max_attempts(self, session):
-        session.add(_make_function(name="exhausted", attempts=3, size=100))
-        session.add(_make_function(name="fresh", attempts=0, size=100, address=0x80001000))
-        session.commit()
-
-        results = get_candidate_batch(session, max_attempts=3)
-        assert len(results) == 1
-        assert results[0].name == "fresh"
 
     def test_smallest_first_strategy(self, session):
         session.add(_make_function(name="big", size=500, address=0x80000000))

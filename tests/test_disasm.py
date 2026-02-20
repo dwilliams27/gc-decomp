@@ -13,7 +13,6 @@ from decomp_agent.tools.disasm import (
     DiffAnalysis,
     InstructionPair,
     _align_and_classify,
-    _detect_register_swaps,
     _extract_mnemonic,
     _format_diff_analysis,
     _normalize_for_diff,
@@ -314,7 +313,6 @@ class TestAlignAndClassify:
         assert analysis.matching == 4
         assert analysis.register_only == 0
         assert analysis.opcode_diffs == 0
-        assert analysis.mismatch_category == ""
 
     def test_register_only_diff(self):
         target = _parse_asm_to_tuples(
@@ -327,7 +325,6 @@ class TestAlignAndClassify:
         assert analysis.matching == 3  # mflr, stw, blr match
         assert analysis.register_only == 3  # lwz r5->r6, lwz r3->r5, stw r5->r6
         assert analysis.opcode_diffs == 0
-        assert analysis.mismatch_category == "REGISTER ALLOCATION"
 
     def test_phantom_diff(self):
         target = _parse_asm_to_tuples(
@@ -340,7 +337,6 @@ class TestAlignAndClassify:
         assert analysis.matching == 3  # all bytes match
         assert analysis.phantom == 2  # lis and addi have different symbol text
         assert analysis.register_only == 0
-        assert analysis.mismatch_category == ""
 
     def test_opcode_diff(self):
         # Create a case where mnemonics differ
@@ -349,7 +345,6 @@ class TestAlignAndClassify:
         analysis = _align_and_classify(target, compiled)
         assert analysis.matching == 1
         assert analysis.opcode_diffs == 1
-        assert analysis.mismatch_category == "WRONG INSTRUCTIONS"
 
     def test_structural_diff_extra_target(self):
         target = [
@@ -363,7 +358,6 @@ class TestAlignAndClassify:
         ]
         analysis = _align_and_classify(target, compiled)
         assert analysis.extra_target == 1
-        assert analysis.mismatch_category == "STRUCTURAL DIFFERENCE"
 
     def test_structural_diff_extra_compiled(self):
         target = [
@@ -377,7 +371,6 @@ class TestAlignAndClassify:
         ]
         analysis = _align_and_classify(target, compiled)
         assert analysis.extra_compiled == 1
-        assert analysis.mismatch_category == "STRUCTURAL DIFFERENCE"
 
     def test_mixed_diff(self):
         target = [
@@ -393,63 +386,6 @@ class TestAlignAndClassify:
         analysis = _align_and_classify(target, compiled)
         assert analysis.register_only >= 1
         assert analysis.opcode_diffs >= 1
-        assert analysis.mismatch_category == "MIXED"
-
-
-# ---------------------------------------------------------------------------
-# _detect_register_swaps tests
-# ---------------------------------------------------------------------------
-
-
-class TestDetectRegisterSwaps:
-    def test_simple_swap(self):
-        pairs = [
-            InstructionPair(
-                index=0,
-                target_hex="80 A3 00 00", compiled_hex="80 C3 00 00",
-                target_insn="lwz r5, 0(r3)", compiled_insn="lwz r6, 0(r3)",
-                mismatch_type="register",
-            ),
-            InstructionPair(
-                index=1,
-                target_hex="90 A4 00 00", compiled_hex="90 C4 00 00",
-                target_insn="stw r5, 0(r4)", compiled_insn="stw r6, 0(r4)",
-                mismatch_type="register",
-            ),
-        ]
-        swaps = _detect_register_swaps(pairs)
-        assert len(swaps) == 1
-        assert "target r5 -> compiled r6" in swaps[0]
-
-    def test_no_register_mismatches(self):
-        pairs = [
-            InstructionPair(
-                index=0,
-                target_hex="7C 08 02 A6", compiled_hex="7C 08 02 A6",
-                target_insn="mflr r0", compiled_insn="mflr r0",
-                mismatch_type="match",
-            ),
-        ]
-        swaps = _detect_register_swaps(pairs)
-        assert swaps == []
-
-    def test_multiple_swaps(self):
-        pairs = [
-            InstructionPair(
-                index=0,
-                target_hex="80 A3 00 00", compiled_hex="80 C3 00 00",
-                target_insn="lwz r5, 0(r3)", compiled_insn="lwz r6, 0(r3)",
-                mismatch_type="register",
-            ),
-            InstructionPair(
-                index=1,
-                target_hex="80 63 00 04", compiled_hex="80 A3 00 04",
-                target_insn="lwz r3, 4(r3)", compiled_insn="lwz r5, 4(r3)",
-                mismatch_type="register",
-            ),
-        ]
-        swaps = _detect_register_swaps(pairs)
-        assert len(swaps) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -476,10 +412,8 @@ class TestFormatDiffAnalysis:
         analysis = _align_and_classify(target, compiled)
         result = _format_diff_analysis(analysis)
 
-        assert "=== Diff Summary ===" in result
-        assert "REGISTER ALLOCATION" in result
-        assert "all opcodes identical" in result
-        assert "=== Instruction Diff ===" in result
+        assert "match" in result
+        assert "differ" in result
         assert "[register]" in result
         assert "[opcode]" not in result
 
@@ -549,7 +483,7 @@ class TestDiffOutput:
         assert diff == ""
 
     def test_diff_analysis_format(self):
-        """New analysis-based diff format has summary and instruction diff."""
+        """Analysis-based diff format has counts and instruction diff."""
         target = _parse_asm_to_tuples(
             extract_all_functions(SAMPLE_ASM)["fn_80169574"]
         )
@@ -558,9 +492,9 @@ class TestDiffOutput:
         )
         analysis = _align_and_classify(target, compiled)
         result = _format_diff_analysis(analysis)
-        # Should have the analysis header
-        assert "=== Diff Summary ===" in result
-        assert "=== Instruction Diff ===" in result
+        # Should have counts
+        assert "match" in result
+        assert "differ" in result
         # The changed instruction (stwu) should appear
         assert "stwu" in result
 

@@ -28,10 +28,6 @@ _INSTRUCTION_RE = re.compile(
 _FN_DIRECTIVE_RE = re.compile(r"^\.fn\s+(\w+)")
 _ENDFN_RE = re.compile(r"^\s*\.endfn\s+(\w+)")
 
-# Pattern to extract register references from instruction operands
-_REGISTER_RE = re.compile(r"\b([rf]\d+)\b")
-
-
 # ---------------------------------------------------------------------------
 # Dataclasses for diff analysis
 # ---------------------------------------------------------------------------
@@ -61,8 +57,6 @@ class DiffAnalysis:
     extra_target: int  # instructions only in target
     extra_compiled: int  # instructions only in compiled
     pairs: list[InstructionPair] = field(default_factory=list)
-    register_swaps: list[str] = field(default_factory=list)
-    mismatch_category: str = ""  # "REGISTER ALLOCATION", "WRONG INSTRUCTIONS", "STRUCTURAL DIFFERENCE", "MIXED"
 
 
 # ---------------------------------------------------------------------------
@@ -331,26 +325,6 @@ def _align_and_classify(
 
     total = max(len(target_parsed), len(compiled_parsed))
 
-    # Determine mismatch category
-    has_reg = register_only > 0
-    has_opcode = opcode_diffs > 0
-    has_structural = (extra_target + extra_compiled) > 0
-    diff_count = register_only + opcode_diffs + extra_target + extra_compiled
-
-    if diff_count == 0:
-        mismatch_category = ""
-    elif has_reg and not has_opcode and not has_structural:
-        mismatch_category = "REGISTER ALLOCATION"
-    elif has_opcode and not has_reg and not has_structural:
-        mismatch_category = "WRONG INSTRUCTIONS"
-    elif has_structural and not has_reg and not has_opcode:
-        mismatch_category = "STRUCTURAL DIFFERENCE"
-    else:
-        mismatch_category = "MIXED"
-
-    # Detect register swaps
-    register_swaps = _detect_register_swaps(pairs)
-
     return DiffAnalysis(
         total=total,
         matching=matching,
@@ -360,55 +334,14 @@ def _align_and_classify(
         extra_target=extra_target,
         extra_compiled=extra_compiled,
         pairs=pairs,
-        register_swaps=register_swaps,
-        mismatch_category=mismatch_category,
     )
 
 
-def _detect_register_swaps(pairs: list[InstructionPair]) -> list[str]:
-    """Parse register references from mismatched instruction pairs to find
-    consistent register mappings (target rX -> compiled rY).
-
-    Returns list of strings like "target r5 -> compiled r6".
-    """
-    # Collect register mapping evidence from register-only mismatches
-    mapping_evidence: dict[str, dict[str, int]] = {}  # target_reg -> {compiled_reg -> count}
-
-    for pair in pairs:
-        if pair.mismatch_type != "register":
-            continue
-
-        target_regs = _REGISTER_RE.findall(pair.target_insn)
-        compiled_regs = _REGISTER_RE.findall(pair.compiled_insn)
-
-        if len(target_regs) != len(compiled_regs):
-            continue
-
-        for t_reg, c_reg in zip(target_regs, compiled_regs):
-            if t_reg != c_reg:
-                if t_reg not in mapping_evidence:
-                    mapping_evidence[t_reg] = {}
-                mapping_evidence[t_reg][c_reg] = mapping_evidence[t_reg].get(c_reg, 0) + 1
-
-    # Filter to consistent mappings (one target reg -> one compiled reg)
-    swaps = []
-    for t_reg, c_regs in sorted(mapping_evidence.items()):
-        # Pick the most common mapping
-        best_c_reg = max(c_regs, key=c_regs.get)
-        total_evidence = sum(c_regs.values())
-        best_count = c_regs[best_c_reg]
-        # Only report if the mapping is consistent (>50% of evidence)
-        if best_count > total_evidence / 2:
-            swaps.append(f"target {t_reg} -> compiled {best_c_reg}")
-
-    return swaps
-
-
 def _format_diff_analysis(analysis: DiffAnalysis) -> str:
-    """Produce the final diff output string: summary header + instruction diff.
+    """Produce the final diff output string: summary + instruction diff.
 
-    Summary is pure data extraction (counts, classification, register swaps).
-    No fix suggestions — those belong in the system prompt.
+    Shows basic counts and the raw annotated diff. No classification or
+    diagnosis — the model should reason about the assembly directly.
     """
     diff_count = (
         analysis.register_only + analysis.opcode_diffs
@@ -419,12 +352,6 @@ def _format_diff_analysis(analysis: DiffAnalysis) -> str:
 
     lines: list[str] = []
 
-    # === Diff Summary ===
-    lines.append("=== Diff Summary ===")
-    diff_count = (
-        analysis.register_only + analysis.opcode_diffs
-        + analysis.extra_target + analysis.extra_compiled
-    )
     lines.append(
         f"{analysis.total} instructions total, "
         f"{analysis.matching} match, {diff_count} differ"
@@ -433,30 +360,7 @@ def _format_diff_analysis(analysis: DiffAnalysis) -> str:
     if analysis.phantom > 0:
         lines.append(f"({analysis.phantom} phantom diffs filtered — same bytes, different symbols)")
 
-    if analysis.mismatch_category:
-        cat_detail = f"Mismatch type: {analysis.mismatch_category}"
-        if analysis.mismatch_category == "REGISTER ALLOCATION":
-            cat_detail += " — all opcodes identical, only register operands differ"
-        elif analysis.mismatch_category == "MIXED":
-            parts = []
-            if analysis.register_only:
-                parts.append(f"{analysis.register_only} register")
-            if analysis.opcode_diffs:
-                parts.append(f"{analysis.opcode_diffs} opcode")
-            if analysis.extra_target or analysis.extra_compiled:
-                parts.append(
-                    f"{analysis.extra_target + analysis.extra_compiled} structural"
-                )
-            cat_detail += f" ({', '.join(parts)})"
-        lines.append(cat_detail)
-
-    if analysis.register_swaps:
-        lines.append("Register mapping: " + ", ".join(analysis.register_swaps))
-
     lines.append("")
-
-    # === Instruction Diff ===
-    lines.append("=== Instruction Diff ===")
 
     # Format pairs with context collapsing
     consecutive_matches = 0

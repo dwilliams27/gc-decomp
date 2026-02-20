@@ -160,6 +160,7 @@ def run_agent(
             "tools": tools,
             "input": current_input,
             "truncation": "auto",
+            "reasoning": {"effort": "high"},
         }
         if previous_response_id is not None:
             kwargs["previous_response_id"] = previous_response_id

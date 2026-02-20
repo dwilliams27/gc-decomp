@@ -154,7 +154,6 @@ def run_batch(
     """
     start = time.monotonic()
     batch = BatchResult()
-    max_attempts = config.orchestration.max_attempts_per_function
 
     log.info(
         "batch_start",
@@ -172,7 +171,6 @@ def run_batch(
             session,
             limit=limit,
             max_size=max_size,
-            max_attempts=max_attempts,
             strategy=strategy,
             library=library,
             min_match=min_match,

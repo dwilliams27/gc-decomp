@@ -22,7 +22,6 @@ program_path = "/main.dol"
 
 [orchestration]
 db_path = "decomp.db"
-max_attempts_per_function = 3
 batch_size = 50
 default_workers = 1
 # default_budget — omit to leave unlimited

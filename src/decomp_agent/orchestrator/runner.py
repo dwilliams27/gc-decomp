@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 
 import structlog
 from sqlalchemy import Engine
@@ -46,8 +45,6 @@ def run_function(function: Function, config: Config, engine: Engine) -> AgentRes
 
     DB is always updated even if the agent crashes.
     """
-    max_attempts = config.orchestration.max_attempts_per_function
-
     # Mark in_progress
     with Session(engine) as session:
         session.add(function)
@@ -62,7 +59,6 @@ def run_function(function: Function, config: Config, engine: Engine) -> AgentRes
         "function_start",
         function=func_name,
         attempt=function.attempts + 1,
-        max_attempts=max_attempts,
     )
 
     # Serialize all work on the same source file to prevent concurrent
@@ -102,10 +98,6 @@ def run_function(function: Function, config: Config, engine: Engine) -> AgentRes
         if result.matched:
             function.status = "matched"
             function.matched_at = datetime.now(timezone.utc)
-        elif result.error and function.attempts >= max_attempts:
-            function.status = "failed"
-        elif function.attempts >= max_attempts:
-            function.status = "failed"
         else:
             function.status = "pending"
 

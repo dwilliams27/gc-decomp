@@ -80,17 +80,14 @@ def get_next_candidate(
     session: Session,
     *,
     max_size: int | None = None,
-    max_attempts: int = 3,
     strategy: str = "smallest_first",
 ) -> Function | None:
     """Pick the next function to work on.
 
     Skips functions that are matched, failed, skipped, or in_progress.
-    Also skips functions that have reached max_attempts.
     """
     stmt = select(Function).where(
         Function.status.in_(["pending"]),  # type: ignore[attr-defined]
-        Function.attempts < max_attempts,
         Function.current_match_pct < 100.0,  # skip already-matched functions
         Function.library.notin_(EXCLUDED_LIBRARIES),  # type: ignore[attr-defined]
     )
@@ -185,7 +182,6 @@ def get_candidate_batch(
     *,
     limit: int = 50,
     max_size: int | None = None,
-    max_attempts: int = 3,
     strategy: str = "smallest_first",
     library: str | None = None,
     min_match: float | None = None,
@@ -198,7 +194,6 @@ def get_candidate_batch(
     """
     stmt = select(Function).where(
         Function.status.in_(["pending"]),  # type: ignore[attr-defined]
-        Function.attempts < max_attempts,
         Function.current_match_pct < 100.0,  # skip already-matched functions
         Function.library.notin_(EXCLUDED_LIBRARIES),  # type: ignore[attr-defined]
     )

@@ -229,7 +229,6 @@ class TestBudgetEnforcement:
         # = 0.1225 + 0.00175 + 0.28 = 0.40425 per function
         # Budget of $1.00 should allow ~2 functions
         config = MagicMock()
-        config.orchestration.max_attempts_per_function = 3
         config.orchestration.default_workers = 1
         config.orchestration.default_budget = None
         config.pricing = PricingConfig()
