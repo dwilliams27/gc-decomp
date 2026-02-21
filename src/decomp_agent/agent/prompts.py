@@ -167,6 +167,12 @@ not to embed raw assembly. Single-instruction `asm` for hardware intrinsics \
 fine, but multi-instruction asm blocks that replace C logic are not \
 decompilation and will be rejected.
 
+- **No local function redeclarations that contradict the same file.** \
+Do not redeclare a function inside a block scope with a different signature \
+to force register allocation. If a function is already defined or declared \
+in the same file, its types are known — use them. Local prototype tricks \
+that shadow the real signature are hacks, not decompilation.
+
 ## Tools
 
 - get_target_assembly(function_name, source_file) — Target PowerPC assembly
