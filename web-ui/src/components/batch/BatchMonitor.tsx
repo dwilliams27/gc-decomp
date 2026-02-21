@@ -58,7 +58,7 @@ export function BatchMonitor() {
         </div>
       )}
 
-      <div className="mt-4 grid grid-cols-2 gap-4 text-sm md:grid-cols-5">
+      <div className="mt-4 grid grid-cols-3 gap-4 text-sm">
         <Stat
           label="Attempted"
           value={String(data.attempted ?? 0)}
@@ -73,13 +73,15 @@ export function BatchMonitor() {
           value={String(data.failed ?? 0)}
           color="text-red-400"
         />
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-4 text-sm">
         <Stat
           label="Cost"
           value={`$${(data.total_cost ?? 0).toFixed(2)}`}
         />
         <Stat
           label="Tokens"
-          value={((data.total_tokens ?? 0) / 1000).toFixed(0) + "K"}
+          value={((data.total_tokens ?? 0) / 1_000_000).toFixed(2) + "M"}
         />
       </div>
 
