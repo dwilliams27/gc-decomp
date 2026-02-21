@@ -12,7 +12,7 @@ from sqlmodel import Session
 from decomp_agent.agent.loop import AgentResult, run_agent
 from decomp_agent.config import Config
 from decomp_agent.cost import calculate_cost
-from decomp_agent.models.db import Function, record_attempt
+from decomp_agent.models.db import Function, get_best_attempt, record_attempt
 
 log = structlog.get_logger()
 
@@ -38,6 +38,7 @@ def run_function(
     engine: Engine,
     *,
     worker_label: str = "",
+    warm_start: bool = False,
 ) -> AgentResult:
     """Run the agent on a single function, managing DB state throughout.
 
@@ -80,9 +81,30 @@ def run_function(
             src_path = config.melee.resolve_source_path(source_file)
             saved_source = src_path.read_bytes() if src_path.exists() else None
 
+            # Look up best prior attempt for warm start
+            prior_best_code: str | None = None
+            prior_match_pct: float = 0
+            if warm_start and function.attempts > 0:
+                with Session(engine) as session:
+                    best = get_best_attempt(session, function.id)  # type: ignore[arg-type]
+                    if best is not None:
+                        prior_best_code = best.final_code
+                        prior_match_pct = best.best_match_pct
+                        bound_log.info(
+                            "warm_start",
+                            prior_match=prior_match_pct,
+                        )
+
             # Run the agent
             try:
-                result = run_agent(func_name, source_file, config, worker_label=worker_label)
+                result = run_agent(
+                    func_name,
+                    source_file,
+                    config,
+                    worker_label=worker_label,
+                    prior_best_code=prior_best_code,
+                    prior_match_pct=prior_match_pct,
+                )
             except Exception as e:
                 log.error("agent_crash", function=func_name, error=str(e))
                 result = AgentResult(

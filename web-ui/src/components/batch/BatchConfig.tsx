@@ -20,6 +20,7 @@ export function BatchConfig() {
     min_match: null,
     max_match: null,
     max_tokens: null,
+    warm_start: false,
   });
 
   // Populate defaults from config
@@ -177,6 +178,17 @@ export function BatchConfig() {
             className="w-full rounded bg-gray-800 px-2 py-1 text-white"
           />
         </Field>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={params.warm_start}
+            onChange={(e) => setParams({ ...params, warm_start: e.target.checked })}
+            className="rounded bg-gray-800"
+          />
+          <span className="text-gray-400">Warm Start</span>
+          <span className="text-xs text-gray-600">Seed retries with best prior code</span>
+        </label>
       </div>
 
       <button

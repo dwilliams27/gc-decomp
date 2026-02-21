@@ -56,6 +56,7 @@ def _run_one(
     budget: float | None,
     index: int,
     total: int,
+    warm_start: bool = False,
 ) -> FunctionResult:
     """Run the agent on one function, updating shared batch state."""
     func_name = function.name
@@ -79,7 +80,7 @@ def _run_one(
     )
 
     try:
-        result = run_function(function, config, engine, worker_label=worker_label)
+        result = run_function(function, config, engine, worker_label=worker_label, warm_start=warm_start)
     except Exception as e:
         log.error("batch_function_error", function=func_name, error=str(e))
         fr = FunctionResult(name=func_name, error=str(e), termination_reason="exception")
@@ -146,6 +147,7 @@ def run_batch(
     unique_files: bool = False,
     auto_approve: bool = False,
     cancel_flag: threading.Event | None = None,
+    warm_start: bool = False,
 ) -> BatchResult:
     """Run the agent on candidates with parallelism and budget control.
 
@@ -238,7 +240,7 @@ def run_batch(
             if budget is not None and batch.total_cost >= budget:
                 console.print(f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). Stopping.[/red]")
                 break
-            _run_one(candidate, config, engine, cost_lock, batch, budget, i, total)
+            _run_one(candidate, config, engine, cost_lock, batch, budget, i, total, warm_start=warm_start)
     else:
         # Parallel execution — submit in chunks so cancel can stop new work
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -254,7 +256,7 @@ def run_batch(
                         return
                     i, candidate = pending_candidates.pop(0)
                     future = executor.submit(
-                        _run_one, candidate, config, engine, cost_lock, batch, budget, i, total
+                        _run_one, candidate, config, engine, cost_lock, batch, budget, i, total, warm_start
                     )
                     active_futures[future] = candidate.name
 

@@ -94,6 +94,7 @@ export interface BatchParams {
   min_match: number | null;
   max_match: number | null;
   max_tokens: number | null;
+  warm_start: boolean;
 }
 
 export interface BatchStatus {

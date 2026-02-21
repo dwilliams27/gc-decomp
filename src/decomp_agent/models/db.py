@@ -63,6 +63,7 @@ class Attempt(SQLModel, table=True):
     match_history: str | None = None  # JSON: [[iteration, match_pct], ...]
     tool_counts: str | None = None  # JSON: {"tool_name": count, ...}
     cost: float = 0.0  # Dollar cost of this attempt
+    warm_start: bool = False  # Whether this attempt was seeded with prior code
 
 
 def get_engine(db_path: Path | str) -> Engine:
@@ -90,6 +91,7 @@ def _migrate(engine: Engine) -> None:
         ("attempt", "match_history", "TEXT"),
         ("attempt", "tool_counts", "TEXT"),
         ("attempt", "cost", "REAL NOT NULL DEFAULT 0.0"),
+        ("attempt", "warm_start", "BOOLEAN NOT NULL DEFAULT 0"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -160,6 +162,7 @@ def record_attempt(
         match_history=json.dumps(result.match_history) if result.match_history else None,
         tool_counts=json.dumps(result.tool_counts) if result.tool_counts else None,
         cost=cost,
+        warm_start=result.warm_start,
     )
     session.add(attempt)
 
@@ -172,6 +175,25 @@ def record_attempt(
     session.commit()
     session.refresh(attempt)
     return attempt
+
+
+def get_best_attempt(session: Session, function_id: int) -> Attempt | None:
+    """Return the attempt with the highest match % that has final_code.
+
+    Only considers attempts with best_match_pct > 0 and non-null final_code.
+    Returns None if no qualifying attempt exists.
+    """
+    stmt = (
+        select(Attempt)
+        .where(
+            Attempt.function_id == function_id,
+            Attempt.best_match_pct > 0,
+            Attempt.final_code.isnot(None),  # type: ignore[union-attr]
+        )
+        .order_by(Attempt.best_match_pct.desc())  # type: ignore[union-attr]
+        .limit(1)
+    )
+    return session.exec(stmt).first()
 
 
 def sync_from_report(session: Session, functions: list[FunctionInfo]) -> int:

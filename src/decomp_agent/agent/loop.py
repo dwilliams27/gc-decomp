@@ -44,6 +44,8 @@ class AgentResult:
     """List of (iteration, match_pct) snapshots when match % changes."""
     tool_counts: dict[str, int] = field(default_factory=dict)
     """Count of each tool called during this attempt."""
+    warm_start: bool = False
+    """Whether this attempt was seeded with prior code."""
 
 
 _FUNC_MATCH_RE = re.compile(r"(\w+):\s*MATCH\b")
@@ -118,6 +120,8 @@ def run_agent(
     *,
     context_config: ContextConfig | None = None,
     worker_label: str = "",
+    prior_best_code: str | None = None,
+    prior_match_pct: float = 0,
 ) -> AgentResult:
     """Run the agent loop to match a single function.
 
@@ -127,6 +131,8 @@ def run_agent(
         config: Project configuration
         context_config: Unused (kept for backward compatibility).
             Context is managed server-side via truncation="auto".
+        prior_best_code: Best code from a previous attempt (warm start).
+        prior_match_pct: Match % achieved by prior_best_code.
 
     Returns:
         AgentResult with the outcome.
@@ -145,6 +151,7 @@ def run_agent(
     result = AgentResult(
         model=config.agent.model,
         reasoning_effort=reasoning_effort,
+        warm_start=prior_best_code is not None,
     )
     max_iterations = config.agent.max_iterations
     token_budget = config.agent.max_tokens_per_attempt
@@ -156,10 +163,20 @@ def run_agent(
         return f"{prefix}{_tokens_bar(result.total_tokens, token_budget)}"
 
     # First turn: user message with the assignment
-    current_input: str | list[dict] = (
-        f"Match function {function_name} in {source_file}. "
-        f"Start by calling get_target_assembly and get_context to orient yourself."
-    )
+    if prior_best_code is not None:
+        current_input: str | list[dict] = (
+            f"Match function {function_name} in {source_file}.\n\n"
+            f"A previous attempt reached {prior_match_pct:.1f}% match with this code:\n\n"
+            f"```c\n{prior_best_code}\n```\n\n"
+            f"Start by writing this code with write_function, then analyze the diff "
+            f"to find remaining mismatches. Focus on improving from this baseline "
+            f"rather than starting from scratch."
+        )
+    else:
+        current_input = (
+            f"Match function {function_name} in {source_file}. "
+            f"Start by calling get_target_assembly and get_context to orient yourself."
+        )
 
     for iteration in range(1, max_iterations + 1):
         result.iterations = iteration

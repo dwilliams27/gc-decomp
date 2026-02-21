@@ -28,6 +28,7 @@ class BatchStartRequest(BaseModel):
     min_match: float | None = None
     max_match: float | None = None
     max_tokens: int | None = None  # Override config.agent.max_tokens_per_attempt
+    warm_start: bool = False  # Seed retries with best prior code
 
 
 class BatchStatus:
@@ -111,6 +112,7 @@ def start_batch(req: BatchStartRequest):
                 max_match=req.max_match,
                 auto_approve=True,  # No interactive prompts in web mode
                 cancel_flag=status.cancel_event,
+                warm_start=req.warm_start,
             )
         except Exception as e:
             log.error("batch_thread_error", error=str(e))
