@@ -260,6 +260,32 @@ def _format_match_result(result, source_file: str) -> str:
     return "\n".join(lines)
 
 
+_ASM_BLOCK_RE = re.compile(r"\basm\s*\{([^}]*)\}", re.DOTALL)
+
+# Max number of assembly instructions allowed in a single asm {} block.
+# Single-instruction intrinsics (mfspr, psq_st, nop) are legitimate;
+# multi-instruction blocks that replace C logic are not decompilation.
+_MAX_ASM_INSTRUCTIONS = 1
+
+
+def _check_inline_asm(code: str) -> str | None:
+    """Return an error message if code contains banned multi-instruction asm blocks."""
+    for m in _ASM_BLOCK_RE.finditer(code):
+        body = m.group(1).strip()
+        # Count non-empty lines as instructions
+        instructions = [line.strip() for line in body.splitlines() if line.strip()]
+        if len(instructions) > _MAX_ASM_INSTRUCTIONS:
+            return (
+                f"Error: code contains a multi-instruction asm block "
+                f"({len(instructions)} instructions). Inline assembly blocks "
+                f"that replace C logic are banned — the goal is to produce C "
+                f"code that compiles to matching assembly. Single-instruction "
+                f"asm for hardware intrinsics (mfspr, psq_st, etc.) is OK. "
+                f"Rewrite this as C code."
+            )
+    return None
+
+
 def _handle_write_function(
     params: WriteFunctionParams, config: Config
 ) -> str:
@@ -269,6 +295,11 @@ def _handle_write_function(
         replace_function,
         write_source_file,
     )
+
+    # Reject multi-instruction inline asm blocks
+    asm_error = _check_inline_asm(params.code)
+    if asm_error is not None:
+        return asm_error
 
     src_path = config.melee.resolve_source_path(params.source_file)
     if not src_path.exists():

@@ -158,6 +158,15 @@ total size, shifting everything after it.
 - The fix is always OUTSIDE the function body — in the file-level \
 declarations above.
 
+## Banned Techniques
+
+- **No inline assembly blocks.** Never write `asm {{ }}` blocks to match a \
+function. The goal is to produce C code that compiles to matching assembly, \
+not to embed raw assembly. Single-instruction `asm` for hardware intrinsics \
+(e.g. `asm {{ mfspr }}`, `asm {{ psq_st }}`) that exist in the codebase is \
+fine, but multi-instruction asm blocks that replace C logic are not \
+decompilation and will be rejected.
+
 ## Tools
 
 - get_target_assembly(function_name, source_file) — Target PowerPC assembly
