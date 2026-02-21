@@ -172,6 +172,30 @@ def batch(
 
 
 @main.command()
+@click.option("--host", default="127.0.0.1", help="Bind address")
+@click.option("--port", default=8000, type=int, help="Bind port")
+@click.pass_context
+def serve(ctx: click.Context, host: str, port: int) -> None:
+    """Start the web UI server."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print(
+            "[red]Web dependencies not installed. Run:[/red]\n"
+            "  pip install 'decomp-agent[web]'"
+        )
+        raise SystemExit(1)
+
+    from decomp_agent.web.app import create_app
+
+    config_path = ctx.obj.get("config_path")
+    app = create_app(config_path)
+
+    console.print(f"Starting decomp-agent web UI at [bold]http://{host}:{port}[/bold]")
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+@main.command()
 @click.pass_context
 def status(ctx: click.Context) -> None:
     """Show progress summary."""

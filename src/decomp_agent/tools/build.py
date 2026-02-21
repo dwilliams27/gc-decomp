@@ -5,8 +5,12 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass, field
 
+import structlog
+
 from decomp_agent.config import Config
 from decomp_agent.tools.run import run_in_repo
+
+log = structlog.get_logger()
 
 
 @dataclass
@@ -90,6 +94,23 @@ def compile_object(object_name: str, config: Config) -> CompileResult:
             success=False,
             error="Compilation timed out",
         )
+
+    # ninja regenerates build.ninja via configure.py before building.
+    # If source files were added/committed since the last configure,
+    # this regeneration fails. Re-run configure.py and retry once.
+    if result.returncode != 0:
+        error_text = result.stderr or result.stdout or ""
+        if "rebuilding" in error_text and "subcommand failed" in error_text:
+            log.info("build_ninja_stale", object=object_name)
+            run_in_repo(["python", "configure.py"], config=config)
+            try:
+                result = run_in_repo(["ninja", target], config=config)
+            except subprocess.TimeoutExpired:
+                return CompileResult(
+                    object_name=object_name,
+                    success=False,
+                    error="Compilation timed out",
+                )
 
     if result.returncode != 0:
         return CompileResult(

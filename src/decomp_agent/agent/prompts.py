@@ -31,29 +31,29 @@ that compiles to byte-identical assembly as the original game binary.
    - read_source_file: See the current state of the source file.
 
 2. **Write** — Use write_function to replace the function stub/implementation \
-with your best attempt at matching C code.
+with your best attempt at matching C code. write_function automatically \
+compiles and returns match results — no need to call compile_and_check \
+separately. If compilation fails, the code is automatically reverted to the \
+previous working version so you always have a clean slate.
 
-3. **Verify** — Use compile_and_check to compile and see match percentages. \
-If not 100%%, use get_diff to see exactly which instructions differ.
+3. **Analyze** — Study the match results returned by write_function. \
+If not 100%%, use get_diff to see exactly which instructions differ. \
+Each [register], [opcode], [extra], and [missing] tag is a clue — think \
+about what compiler behavior produces that specific difference.
 
-4. **Analyze the diff** — Study the actual assembly differences. Reason \
-about what C code would produce each target instruction. Each [register], \
-[opcode], [extra], and [missing] tag is a clue — think about what compiler \
-behavior produces that specific difference.
+4. **Fix** — Apply a targeted fix via write_function, then analyze again. \
+Repeat steps 3-4 until matched.
 
-5. **Fix** — Apply a targeted fix, then verify again. Repeat steps 3-5 \
-until matched.
-
-6. **Permuter** — run_permuter automatically searches thousands of code \
+5. **Permuter** — run_permuter automatically searches thousands of code \
 permutations (variable reordering, expression splitting, operand swaps) and \
 is very effective at solving register allocation mismatches. Manual register \
 tweaking is often futile because the search space is large — prefer the \
 permuter for register issues.
 
-7. **Complete** — When compile_and_check shows 100%% match for your target \
+6. **Complete** — When write_function shows 100%% match for your target \
 function, call mark_complete.
 
-8. **Give up** — If after many iterations you cannot get past a plateau, \
+7. **Give up** — If after many iterations you cannot get past a plateau, \
 stop calling tools. Explain what you tried and what the remaining diff looks \
 like.
 
@@ -165,8 +165,8 @@ declarations above.
 - get_m2c_decompilation(function_name, source_file) — m2c auto-decompilation
 - get_context(function_name, source_file) — Headers, types, nearby matches
 - read_source_file(source_file) — Current source file contents
-- write_function(source_file, function_name, code) — Write/replace a function
-- compile_and_check(source_file) — Compile and check match percentages
+- write_function(source_file, function_name, code) — Write, compile, and check match (reverts on compile failure)
+- compile_and_check(source_file) — Recompile and check match percentages (rarely needed, write_function does this automatically)
 - get_diff(source_file, function_name) — Assembly diff for a function
 - run_permuter(function_name, source_file) — Auto-search for permutations
 - mark_complete(function_name, source_file) — Mark function as matched

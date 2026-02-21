@@ -80,6 +80,7 @@ def _make_check_match_mock(match_side_effects: dict[int, dict[str, float]] | Non
     from decomp_agent.tools.build import CompileResult, FunctionMatch
 
     call_count = [0]
+    last_overrides = [None]
 
     def mock_check_match(object_name: str, config: Config) -> CompileResult:
         idx = call_count[0]
@@ -87,6 +88,11 @@ def _make_check_match_mock(match_side_effects: dict[int, dict[str, float]] | Non
 
         if match_side_effects and idx in match_side_effects:
             overrides = match_side_effects[idx]
+            last_overrides[0] = overrides
+        elif last_overrides[0] is not None:
+            # Repeat last known overrides (handles write_function auto-compile
+            # doubling the call count vs explicit compile_and_check)
+            overrides = last_overrides[0]
         else:
             overrides = {
                 "simple_init": 100.0,

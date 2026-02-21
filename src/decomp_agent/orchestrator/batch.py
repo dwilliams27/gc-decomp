@@ -145,6 +145,7 @@ def run_batch(
     max_match: float | None = None,
     unique_files: bool = False,
     auto_approve: bool = False,
+    cancel_flag: threading.Event | None = None,
 ) -> BatchResult:
     """Run the agent on candidates with parallelism and budget control.
 
@@ -224,32 +225,60 @@ def run_batch(
     cost_lock = threading.Lock()
     total = len(candidates)
 
+    def _is_cancelled() -> bool:
+        return cancel_flag is not None and cancel_flag.is_set()
+
     if workers <= 1:
         # Sequential execution
         for i, candidate in enumerate(candidates, 1):
+            if _is_cancelled():
+                console.print("[yellow]Batch cancelled.[/yellow]")
+                break
             # Check budget
             if budget is not None and batch.total_cost >= budget:
                 console.print(f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). Stopping.[/red]")
                 break
             _run_one(candidate, config, engine, cost_lock, batch, budget, i, total)
     else:
-        # Parallel execution
+        # Parallel execution — submit in chunks so cancel can stop new work
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {}
-            for i, candidate in enumerate(candidates, 1):
-                future = executor.submit(
-                    _run_one, candidate, config, engine, cost_lock, batch, budget, i, total
-                )
-                futures[future] = candidate.name
+            pending_candidates = list(enumerate(candidates, 1))
+            active_futures: dict = {}
 
-            for future in as_completed(futures):
-                fr = future.result()
-                # Check budget after each completion
-                if budget is not None and batch.total_cost >= budget:
-                    console.print(
-                        f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). "
-                        f"Remaining futures will check budget before starting.[/red]"
+            def _submit_next():
+                """Submit candidates up to the worker limit."""
+                while pending_candidates and len(active_futures) < workers:
+                    if _is_cancelled():
+                        return
+                    if budget is not None and batch.total_cost >= budget:
+                        return
+                    i, candidate = pending_candidates.pop(0)
+                    future = executor.submit(
+                        _run_one, candidate, config, engine, cost_lock, batch, budget, i, total
                     )
+                    active_futures[future] = candidate.name
+
+            _submit_next()
+
+            while active_futures:
+                for future in as_completed(active_futures):
+                    del active_futures[future]
+                    fr = future.result()
+
+                    if _is_cancelled():
+                        console.print("[yellow]Batch cancelled.[/yellow]")
+                        break
+                    if budget is not None and batch.total_cost >= budget:
+                        console.print(
+                            f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). Stopping.[/red]"
+                        )
+                        break
+
+                    _submit_next()
+                    break  # Re-check active_futures after each completion
+
+                if _is_cancelled():
+                    break
 
     batch.elapsed = time.monotonic() - start
     log.info(

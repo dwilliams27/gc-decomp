@@ -60,9 +60,11 @@ class ReadSourceFileParams(BaseModel):
 
 
 class WriteFunctionParams(BaseModel):
-    """Replace a function's implementation in the source file. Provide the
-    complete function including signature and body. The old implementation
-    is found by name and fully replaced."""
+    """Replace a function's implementation, compile, and return match results.
+    Provide the complete function including signature and body. The old
+    implementation is found by name and fully replaced. Automatically compiles
+    and returns match percentages. If compilation fails, the code is reverted
+    to the previous working version."""
 
     source_file: str = Field(
         description='Object name from configure.py, e.g. "melee/lb/lbcommand.c"'

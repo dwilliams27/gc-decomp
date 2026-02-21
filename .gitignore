@@ -8,4 +8,7 @@ data/
 .env
 *.db
 *.db.bak
+*.db-shm
+*.db-wal
 build.ninja
+node_modules/

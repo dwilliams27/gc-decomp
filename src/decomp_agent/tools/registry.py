@@ -212,40 +212,12 @@ def _handle_read_source_file(
     return read_source_file(src_path)
 
 
-def _handle_write_function(
-    params: WriteFunctionParams, config: Config
-) -> str:
-    from decomp_agent.tools.source import (
-        read_source_file,
-        replace_function,
-        write_source_file,
-    )
-
-    src_path = config.melee.resolve_source_path(params.source_file)
-    if not src_path.exists():
-        return f"Error: source file not found: {src_path}"
-
-    source = read_source_file(src_path)
-    updated = replace_function(source, params.function_name, params.code)
-    if updated is None:
-        return (
-            f"Error: function '{params.function_name}' not found in "
-            f"{params.source_file}. Use read_source_file to check the file."
-        )
-    write_source_file(src_path, updated)
-    return f"Successfully wrote {params.function_name} to {params.source_file}"
-
-
-def _handle_compile_and_check(
-    params: CompileAndCheckParams, config: Config
-) -> str:
-    from decomp_agent.tools.build import check_match
-
-    result = check_match(params.source_file, config)
+def _format_match_result(result, source_file: str) -> str:
+    """Format a check_match result into a human-readable string."""
     if not result.success:
         return f"Compilation failed:\n{result.error}"
 
-    lines = [f"Compilation successful. Match results for {params.source_file}:\n"]
+    lines = [f"Compilation successful. Match results for {source_file}:\n"]
     for func in result.functions:
         if func.is_matched:
             status = "MATCH"
@@ -286,6 +258,55 @@ def _handle_compile_and_check(
         lines.append(f"\nOverall: {result.match_percent:.1f}% average match")
 
     return "\n".join(lines)
+
+
+def _handle_write_function(
+    params: WriteFunctionParams, config: Config
+) -> str:
+    from decomp_agent.tools.build import check_match
+    from decomp_agent.tools.source import (
+        read_source_file,
+        replace_function,
+        write_source_file,
+    )
+
+    src_path = config.melee.resolve_source_path(params.source_file)
+    if not src_path.exists():
+        return f"Error: source file not found: {src_path}"
+
+    source = read_source_file(src_path)
+    updated = replace_function(source, params.function_name, params.code)
+    if updated is None:
+        return (
+            f"Error: function '{params.function_name}' not found in "
+            f"{params.source_file}. Use read_source_file to check the file."
+        )
+    write_source_file(src_path, updated)
+
+    # Auto-compile and return match results inline.
+    # If compilation fails, restore the previous source so the agent
+    # isn't building on broken state in subsequent iterations.
+    result = check_match(params.source_file, config)
+    if not result.success:
+        write_source_file(src_path, source)
+        return (
+            f"Wrote {params.function_name}, but compilation failed "
+            f"(reverted to previous code):\n{result.error}"
+        )
+
+    return (
+        f"Wrote {params.function_name} to {params.source_file}.\n\n"
+        + _format_match_result(result, params.source_file)
+    )
+
+
+def _handle_compile_and_check(
+    params: CompileAndCheckParams, config: Config
+) -> str:
+    from decomp_agent.tools.build import check_match
+
+    result = check_match(params.source_file, config)
+    return _format_match_result(result, params.source_file)
 
 
 def _handle_get_diff(params: GetDiffParams, config: Config) -> str:

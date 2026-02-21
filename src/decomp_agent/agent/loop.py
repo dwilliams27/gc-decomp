@@ -50,10 +50,13 @@ _FUNC_MATCH_RE = re.compile(r"(\w+):\s*MATCH\b")
 _FUNC_PCT_RE = re.compile(r"(\w+):\s*(\d+(?:\.\d+)?)%")
 
 
+_MATCH_TOOLS = {"compile_and_check", "write_function"}
+
+
 def _update_best_match(
     tool_name: str, tool_result: str, current_best: float, function_name: str
 ) -> float:
-    """Parse compile_and_check output to track the target function's match.
+    """Parse compile/write output to track the target function's match.
 
     Only considers the target function's line in the output. Recognises:
       - "All functions match!" → 100.0
@@ -61,7 +64,7 @@ def _update_best_match(
       - "function_name: 85.3% (size: N)" → 85.3
     Returns the max of current_best and the target function's match.
     """
-    if tool_name != "compile_and_check":
+    if tool_name not in _MATCH_TOOLS:
         return current_best
 
     if "All functions match!" in tool_result:
@@ -86,7 +89,7 @@ def _target_function_matched(
     tool_name: str, tool_result: str, function_name: str
 ) -> bool:
     """Check if the target function specifically shows MATCH in compile output."""
-    if tool_name != "compile_and_check":
+    if tool_name not in _MATCH_TOOLS:
         return False
 
     if "All functions match!" in tool_result:
@@ -165,6 +168,8 @@ def run_agent(
             iteration=iteration,
             max=max_iterations,
             match=result.best_match_percent,
+            tokens=result.total_tokens,
+            budget=token_budget,
         )
 
         # Call the Responses API
@@ -241,7 +246,7 @@ def run_agent(
             if _target_function_matched(fc.name, tool_result, function_name):
                 result.matched = True
                 result.termination_reason = "matched"
-                bound_log.info(f"{bar()} function_matched", trigger="compile_and_check")
+                bound_log.info(f"{bar()} function_matched", trigger=fc.name)
 
             # Also accept explicit mark_complete — but only if verified
             if fc.name == "mark_complete" and "confirmed MATCH" in tool_result:
