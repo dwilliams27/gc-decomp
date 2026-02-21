@@ -13,6 +13,7 @@ from decomp_agent.agent.loop import AgentResult, run_agent
 from decomp_agent.config import Config
 from decomp_agent.cost import calculate_cost
 from decomp_agent.models.db import Function, get_best_attempt, record_attempt
+from decomp_agent.tools.build import check_match
 
 log = structlog.get_logger()
 
@@ -81,6 +82,33 @@ def run_function(
             src_path = config.melee.resolve_source_path(source_file)
             saved_source = src_path.read_bytes() if src_path.exists() else None
 
+            # Capture baseline match percentages for collateral damage guard
+            baseline: dict[str, float] | None = None
+            try:
+                baseline_result = check_match(source_file, config)
+                if baseline_result.success:
+                    baseline = {
+                        f.name: f.fuzzy_match_percent
+                        for f in baseline_result.functions
+                    }
+                    bound_log.info(
+                        "baseline_captured",
+                        function=func_name,
+                        num_functions=len(baseline),
+                    )
+                else:
+                    bound_log.warning(
+                        "baseline_compile_failed",
+                        function=func_name,
+                        error=baseline_result.error,
+                    )
+            except Exception as e:
+                bound_log.warning(
+                    "baseline_capture_error",
+                    function=func_name,
+                    error=str(e),
+                )
+
             # Look up best prior attempt for warm start
             prior_best_code: str | None = None
             prior_match_pct: float = 0
@@ -111,6 +139,44 @@ def run_function(
                     error=str(e),
                     termination_reason="agent_crash",
                 )
+
+            # Collateral damage check: reject match if other functions got worse
+            if result.matched and baseline is not None:
+                try:
+                    final_result = check_match(source_file, config)
+                    if final_result.success:
+                        damaged: list[tuple[str, float, float]] = []
+                        for fn, before_pct in baseline.items():
+                            if fn == func_name:
+                                continue
+                            final_fn = final_result.get_function(fn)
+                            if final_fn is None:
+                                continue
+                            after_pct = final_fn.fuzzy_match_percent
+                            if after_pct < before_pct:
+                                damaged.append((fn, before_pct, after_pct))
+                        if damaged:
+                            for fn, before_pct, after_pct in damaged:
+                                bound_log.warning(
+                                    "collateral_damage",
+                                    damaged_function=fn,
+                                    before=before_pct,
+                                    after=after_pct,
+                                    delta=round(after_pct - before_pct, 2),
+                                )
+                            bound_log.warning(
+                                "match_rejected_collateral_damage",
+                                function=func_name,
+                                num_damaged=len(damaged),
+                            )
+                            result.matched = False
+                            result.termination_reason = "collateral_damage"
+                except Exception as e:
+                    bound_log.warning(
+                        "collateral_check_error",
+                        function=func_name,
+                        error=str(e),
+                    )
 
             # Revert source file if function didn't match
             if not result.matched and saved_source is not None:

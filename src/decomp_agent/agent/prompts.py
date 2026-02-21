@@ -173,6 +173,12 @@ to force register allocation. If a function is already defined or declared \
 in the same file, its types are known — use them. Local prototype tricks \
 that shadow the real signature are hacks, not decompilation.
 
+- **No modifications outside your target function.** Do not add, remove, \
+or reorder `#pragma` directives, static variables, other function bodies, \
+or file-level declarations that affect other functions. Your changes must \
+be scoped to the function you are assigned to match. Changes that improve \
+your function but worsen others will be detected and rejected.
+
 ## Tools
 
 - get_target_assembly(function_name, source_file) — Target PowerPC assembly
