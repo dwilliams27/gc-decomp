@@ -42,7 +42,7 @@ def calculate_cost(result: AgentResult, pricing: PricingConfig) -> float:
     if not result.model:
         return 0.0
     model_pricing = pricing.get_model_pricing(result.model)
-    input_cost = result.input_tokens * model_pricing.input_per_million / 1_000_000
+    input_cost = (result.input_tokens - result.cached_tokens) * model_pricing.input_per_million / 1_000_000
     cached_cost = result.cached_tokens * model_pricing.cached_input_per_million / 1_000_000
     output_cost = result.output_tokens * model_pricing.output_per_million / 1_000_000
     return input_cost + cached_cost + output_cost
