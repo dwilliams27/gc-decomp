@@ -125,14 +125,26 @@ def run_function(
 
             # Run the agent
             try:
-                result = run_agent(
-                    func_name,
-                    source_file,
-                    config,
-                    worker_label=worker_label,
-                    prior_best_code=prior_best_code,
-                    prior_match_pct=prior_match_pct,
-                )
+                if config.claude_code.enabled:
+                    from decomp_agent.orchestrator.headless import run_headless
+
+                    result = run_headless(
+                        func_name,
+                        source_file,
+                        config,
+                        worker_label=worker_label,
+                        prior_best_code=prior_best_code,
+                        prior_match_pct=prior_match_pct,
+                    )
+                else:
+                    result = run_agent(
+                        func_name,
+                        source_file,
+                        config,
+                        worker_label=worker_label,
+                        prior_best_code=prior_best_code,
+                        prior_match_pct=prior_match_pct,
+                    )
             except Exception as e:
                 log.error("agent_crash", function=func_name, error=str(e))
                 result = AgentResult(

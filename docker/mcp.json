@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "decomp-tools": {
+      "command": "python",
+      "args": ["-m", "decomp_agent.mcp_server"],
+      "env": { "DECOMP_CONFIG": "/app/config/container.toml" }
+    }
+  }
+}

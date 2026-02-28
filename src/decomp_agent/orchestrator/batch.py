@@ -91,6 +91,35 @@ def _run_one(
             batch.results.append(fr)
         return fr
 
+    # Rate-limit backoff for Claude Code headless mode
+    if result.termination_reason == "rate_limited":
+        retry_count = 0
+        max_retries = 5
+        while retry_count < max_retries:
+            backoff = min(300, 30 * (2 ** retry_count))
+            log.warning(
+                "rate_limited_backoff",
+                function=func_name,
+                backoff=backoff,
+                retry=retry_count + 1,
+            )
+            console.print(
+                f"  [yellow]Rate limited, backing off {backoff}s "
+                f"(retry {retry_count + 1}/{max_retries})[/yellow]"
+            )
+            time.sleep(backoff)
+            try:
+                result = run_function(
+                    function, config, engine,
+                    worker_label=worker_label, warm_start=warm_start,
+                )
+            except Exception as e:
+                log.error("batch_function_error", function=func_name, error=str(e))
+                break
+            if result.termination_reason != "rate_limited":
+                break
+            retry_count += 1
+
     cost = calculate_cost(result, config.pricing)
     fr = FunctionResult(
         name=func_name,
@@ -191,8 +220,11 @@ def run_batch(
             batch.elapsed = time.monotonic() - start
             return batch
 
-        # 2. Estimate costs
-        estimated_cost = estimate_batch_cost(candidates, config.agent.model, session, config.pricing)
+        # 2. Estimate costs (skip for Claude Code headless — flat-rate subscription)
+        if config.claude_code.enabled:
+            estimated_cost = 0.0
+        else:
+            estimated_cost = estimate_batch_cost(candidates, config.agent.model, session, config.pricing)
 
     # 3. Display preview table
     table = Table(title="Batch Preview")
@@ -210,11 +242,17 @@ def run_batch(
         )
 
     console.print(table)
-    console.print(
-        f"\n[bold]{len(candidates)}[/bold] functions, "
-        f"estimated cost: [bold]${estimated_cost:.4f}[/bold]"
-        + (f", budget: [bold]${budget:.4f}[/bold]" if budget is not None else "")
-    )
+    if config.claude_code.enabled:
+        console.print(
+            f"\n[bold]{len(candidates)}[/bold] functions "
+            f"(Claude Code headless — flat rate, no per-token cost)"
+        )
+    else:
+        console.print(
+            f"\n[bold]{len(candidates)}[/bold] functions, "
+            f"estimated cost: [bold]${estimated_cost:.4f}[/bold]"
+            + (f", budget: [bold]${budget:.4f}[/bold]" if budget is not None else "")
+        )
 
     # 4. Confirm
     if not auto_approve:

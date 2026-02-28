@@ -97,6 +97,13 @@ class GhidraConfig(BaseModel):
     dol_path: Path | None = None  # Path to original DOL for initial import
 
 
+class ClaudeCodeConfig(BaseModel):
+    enabled: bool = False
+    container_name: str = "docker-worker-1"
+    timeout_seconds: int = 1800  # 30 min per function attempt
+    max_turns: int = 30
+
+
 class OrchestrationConfig(BaseModel):
     db_path: Path = Path("decomp.db")
     max_function_size: int | None = None
@@ -116,6 +123,7 @@ class Config(BaseModel):
     agent: AgentConfig = AgentConfig()
     docker: DockerConfig = DockerConfig()
     ghidra: GhidraConfig = GhidraConfig()
+    claude_code: ClaudeCodeConfig = ClaudeCodeConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
     logging: LoggingConfig = LoggingConfig()
     pricing: PricingConfig = PricingConfig()

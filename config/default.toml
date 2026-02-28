@@ -11,8 +11,14 @@ max_ctx_chars = 20000
 
 [docker]
 enabled = true
-container_name = "melee-build"
+container_name = "docker-worker-1"
 image = "ghcr.io/doldecomp/build-melee:main"
+
+[claude_code]
+enabled = false
+container_name = "docker-worker-1"
+timeout_seconds = 1800
+max_turns = 30
 
 [ghidra]
 enabled = false

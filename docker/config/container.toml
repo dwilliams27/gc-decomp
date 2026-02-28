@@ -1,0 +1,12 @@
+[melee]
+repo_path = "/Users/dwilliams/proj/melee-fork/melee"  # same path, bind-mounted
+version = "GALE01"
+
+[agent]
+max_iterations = 30
+
+[docker]
+enabled = false  # We're already inside the build container
+
+[ghidra]
+enabled = false

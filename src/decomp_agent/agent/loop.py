@@ -228,6 +228,18 @@ def run_agent(
 
         # Check if model stopped (no tool calls)
         if not function_calls:
+            # If the model gave up early with budget remaining, nudge it once
+            budget_remaining = result.total_tokens < token_budget * 0.8
+            if not result.matched and budget_remaining and not getattr(result, '_nudged', False):
+                result._nudged = True  # type: ignore[attr-defined]
+                bound_log.info(f"{bar()} nudging_model", match=result.best_match_percent)
+                current_input = (
+                    "You still have budget remaining. Do not give up. "
+                    "Use get_m2c_decompilation for a starting point if you haven't, "
+                    "then write_function to submit it. Iterate from there — "
+                    "even a partial match is progress. Keep calling tools."
+                )
+                continue
             bound_log.info(f"{bar()} model_stopped", match=result.best_match_percent)
             result.termination_reason = "model_stopped"
             break

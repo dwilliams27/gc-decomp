@@ -71,10 +71,21 @@ def init(ctx: click.Context) -> None:
 
 @main.command()
 @click.argument("name")
+@click.option("--max-tokens", default=None, type=int, help="Max tokens per attempt (e.g. 5000000)")
+@click.option("--max-iterations", default=None, type=int, help="Max agent iterations")
+@click.option("--warm-start", is_flag=True, default=False, help="Seed with best prior attempt code")
+@click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
 @click.pass_context
-def run(ctx: click.Context, name: str) -> None:
+def run(ctx: click.Context, name: str, max_tokens: int | None, max_iterations: int | None, warm_start: bool, headless: bool) -> None:
     """Run agent on a single function by name."""
     config, engine = _load(ctx)
+
+    if headless:
+        config.claude_code.enabled = True
+    if max_tokens is not None:
+        config.agent.max_tokens_per_attempt = max_tokens
+    if max_iterations is not None:
+        config.agent.max_iterations = max_iterations
 
     from decomp_agent.orchestrator.runner import run_function
 
@@ -88,7 +99,7 @@ def run(ctx: click.Context, name: str) -> None:
         raise SystemExit(1)
 
     console.print(f"Running agent on [bold]{name}[/bold] ({function.source_file})")
-    result = run_function(function, config, engine)
+    result = run_function(function, config, engine, warm_start=warm_start)
 
     if result.matched:
         console.print(f"[green]MATCHED![/green] in {result.elapsed_seconds:.1f}s")
@@ -113,6 +124,8 @@ def run(ctx: click.Context, name: str) -> None:
 @click.option("--max-match", default=None, type=float, help="Maximum current match percentage")
 @click.option("--yes", "auto_approve", is_flag=True, default=False, help="Skip confirmation prompt")
 @click.option("--log-file", default=None, type=click.Path(path_type=Path), help="Path for JSON-lines log file")
+@click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
+@click.option("--warm-start", is_flag=True, default=False, help="Seed with best prior attempt code")
 @click.pass_context
 def batch(
     ctx: click.Context,
@@ -126,6 +139,8 @@ def batch(
     max_match: float | None,
     auto_approve: bool,
     log_file: Path | None,
+    headless: bool,
+    warm_start: bool,
 ) -> None:
     """Run agent on candidates in batch mode."""
     if log_file is not None:
@@ -134,6 +149,9 @@ def batch(
         configure_logging(level=ctx.obj.get("log_level") or "INFO", log_file=log_file)
 
     config, engine = _load(ctx)
+
+    if headless:
+        config.claude_code.enabled = True
 
     from decomp_agent.orchestrator.batch import run_batch
 
@@ -145,7 +163,8 @@ def batch(
 
     console.print(
         f"Starting batch run (limit={effective_limit}, max_size={effective_max_size}, "
-        f"workers={effective_workers}, budget={effective_budget})"
+        f"workers={effective_workers}, budget={effective_budget}"
+        + (", mode=headless" if headless else "") + ")"
     )
 
     result = run_batch(
@@ -160,6 +179,7 @@ def batch(
         min_match=min_match,
         max_match=max_match,
         auto_approve=auto_approve,
+        warm_start=warm_start,
     )
 
     console.print(f"\n[bold]Batch complete:[/bold]")
