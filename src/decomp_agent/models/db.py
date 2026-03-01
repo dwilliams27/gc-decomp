@@ -64,6 +64,7 @@ class Attempt(SQLModel, table=True):
     tool_counts: str | None = None  # JSON: {"tool_name": count, ...}
     cost: float = 0.0  # Dollar cost of this attempt
     warm_start: bool = False  # Whether this attempt was seeded with prior code
+    session_id: str = ""  # Claude Code session ID or OpenAI response ID
 
 
 def get_engine(db_path: Path | str) -> Engine:
@@ -92,6 +93,7 @@ def _migrate(engine: Engine) -> None:
         ("attempt", "tool_counts", "TEXT"),
         ("attempt", "cost", "REAL NOT NULL DEFAULT 0.0"),
         ("attempt", "warm_start", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("attempt", "session_id", "TEXT NOT NULL DEFAULT ''"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -163,6 +165,7 @@ def record_attempt(
         tool_counts=json.dumps(result.tool_counts) if result.tool_counts else None,
         cost=cost,
         warm_start=result.warm_start,
+        session_id=result.session_id,
     )
     session.add(attempt)
 

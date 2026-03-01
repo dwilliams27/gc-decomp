@@ -46,6 +46,8 @@ class AgentResult:
     """Count of each tool called during this attempt."""
     warm_start: bool = False
     """Whether this attempt was seeded with prior code."""
+    session_id: str = ""
+    """Claude Code session ID (headless mode) or OpenAI response ID."""
 
 
 _FUNC_MATCH_RE = re.compile(r"(\w+):\s*MATCH\b")

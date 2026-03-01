@@ -152,9 +152,10 @@ def run_headless(
     result.cached_tokens = usage.get("cache_read_input_tokens", 0)
     result.total_tokens = result.input_tokens + result.output_tokens
 
-    # Extract result text
+    # Extract result text and session ID
     result_text = output.get("result", "")
     session_id = output.get("session_id", "")
+    result.session_id = session_id
 
     # Determine iterations from num_turns
     result.iterations = output.get("num_turns", 0)
