@@ -33,6 +33,66 @@ def _get_file_lock(source_file: str) -> threading.Lock:
         return _file_locks[source_file]
 
 
+def _auto_commit_match(
+    func_name: str,
+    source_file: str,
+    config: Config,
+    bound_log,
+) -> None:
+    """Git-commit the matched function in the melee repo.
+
+    Stages only the changed source file(s) and commits with a standard
+    message. Failures are logged but never raised — a commit failure
+    should not break the batch run.
+    """
+    import subprocess
+
+    repo_path = str(config.melee.repo_path)
+    src_path = config.melee.resolve_source_path(source_file)
+
+    # Also check for a corresponding header change
+    header_path = src_path.with_suffix(".h")
+    files_to_add = [str(src_path)]
+    if header_path.exists():
+        # Only add if it has unstaged changes
+        try:
+            ret = subprocess.run(
+                ["git", "diff", "--name-only", "--", str(header_path)],
+                capture_output=True, text=True, cwd=repo_path,
+            )
+            if header_path.name in (ret.stdout or ""):
+                files_to_add.append(str(header_path))
+        except Exception:
+            pass
+
+    try:
+        subprocess.run(
+            ["git", "add"] + files_to_add,
+            check=True, capture_output=True, text=True, cwd=repo_path,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", f"Match {func_name} in {source_file}"],
+            check=True, capture_output=True, text=True, cwd=repo_path,
+        )
+        bound_log.info(
+            "auto_commit",
+            function=func_name,
+            source_file=source_file,
+        )
+    except subprocess.CalledProcessError as e:
+        bound_log.warning(
+            "auto_commit_failed",
+            function=func_name,
+            error=e.stderr.strip() if e.stderr else str(e),
+        )
+    except Exception as e:
+        bound_log.warning(
+            "auto_commit_failed",
+            function=func_name,
+            error=str(e),
+        )
+
+
 def run_function(
     function: Function,
     config: Config,
@@ -215,6 +275,11 @@ def run_function(
 
             function.updated_at = datetime.now(timezone.utc)
             session.commit()
+
+            # Auto-commit matched functions to the melee repo so victories
+            # are locked in and can be built on by subsequent attempts.
+            if result.matched:
+                _auto_commit_match(func_name, source_file, config, bound_log)
 
             log.info(
                 "function_complete",
