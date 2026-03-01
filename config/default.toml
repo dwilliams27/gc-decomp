@@ -30,6 +30,7 @@ program_path = "/main.dol"
 db_path = "decomp.db"
 batch_size = 50
 default_workers = 1
+max_attempts_per_function = 10
 # default_budget — omit to leave unlimited
 
 [pricing.models."gpt-5.2-codex"]

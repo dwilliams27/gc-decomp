@@ -64,6 +64,12 @@ def run_headless(
     max_turns = config.claude_code.max_turns
     timeout = config.claude_code.timeout_seconds
 
+    # Boost max_turns for warm starts that are already close (85%+).
+    # These functions just need more iterations to close the final gap.
+    if prior_best_code is not None and prior_match_pct >= 85.0:
+        max_turns = max(max_turns, 60)
+        timeout = max(timeout, 3600)
+
     # Build a shell command that reads the system prompt file inside the container
     system_prompt_path = "/app/system-prompt.md"
 

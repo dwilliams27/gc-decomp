@@ -110,6 +110,7 @@ class OrchestrationConfig(BaseModel):
     batch_size: int = 50
     default_workers: int = 1
     default_budget: float | None = None
+    max_attempts_per_function: int = 10
 
 
 class LoggingConfig(BaseModel):

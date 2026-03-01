@@ -270,6 +270,15 @@ def run_function(
             if result.matched:
                 function.status = "matched"
                 function.matched_at = datetime.now(timezone.utc)
+            elif function.attempts >= config.orchestration.max_attempts_per_function:
+                function.status = "skipped"
+                bound_log.info(
+                    "function_skipped",
+                    function=func_name,
+                    attempts=function.attempts,
+                    best_match=function.current_match_pct,
+                    reason="max_attempts_exceeded",
+                )
             else:
                 function.status = "pending"
 
