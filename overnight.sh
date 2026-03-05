@@ -9,6 +9,7 @@ cd "$(dirname "$0")"
 BATCH_SIZE=${BATCH_SIZE:-10}
 MAX_SIZE=${MAX_SIZE:-1000}
 STRATEGY=${STRATEGY:-smallest_first}
+WORKERS=${WORKERS:-3}
 LOG_FILE="overnight-$(date +%Y%m%d-%H%M%S).log"
 STATUS_FILE="overnight-status.json"
 RATE_LIMIT_BACKOFF=600   # Start with 10 min on persistent rate limits
@@ -46,7 +47,7 @@ log_msg() {
 }
 
 log_msg "=== Overnight batch run starting ==="
-log_msg "Batch size: $BATCH_SIZE, Max function size: $MAX_SIZE, Strategy: $STRATEGY"
+log_msg "Batch size: $BATCH_SIZE, Max function size: $MAX_SIZE, Strategy: $STRATEGY, Workers: $WORKERS"
 log_msg "Log file: $LOG_FILE"
 
 write_status "starting" "Initializing overnight run"
@@ -64,20 +65,21 @@ while true; do
         --limit "$BATCH_SIZE" \
         --max-size "$MAX_SIZE" \
         --strategy "$STRATEGY" \
+        --workers "$WORKERS" \
         --warm-start \
         2>&1 | tee -a "$LOG_FILE")
     EXIT_CODE=$?
     set -e
 
-    # Parse results from output
-    BATCH_MATCHED=$(echo "$OUTPUT" | grep -c "MATCHED" || true)
-    BATCH_RATE_LIMITED=$(echo "$OUTPUT" | grep -ci "rate.limit" || true)
+    # Parse results from output — use specific event names to avoid double-counting
+    BATCH_MATCHED=$(echo "$OUTPUT" | grep -c "function_matched\|matched=True" || true)
+    BATCH_RATE_LIMITED=$(echo "$OUTPUT" | grep -ci "rate.limit\|fast_crash\|overloaded" || true)
     BATCH_NO_CANDIDATES=$(echo "$OUTPUT" | grep -c "No candidates" || true)
 
     TOTAL_MATCHED=$(( TOTAL_MATCHED + BATCH_MATCHED ))
 
-    # Count attempted (lines with function starts)
-    BATCH_ATTEMPTED=$(echo "$OUTPUT" | grep -c "batch_function_start\|function_start" || true)
+    # Count attempted — only batch_function_start (fires once per function)
+    BATCH_ATTEMPTED=$(echo "$OUTPUT" | grep -c "batch_function_start" || true)
     TOTAL_ATTEMPTED=$(( TOTAL_ATTEMPTED + BATCH_ATTEMPTED ))
 
     log_msg "Batch #$BATCH_NUM done: exit=$EXIT_CODE matched=$BATCH_MATCHED attempted=$BATCH_ATTEMPTED"

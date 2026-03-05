@@ -101,7 +101,7 @@ class ClaudeCodeConfig(BaseModel):
     enabled: bool = False
     container_name: str = "docker-worker-1"
     timeout_seconds: int = 1800  # 30 min per function attempt
-    max_turns: int = 30
+    max_turns: int = 50
 
 
 class OrchestrationConfig(BaseModel):

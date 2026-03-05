@@ -64,10 +64,10 @@ def run_headless(
     max_turns = config.claude_code.max_turns
     timeout = config.claude_code.timeout_seconds
 
-    # Boost max_turns for warm starts that are already close (85%+).
+    # Boost max_turns for warm starts that are already close (75%+).
     # These functions just need more iterations to close the final gap.
-    if prior_best_code is not None and prior_match_pct >= 85.0:
-        max_turns = max(max_turns, 60)
+    if prior_best_code is not None and prior_match_pct >= 75.0:
+        max_turns = max(max_turns, 80)
         timeout = max(timeout, 3600)
 
     # Build a shell command that reads the system prompt file inside the container
@@ -120,25 +120,57 @@ def run_headless(
         bound_log.warning("headless_timeout", timeout=timeout)
         return result
 
-    # Check for rate limiting in stderr
+    # Combine all output for error detection — Claude Code may write errors
+    # to stdout or stderr depending on failure mode.
     stderr = proc.stderr or ""
-    if "rate limit" in stderr.lower() or "429" in stderr:
+    stdout = proc.stdout or ""
+    all_output = f"{stderr}\n{stdout}".lower()
+
+    # Check for rate limiting in any output
+    rate_limited = (
+        "rate limit" in all_output
+        or "rate_limit" in all_output
+        or "429" in all_output
+        or "overloaded" in all_output
+        or "too many requests" in all_output
+    )
+    if rate_limited:
         result.elapsed_seconds = time.monotonic() - start_time
         result.termination_reason = "rate_limited"
-        result.error = f"Rate limited: {stderr.strip()}"
-        bound_log.warning("headless_rate_limited", stderr=stderr.strip())
+        error_detail = stderr.strip() or stdout.strip()[:500]
+        result.error = f"Rate limited: {error_detail}"
+        bound_log.warning("headless_rate_limited", error=error_detail)
         return result
 
     # Check for non-zero exit
     if proc.returncode != 0:
         result.elapsed_seconds = time.monotonic() - start_time
-        result.termination_reason = "api_error"
-        result.error = f"Claude Code exited with code {proc.returncode}: {stderr.strip()}"
-        bound_log.error(
-            "headless_error",
-            returncode=proc.returncode,
-            stderr=stderr.strip(),
-        )
+        error_detail = stderr.strip() or stdout.strip()[:500] or "(no output)"
+        elapsed = result.elapsed_seconds
+
+        # If Claude Code crashes fast with no useful output, it's almost
+        # certainly an API error (overloaded, rate limited, auth issue).
+        # Treat as rate_limited so the batch runner backs off.
+        if elapsed < 15 and error_detail == "(no output)":
+            result.termination_reason = "rate_limited"
+            result.error = f"Claude Code crashed immediately (exit {proc.returncode}, {elapsed:.1f}s) — likely API overload"
+            bound_log.warning(
+                "headless_fast_crash",
+                returncode=proc.returncode,
+                elapsed=round(elapsed, 1),
+                stdout=stdout.strip()[:200],
+                stderr=stderr.strip()[:200],
+            )
+        else:
+            result.termination_reason = "api_error"
+            result.error = f"Claude Code exited with code {proc.returncode}: {error_detail}"
+            bound_log.error(
+                "headless_error",
+                returncode=proc.returncode,
+                elapsed=round(elapsed, 1),
+                stderr=stderr.strip()[:200],
+                stdout=stdout.strip()[:200],
+            )
         return result
 
     # Parse JSON output

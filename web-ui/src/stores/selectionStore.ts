@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-type View = "treemap" | "function" | "batch" | "events";
+type View = "treemap" | "function" | "batch" | "events" | "monitor";
 
 interface SelectionState {
   view: View;

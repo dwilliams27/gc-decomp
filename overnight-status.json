@@ -1,0 +1,11 @@
+{
+  "status": "cooldown",
+  "detail": "30s between batches",
+  "batch_num": 1823,
+  "total_matched": 9,
+  "total_attempted": 18230,
+  "total_errors": 0,
+  "elapsed_seconds": 204192,
+  "last_update": "2026-03-05T03:08:01Z",
+  "log_file": "overnight-20260302-122449.log"
+}

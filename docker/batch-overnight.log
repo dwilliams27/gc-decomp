@@ -1,0 +1,11 @@
+Starting batch run (limit=50, max_size=None, workers=1, budget=None, mode=headless)
+[2m00:32:09.81[0m [[32m[1minfo[0m] [1mbatch_start                   [0m [[0m[1m[34mdecomp_agent.orchestrator.batch[0m][0m [36mbudget[0m=[35mNone[0m [36mlibrary[0m=[35mNone[0m [36mlimit[0m=[35m50[0m [36mmax_size[0m=[35mNone[0m [36mstrategy[0m=[35msmallest_first[0m [36mworkers[0m=[35m1[0m
+No candidates match the given filters.
+
+Batch complete:
+  Attempted: 0
+  Matched:   0
+  Failed:    0
+  Tokens:    0
+  Cost:      $0.0000
+  Elapsed:   0.0s

@@ -128,20 +128,20 @@ def start_batch(req: BatchStartRequest):
 
 @router.get("/current")
 def current_batch():
-    """Get current batch status by querying the DB for live progress."""
+    """Get current batch status by querying the DB for live progress.
+
+    Works for both web-started batches (in-memory state) and external
+    batches started via CLI (detected from DB activity).
+    """
     status = get_batch_status()
 
     with status._lock:
-        running = status.running
+        web_running = status.running
         cancelled = status.cancelled
         started_at_utc = status.started_at_utc
         started_at_mono = status.started_at_monotonic
         params = dict(status.params)
 
-    if not running and started_at_utc is None:
-        return {"running": False}
-
-    # Query DB for live progress since this batch started
     state = get_state()
     with Session(state.engine) as session:
         # Functions currently being worked on
@@ -149,54 +149,93 @@ def current_batch():
             select(Function.name).where(Function.status == "in_progress")
         ).all()
 
-        if started_at_utc is not None:
-            # Attempts created since batch started
-            batch_attempts = session.exec(
-                select(Attempt).where(Attempt.started_at >= started_at_utc)
+        # Detect external batch: not web-started but DB shows active work
+        external_batch = not web_running and started_at_utc is None and len(in_progress) > 0
+        running = web_running or external_batch
+
+        if not running and started_at_utc is None:
+            # Check for any recent attempts in last 24h (batch may have just finished)
+            from datetime import timedelta
+
+            # Use naive datetime to match DB storage
+            cutoff = datetime.utcnow() - timedelta(hours=24)
+            recent_count = session.exec(
+                select(sa_func.count()).select_from(Attempt).where(
+                    Attempt.started_at >= cutoff
+                )
+            ).one()
+            if recent_count == 0:
+                return {"running": False}
+            # Use the 24h window as the batch window
+            started_at_utc = cutoff
+
+        if started_at_utc is None and external_batch:
+            # External batch with no web-started timestamp — find the earliest
+            # in-progress attempt or fall back to last 24h
+            from datetime import timedelta
+
+            cutoff_naive = datetime.utcnow() - timedelta(hours=24)
+            earliest = session.exec(
+                select(sa_func.min(Attempt.started_at))
+                .where(Attempt.started_at >= cutoff_naive)
+            ).one()
+            started_at_utc = earliest or cutoff_naive
+
+        # Attempts since batch started
+        batch_attempts = session.exec(
+            select(Attempt).where(Attempt.started_at >= started_at_utc)
+        ).all()
+
+        attempted = len(batch_attempts)
+        matched_count = sum(1 for a in batch_attempts if a.matched)
+        failed_count = sum(
+            1 for a in batch_attempts if not a.matched and a.completed_at is not None
+        )
+        total_cost = sum(a.cost for a in batch_attempts)
+        total_tokens = sum(a.total_tokens for a in batch_attempts)
+
+        # Build recent list with function names
+        func_names: dict[int, str] = {}
+        recent_attempts = sorted(batch_attempts, key=lambda a: a.id or 0)[-10:]
+        if recent_attempts:
+            fids = [a.function_id for a in recent_attempts]
+            funcs = session.exec(
+                select(Function).where(Function.id.in_(fids))  # type: ignore[union-attr]
             ).all()
+            func_names = {f.id: f.name for f in funcs}
 
-            attempted = len(batch_attempts)
-            matched = sum(1 for a in batch_attempts if a.matched)
-            failed = sum(1 for a in batch_attempts if not a.matched and a.completed_at is not None)
-            total_cost = sum(a.cost for a in batch_attempts)
-            total_tokens = sum(a.total_tokens for a in batch_attempts)
+        recent = [
+            {
+                "function_name": func_names.get(a.function_id, f"#{a.function_id}"),
+                "matched": a.matched,
+                "best_match_pct": a.best_match_pct,
+                "termination_reason": a.termination_reason,
+                "cost": round(a.cost, 4),
+                "elapsed": round(a.elapsed_seconds, 1),
+            }
+            for a in recent_attempts
+        ]
 
-            # Build recent list with function names
-            func_names: dict[int, str] = {}
-            recent_attempts = sorted(batch_attempts, key=lambda a: a.id or 0)[-10:]
-            if recent_attempts:
-                fids = [a.function_id for a in recent_attempts]
-                funcs = session.exec(
-                    select(Function).where(Function.id.in_(fids))  # type: ignore[union-attr]
-                ).all()
-                func_names = {f.id: f.name for f in funcs}
-
-            recent = [
-                {
-                    "function_name": func_names.get(a.function_id, f"#{a.function_id}"),
-                    "matched": a.matched,
-                    "best_match_pct": a.best_match_pct,
-                    "termination_reason": a.termination_reason,
-                    "cost": round(a.cost, 4),
-                    "elapsed": round(a.elapsed_seconds, 1),
-                }
-                for a in recent_attempts
-            ]
-        else:
-            attempted = matched = failed = total_tokens = 0
-            total_cost = 0.0
-            recent = []
-
-    elapsed = time.monotonic() - started_at_mono if running else 0
+    # Elapsed time — DB datetimes may be naive (assumed UTC)
+    if web_running:
+        elapsed = time.monotonic() - started_at_mono
+    elif started_at_utc is not None:
+        now = datetime.now(timezone.utc)
+        if started_at_utc.tzinfo is None:
+            started_at_utc = started_at_utc.replace(tzinfo=timezone.utc)
+        elapsed = (now - started_at_utc).total_seconds()
+    else:
+        elapsed = 0
 
     return {
         "running": running,
         "cancelled": cancelled,
+        "started_at": started_at_utc.timestamp() if started_at_utc else None,
         "elapsed": round(elapsed, 1),
         "params": params,
         "attempted": attempted,
-        "matched": matched,
-        "failed": failed,
+        "matched": matched_count,
+        "failed": failed_count,
         "total_cost": round(total_cost, 4),
         "total_tokens": total_tokens,
         "current_functions": list(in_progress),

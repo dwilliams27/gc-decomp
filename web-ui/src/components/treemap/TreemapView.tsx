@@ -4,17 +4,8 @@ import * as d3 from "d3";
 import { api } from "../../api/client";
 import type { TreemapLeaf, TreemapNode } from "../../api/types";
 import { useSelectionStore } from "../../stores/selectionStore";
+import { matchColor } from "../../utils/colors";
 import { TreemapTooltip } from "./TreemapTooltip";
-
-/** Match% -> color: red(0) -> amber(50) -> green(100) */
-function matchColor(pct: number): string {
-  if (pct >= 100) return "#22c55e"; // green-500
-  if (pct >= 80) return "#84cc16"; // lime-500
-  if (pct >= 60) return "#eab308"; // yellow-500
-  if (pct >= 40) return "#f97316"; // orange-500
-  if (pct >= 20) return "#ef4444"; // red-500
-  return "#dc2626"; // red-600
-}
 
 function isLeaf(d: TreemapNode | TreemapLeaf): d is TreemapLeaf {
   return "match_pct" in d;

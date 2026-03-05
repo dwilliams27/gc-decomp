@@ -17,6 +17,26 @@
 - `config/default.toml` — Default configuration
 - Melee repo (fork): `/Users/dwilliams/proj/melee-fork/melee`
 
+## Running the Dev Environment
+
+Two processes needed — backend API server and frontend Vite dev server:
+
+```bash
+# Terminal 1: Backend (FastAPI + Uvicorn on port 8000)
+cd /Users/dwilliams/proj/gc-decomp
+decomp-agent serve --port 8000
+
+# Terminal 2: Frontend (Vite dev server, proxies /api + /ws to port 8000)
+cd /Users/dwilliams/proj/gc-decomp/web-ui
+npm run dev
+```
+
+The frontend Vite config (`web-ui/vite.config.ts`) proxies `/api/*` and `/ws/*` to `http://127.0.0.1:8000`. Open the URL Vite prints (usually http://localhost:5173/).
+
+To build the frontend for production: `cd web-ui && npm run build` — output goes to `web-ui/dist/` which the backend auto-serves.
+
+Web dependencies: `pip install 'decomp-agent[web]'` (FastAPI, Uvicorn, websockets).
+
 ## Testing Standard
 
 - **Always validate new features by running them the way the agent would.** Don't just run unit tests — call the actual tool functions through `registry.dispatch()` (or the underlying function directly) with real data and verify the output is what you'd want the LLM to see. Unit tests with synthetic fixtures are not sufficient; real data from the melee build catches issues that synthetic data misses.

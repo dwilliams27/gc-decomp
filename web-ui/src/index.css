@@ -1,1 +1,34 @@
 @import "tailwindcss";
+
+/* Monitor view animations */
+
+@keyframes worker-pulse {
+  0%,
+  100% {
+    opacity: 0.7;
+    stroke-opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+    stroke-opacity: 1;
+  }
+}
+
+.worker-pulse {
+  animation: worker-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes ticker-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ticker-slide-in {
+  animation: ticker-slide-in 300ms ease-out;
+}

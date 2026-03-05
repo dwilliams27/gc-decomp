@@ -8,18 +8,25 @@ import { BatchConfig } from "../batch/BatchConfig";
 import { BatchMonitor } from "../batch/BatchMonitor";
 import { WorkerView } from "../batch/WorkerView";
 import { EventLog } from "../monitor/EventLog";
+import { MonitorView } from "../monitor/MonitorView";
 
-type View = "treemap" | "function" | "batch" | "events";
+type View = "treemap" | "function" | "batch" | "events" | "monitor";
 
 const NAV_ITEMS: { view: View; label: string }[] = [
   { view: "treemap", label: "Treemap" },
   { view: "batch", label: "Batch" },
   { view: "events", label: "Events" },
+  { view: "monitor", label: "Monitor" },
 ];
 
 export function AppShell() {
   const view = useSelectionStore((s) => s.view);
   const setView = useSelectionStore((s) => s.setView);
+
+  // Monitor view is full-screen — no header/chrome
+  if (view === "monitor") {
+    return <MonitorView />;
+  }
 
   return (
     <div className="flex h-screen flex-col">

@@ -127,7 +127,7 @@ export function BatchMonitor() {
                     {(item.best_match_pct as number)?.toFixed(1) ?? 0}%
                   </span>
                   <span className="text-xs text-gray-600">
-                    ${(item.cost as number)?.toFixed(2)} · {item.elapsed}s
+                    ${(item.cost as number)?.toFixed(2)} · {String(item.elapsed)}s
                   </span>
                 </div>
               );
