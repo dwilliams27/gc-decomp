@@ -90,6 +90,10 @@ def disassemble_object(obj_path: Path, config: Config) -> str:
 
     if config.docker.enabled:
         dtk_path = "/usr/local/bin/dtk"
+    elif Path("/usr/local/bin/dtk").exists():
+        # Inside Docker container with docker.enabled=false — use the
+        # Linux dtk, not the bind-mounted macOS binary in build/tools/.
+        dtk_path = "/usr/local/bin/dtk"
     else:
         dtk_path = f"{config.melee.build_dir}/tools/dtk"
 
