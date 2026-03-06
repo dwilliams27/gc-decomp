@@ -89,8 +89,6 @@ def run_headless(
         "--append-system-prompt", f'"$(cat {system_prompt_path})"',
         "--mcp-config", "/app/mcp.json",
         "--dangerously-skip-permissions",
-        "--disallowedTools",
-        "Edit,Write,Bash,NotebookEdit,EnterWorktree",
         "--max-turns", str(max_turns),
     ]
 
