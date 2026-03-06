@@ -273,6 +273,25 @@ _FOR_DECLARATION_RE = re.compile(
     r"[A-Za-z_]\w*(?:\s*\*+\s*|\s+)\w+\s*="
 )
 
+# Detect m2c-generated variable names like "var_r31", "var_r3_2", "var1".
+# Pattern: var_rNN, var_rNN_N (register-based), or varN (numbered).
+# Does NOT match legitimate names like "var_count" or "variable".
+_M2C_VAR_DECL_RE = re.compile(
+    r"(?:^|[;{}\s])\s*"                       # statement boundary
+    r"(?:const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|"
+    r"struct\s+\w+\s+|enum\s+\w+\s+|union\s+\w+\s+)*"
+    r"[A-Za-z_]\w*(?:\s*\*+\s*|\s+)"          # type
+    r"(var_r\d+(?:_\d+)?|var\d+)"             # m2c variable name
+    r"\s*[;=,\)]",                             # followed by assignment, semicolon, etc.
+    re.MULTILINE,
+)
+
+# Match percentage comments like "// 95% match", "/* 42.3% */", "// 100%"
+_MATCH_PCT_COMMENT_RE = re.compile(
+    r"(?://|/\*)\s*\d+(?:\.\d+)?%\s*(?:match|matched|matching)?\s*(?:\*/)?",
+    re.IGNORECASE,
+)
+
 # Max number of assembly instructions allowed in a single asm {} block.
 # Single-instruction intrinsics (mfspr, psq_st, nop) are legitimate;
 # multi-instruction blocks that replace C logic are not decompilation.
@@ -337,6 +356,32 @@ def _check_c89_declarations(code: str) -> str | None:
     return None
 
 
+def _check_var_names(code: str) -> str | None:
+    """Reject m2c-generated variable names that should be renamed."""
+    match = _M2C_VAR_DECL_RE.search(code)
+    if match:
+        var_name = match.group(1)
+        return (
+            f"Error: code contains m2c-generated variable name '{var_name}'. "
+            f"Rename all var_* / var# names to meaningful identifiers: "
+            f"use 'i'/'j' for loop indices, 'jobj'/'gobj' for objects, "
+            f"'pos'/'vel' for vectors, etc. m2c artifacts are not acceptable "
+            f"in final code."
+        )
+    return None
+
+
+def _check_match_comments(code: str) -> str | None:
+    """Reject match percentage comments — they're noise."""
+    if _MATCH_PCT_COMMENT_RE.search(code):
+        return (
+            "Error: code contains match percentage comments (e.g. '// 95% match'). "
+            "Remove these — objdiff shows match status. Match % comments are "
+            "noise that reviewers will flag."
+        )
+    return None
+
+
 def _handle_write_function(
     params: WriteFunctionParams, config: Config
 ) -> str:
@@ -360,6 +405,12 @@ def _handle_write_function(
     c89_error = _check_c89_declarations(params.code)
     if c89_error is not None:
         return c89_error
+    var_error = _check_var_names(params.code)
+    if var_error is not None:
+        return var_error
+    match_comment_error = _check_match_comments(params.code)
+    if match_comment_error is not None:
+        return match_comment_error
 
     src_path = config.melee.resolve_source_path(params.source_file)
     if not src_path.exists():

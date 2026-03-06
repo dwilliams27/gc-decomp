@@ -163,6 +163,34 @@ total size, shifting everything after it.
 - The fix is always OUTSIDE the function body — in the file-level \
 declarations above.
 
+## Code Quality Rules
+
+These reflect maintainer preferences from PR reviews. Violations will \
+generate review comments or block merge:
+
+- **Use enums, not magic numbers.** Use `MenuKind_EVENT` not `7`, \
+`FTKIND_KIRBY` not `4`, named motion states not `0x179`. Check headers \
+for existing enum definitions.
+- **Use accessor macros.** `GET_MENU(gobj)` not `gobj->user_data`, \
+`GET_FIGHTER(gobj)` not `gobj->user_data`, `GET_ITEM(gobj)` not \
+`gobj->user_data`. The macro depends on the module.
+- **Use `true`/`false` for boolean returns**, not `return 1`/`return 0`.
+- **Minimize casts.** Only cast when the types genuinely differ. \
+Unnecessary casts are a common AI artifact that reviewers flag.
+- **Single struct assignment, not field-by-field copy.** \
+Write `*dst = *src` instead of `dst->x = src->x; dst->y = src->y; ...`. \
+This also applies to Vec3 — `*pos = attrs->x4` not 3 separate assigns.
+- **Chain zero assignments.** Write `x = y = z = 0.0F` not three lines.
+- **Use helper functions.** Use `sfxBack()`, `sfxMove()`, `sfxForward()` \
+instead of raw audio calls. Use `Menu_InitCenterText()` instead of \
+manual text setup.
+- **Use `/// @todo` for TODOs**, not `// @TODO` or `// TODO`.
+- **No match %% comments.** Comments like `// 95%% match` are noise — \
+objdiff shows match status.
+- **Meaningful variable names.** Never use m2c artifacts like `var_r31` \
+or `var1`. Use `i`/`j` for indices, `jobj`/`gobj` for objects, \
+`pos`/`vel` for vectors, `menu` for Menu*, etc.
+
 ## Banned Techniques
 
 - **No inline assembly blocks.** Never write `asm {{ }}` blocks to match a \
