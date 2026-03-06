@@ -11,9 +11,23 @@
 ## Project Structure
 
 - `src/decomp_agent/` — Main package
+- `src/decomp_agent/agent/` — Agent loop, system prompts, m2c seed injection
+  - `loop.py` — OpenAI Responses API agent loop (tool dispatch, token budget, warm-start)
+  - `prompts.py` — System prompt template (CodeWarrior reference, quality rules, banned techniques)
+  - `m2c_seed.py` — Prefetches m2c output into the first prompt for both API and headless agents
+  - `context_mgmt.py` — Context window management
 - `src/decomp_agent/tools/` — Tool implementations (build, source, context, m2c, ghidra, permuter)
+  - `registry.py` — Tool dispatch + write guardrails (inline asm, placeholder, field access, C89, var names, match comments)
 - `src/decomp_agent/melee/` — Melee repo integration (project parsing, report, functions)
-- `tests/` — Test suite (test_phase1.py, test_phase2.py, test_phase3.py)
+- `src/decomp_agent/orchestrator/` — Batch execution and headless mode
+  - `runner.py` — Per-function lifecycle (lock, backup, run agent, collateral damage check, auto-commit)
+  - `batch.py` — Thread pool executor with budget/cost tracking
+  - `headless.py` — Claude Code Docker-based agent backend (uses docker/system-prompt.md)
+- `src/decomp_agent/models/` — Database models (SQLite tracking of attempts, matches, status)
+- `src/decomp_agent/web/` — Web UI backend (FastAPI + WebSocket)
+- `docker/system-prompt.md` — System prompt for headless Docker agent (must stay in sync with prompts.py)
+- `docs/` — Documentation (PERMUTER.md, DOCKER.md, MN_MODULE_GUIDE.md, architecture ref)
+- `tests/` — Test suite (test_phase1-5.py, test_cost.py, test_disasm.py, test_ctx_filter.py, test_e2e.py)
 - `config/default.toml` — Default configuration
 - Melee repo (fork): `/Users/dwilliams/proj/melee-fork/melee`
 
@@ -36,6 +50,28 @@ The frontend Vite config (`web-ui/vite.config.ts`) proxies `/api/*` and `/ws/*` 
 To build the frontend for production: `cd web-ui && npm run build` — output goes to `web-ui/dist/` which the backend auto-serves.
 
 Web dependencies: `pip install 'decomp-agent[web]'` (FastAPI, Uvicorn, websockets).
+
+## Agent Pipeline
+
+Two agent backends exist, both using the same tools and guardrails:
+
+1. **API agent** (`agent/loop.py`) — Uses OpenAI Responses API with `previous_response_id` for multi-turn. Supports permuter tool.
+2. **Headless agent** (`orchestrator/headless.py`) — Runs Claude Code in Docker via MCP server. No permuter yet.
+
+Both backends:
+- Prefetch m2c output into the first prompt (`agent/m2c_seed.py`) so the agent always starts from m2c scaffold
+- Include warm-start support (inject prior best code + match % for retry attempts)
+- Route writes through `registry.py` guardrails before compilation
+
+**Write guardrails** (hard rejects in `registry.py`):
+- Multi-instruction inline asm blocks
+- `NOT_IMPLEMENTED` placeholders
+- Raw pointer arithmetic `(u8*)ptr + 0xNN` (must use struct fields or M2C_FIELD)
+- C99 for-loop declarations
+- m2c artifact variable names (`var_r31`, `var1`)
+- Match percentage comments (`// 95% match`)
+
+**Prompt parity**: `prompts.py` (API agent) and `docker/system-prompt.md` (headless agent) must stay in sync. Both include CodeWarrior reference, quality rules, and banned techniques.
 
 ## Testing Standard
 
