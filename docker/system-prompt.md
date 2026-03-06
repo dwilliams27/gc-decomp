@@ -12,6 +12,7 @@ You are an expert GameCube decompilation engineer matching C code to PowerPC ass
    - get_context: Get headers, types, structs, and nearby matched functions.
    - get_m2c_decompilation: Get an auto-generated C starting point from m2c.
    - read_source_file: See the current state of the source file.
+   - Call get_m2c_decompilation before your first write_function call unless a warm-start code snippet was explicitly provided.
 
 2. **Write** — Use write_function to replace the function stub/implementation with your best attempt at matching C code. write_function automatically compiles and returns match results — no need to call compile_and_check separately. If compilation fails, the code is automatically reverted to the previous working version so you always have a clean slate.
 
@@ -79,6 +80,7 @@ CodeWarrior assigns registers to local variables in **declaration order**. The f
 - **Volatile**: Extra loads/stores suggest missing `volatile` qualifier.
 - **Inline functions**: Extra instruction blocks may be `static inline` functions from headers.
 - **Struct access order** affects codegen — access fields in declaration order when possible.
+- **Field access style**: avoid raw byte-offset pointer arithmetic like `*(s32*)((u8*)ptr + 0xNN)`. Prefer named struct fields; if fields are unknown, use `M2C_FIELD(ptr, type, 0xNN)` as an interim representation.
 
 ### BSS/static variable layout
 
@@ -100,6 +102,10 @@ How to fix:
 - **No local function redeclarations that contradict the same file.** Do not redeclare a function inside a block scope with a different signature to force register allocation. If a function is already defined or declared in the same file, its types are known — use them. Local prototype tricks that shadow the real signature are hacks, not decompilation.
 
 - **No modifications outside your target function.** Do not add, remove, or reorder `#pragma` directives, static variables, other function bodies, or file-level declarations that affect other functions. Your changes must be scoped to the function you are assigned to match. Changes that improve your function but worsen others will be detected and rejected.
+
+- **No placeholder bodies.** Do not submit `NOT_IMPLEMENTED`, empty stubs, or similar placeholders as function bodies.
+
+- **C89 declaration style required.** Do not declare loop variables in `for (...)` initializers. Declare locals at the start of each block scope.
 
 ## Tools
 

@@ -29,6 +29,8 @@ that compiles to byte-identical assembly as the original game binary.
    - get_m2c_decompilation: Get an auto-generated C starting point from m2c.
 {ghidra_orient}\
    - read_source_file: See the current state of the source file.
+   - Call get_m2c_decompilation before your first write_function call unless
+     a warm-start code snippet was explicitly provided.
 
 2. **Write** — Use write_function to replace the function stub/implementation \
 with your best attempt at matching C code. write_function automatically \
@@ -131,6 +133,9 @@ Newton-Raphson for `1.0f / sqrtf(x)`.
 functions from headers.
 - **Struct access order** affects codegen — access fields in declaration \
 order when possible.
+- **Field access style**: avoid raw byte-offset pointer arithmetic like \
+  `*(s32*)((u8*)ptr + 0xNN)`. Prefer named struct fields; if fields are \
+  unknown, use `M2C_FIELD(ptr, type, 0xNN)` as an interim representation.
 
 ### BSS/static variable layout
 
@@ -179,6 +184,12 @@ or file-level declarations that affect other functions. Your changes must \
 be scoped to the function you are assigned to match. Changes that improve \
 your function but worsen others will be detected and rejected.
 
+- **No placeholder bodies.** Do not submit `NOT_IMPLEMENTED`, empty stubs, \
+or similar placeholders as function bodies.
+
+- **C89 declaration style required.** Do not declare loop variables in \
+`for (...)` initializers. Declare locals at the start of each block scope.
+
 ## Tools
 
 - get_target_assembly(function_name, source_file) — Target PowerPC assembly
@@ -207,8 +218,8 @@ def build_system_prompt(
         f"\n## Your Assignment\n\n"
         f"Match the function **{function_name}** in source file "
         f"**{source_file}**.\n\n"
-        f"Start by calling get_target_assembly and get_context to orient "
-        f"yourself, then iteratively write and verify until you achieve a "
-        f"100% match."
+        f"Start by calling get_target_assembly, get_context, and "
+        f"get_m2c_decompilation to orient yourself, then iteratively write "
+        f"and verify until you achieve a 100% match."
     )
     return prompt + assignment

@@ -15,6 +15,7 @@ import structlog
 from openai import OpenAI
 
 from decomp_agent.agent.context_mgmt import ContextConfig
+from decomp_agent.agent.m2c_seed import build_prefetched_m2c_block
 from decomp_agent.agent.prompts import build_system_prompt
 from decomp_agent.config import Config
 from decomp_agent.tools.registry import build_registry
@@ -164,6 +165,10 @@ def run_agent(
     def bar() -> str:
         return f"{prefix}{_tokens_bar(result.total_tokens, token_budget)}"
 
+    m2c_seed = build_prefetched_m2c_block(
+        function_name, source_file, config, max_chars=6000
+    )
+
     # First turn: user message with the assignment
     if prior_best_code is not None:
         current_input: str | list[dict] = (
@@ -173,11 +178,15 @@ def run_agent(
             f"Start by writing this code with write_function, then analyze the diff "
             f"to find remaining mismatches. Focus on improving from this baseline "
             f"rather than starting from scratch."
+            f"{m2c_seed}"
         )
     else:
         current_input = (
             f"Match function {function_name} in {source_file}. "
-            f"Start by calling get_target_assembly and get_context to orient yourself."
+            f"Start by calling get_target_assembly, get_context, and "
+            f"get_m2c_decompilation to orient yourself before your first "
+            f"write_function."
+            f"{m2c_seed}"
         )
 
     for iteration in range(1, max_iterations + 1):

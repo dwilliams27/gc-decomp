@@ -639,3 +639,53 @@ class TestNormalizeSourceFile:
         # melee/|dolphin/|etc. immediately after the optional "src/".
         # This is fine — the model won't hallucinate a double prefix.
         assert _normalize_source_file("src/src/melee/test.c") == "src/src/melee/test.c"
+
+
+# ---------------------------------------------------------------------------
+# write_function guardrail tests
+# ---------------------------------------------------------------------------
+
+
+class TestWriteFunctionGuardrails:
+    def test_rejects_raw_offset_pointer_arithmetic(self):
+        from decomp_agent.tools.registry import _check_field_access_style
+
+        code = (
+            "void foo(Fighter* fp) {\n"
+            "    *(s32*)((u8*)fp + 0x21E4) = 0;\n"
+            "}\n"
+        )
+        error = _check_field_access_style(code)
+        assert error is not None
+        assert "pointer arithmetic" in error
+
+    def test_allows_m2c_field_bridge(self):
+        from decomp_agent.tools.registry import _check_field_access_style
+
+        code = (
+            "void foo(Fighter* fp) {\n"
+            "    M2C_FIELD(fp, s32, 0x21E4) = 0;\n"
+            "}\n"
+        )
+        assert _check_field_access_style(code) is None
+
+    def test_rejects_not_implemented_placeholder(self):
+        from decomp_agent.tools.registry import _check_placeholder_stubs
+
+        code = "void foo(int arg) {\n    NOT_IMPLEMENTED;\n}\n"
+        error = _check_placeholder_stubs(code)
+        assert error is not None
+        assert "NOT_IMPLEMENTED" in error
+
+    def test_rejects_c99_for_declaration(self):
+        from decomp_agent.tools.registry import _check_c89_declarations
+
+        code = (
+            "void foo(void) {\n"
+            "    for (int i = 0; i < 4; i++) {\n"
+            "    }\n"
+            "}\n"
+        )
+        error = _check_c89_declarations(code)
+        assert error is not None
+        assert "for-loop initializer" in error

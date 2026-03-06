@@ -261,6 +261,17 @@ def _format_match_result(result, source_file: str) -> str:
 
 
 _ASM_BLOCK_RE = re.compile(r"\basm\s*\{([^}]*)\}", re.DOTALL)
+_NOT_IMPLEMENTED_RE = re.compile(r"\bNOT_IMPLEMENTED\b")
+_RAW_OFFSET_ACCESS_RE = re.compile(
+    r"\(\s*(?:u8|s8|char|unsigned\s+char)\s*\*\s*\)\s*"
+    r"[A-Za-z_]\w*\s*\+\s*0x[0-9A-Fa-f]+"
+)
+_FOR_DECLARATION_RE = re.compile(
+    r"\bfor\s*\(\s*"
+    r"(?:const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|"
+    r"struct\s+\w+\s+|enum\s+\w+\s+|union\s+\w+\s+)*"
+    r"[A-Za-z_]\w*(?:\s*\*+\s*|\s+)\w+\s*="
+)
 
 # Max number of assembly instructions allowed in a single asm {} block.
 # Single-instruction intrinsics (mfspr, psq_st, nop) are legitimate;
@@ -286,6 +297,46 @@ def _check_inline_asm(code: str) -> str | None:
     return None
 
 
+def _check_placeholder_stubs(code: str) -> str | None:
+    """Return an error if code includes placeholder implementation macros."""
+    if _NOT_IMPLEMENTED_RE.search(code):
+        return (
+            "Error: code contains NOT_IMPLEMENTED placeholder logic. "
+            "Do not replace stubs with placeholders; either provide a real "
+            "decompilation attempt or keep the original /// #function marker."
+        )
+    return None
+
+
+def _check_field_access_style(code: str) -> str | None:
+    """Reject raw offset pointer arithmetic style access.
+
+    Maintainer preference is named fields where possible, or M2C_FIELD as a
+    temporary bridge when offsets are still unknown.
+    """
+    if "M2C_FIELD(" in code:
+        return None
+    if _RAW_OFFSET_ACCESS_RE.search(code):
+        return (
+            "Error: code uses raw offset pointer arithmetic "
+            "((u8*)ptr + 0xNN style). This is considered slop. "
+            "Use named struct fields when available, or M2C_FIELD(...) "
+            "instead of manual byte-offset casts."
+        )
+    return None
+
+
+def _check_c89_declarations(code: str) -> str | None:
+    """Reject common C99 declaration patterns not allowed by the project."""
+    if _FOR_DECLARATION_RE.search(code):
+        return (
+            "Error: code uses a declaration inside a for-loop initializer "
+            "(C99 style). This project expects C89/C90 declaration style; "
+            "declare variables at the top of the scope."
+        )
+    return None
+
+
 def _handle_write_function(
     params: WriteFunctionParams, config: Config
 ) -> str:
@@ -300,6 +351,15 @@ def _handle_write_function(
     asm_error = _check_inline_asm(params.code)
     if asm_error is not None:
         return asm_error
+    stub_error = _check_placeholder_stubs(params.code)
+    if stub_error is not None:
+        return stub_error
+    field_access_error = _check_field_access_style(params.code)
+    if field_access_error is not None:
+        return field_access_error
+    c89_error = _check_c89_declarations(params.code)
+    if c89_error is not None:
+        return c89_error
 
     src_path = config.melee.resolve_source_path(params.source_file)
     if not src_path.exists():

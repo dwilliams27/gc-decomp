@@ -15,6 +15,7 @@ import time
 
 import structlog
 
+from decomp_agent.agent.m2c_seed import build_prefetched_m2c_block
 from decomp_agent.agent.loop import AgentResult
 from decomp_agent.config import Config
 
@@ -44,6 +45,10 @@ def run_headless(
     )
 
     # Build the prompt
+    m2c_seed = build_prefetched_m2c_block(
+        function_name, source_file, config, max_chars=6000
+    )
+
     if prior_best_code is not None:
         prompt = (
             f"Match function {function_name} in {source_file}.\n\n"
@@ -52,11 +57,15 @@ def run_headless(
             f"Start by writing this code with write_function, then analyze the diff "
             f"to find remaining mismatches. Focus on improving from this baseline "
             f"rather than starting from scratch."
+            f"{m2c_seed}"
         )
     else:
         prompt = (
             f"Match function {function_name} in {source_file}. "
-            f"Start by calling get_target_assembly and get_context to orient yourself."
+            f"Start by calling get_target_assembly, get_context, and "
+            f"get_m2c_decompilation to orient yourself before your first "
+            f"write_function."
+            f"{m2c_seed}"
         )
 
     # Build the docker exec command
