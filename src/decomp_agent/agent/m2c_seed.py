@@ -29,7 +29,7 @@ def build_prefetched_m2c_block(
             function_name,
             source_file,
             config,
-            flags=["no_casts", "globals_none"],
+            flags=["no_casts", "globals_none", "no_switches"],
         )
     except Exception as e:
         return (

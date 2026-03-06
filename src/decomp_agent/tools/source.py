@@ -241,6 +241,9 @@ def replace_function(
 ) -> str | None:
     """Replace a function's entire definition with new code.
 
+    Also handles ``/// #function_name`` stub markers used for unmatched
+    functions — the stub line is replaced with the new code.
+
     Args:
         source: The full source file content
         function_name: Name of the function to replace
@@ -257,6 +260,17 @@ def replace_function(
             new_lines = new_code.splitlines()
             result = before + new_lines + after
             return "\n".join(result) + "\n"
+
+    # Fall back to stub marker replacement: /// #function_name
+    stub_marker = f"/// #{function_name}"
+    for i, line in enumerate(lines):
+        if line.strip() == stub_marker:
+            before = lines[:i]
+            after = lines[i + 1 :]
+            new_lines = new_code.splitlines()
+            result = before + new_lines + after
+            return "\n".join(result) + "\n"
+
     return None
 
 
