@@ -31,11 +31,36 @@ class GetGhidraDecompilationParams(BaseModel):
 class GetM2CDecompilationParams(BaseModel):
     """Run m2c on a function's target assembly to produce an initial C
     decompilation. The output is matching-oriented and makes a good starting
-    template, but usually needs manual adjustment."""
+    template, but usually needs manual adjustment.
+
+    Optional flags improve output quality:
+    - no_casts: Remove type casts for cleaner output
+    - stack_structs: Infer stack struct types (Vec3 copies become single assigns)
+    - globals_none: Don't emit global declarations (cleaner for focused work)
+    - void: Assume function returns void
+    - no_andor: Disable &&/|| detection
+    - no_switches: Disable irregular switch detection
+
+    Optional union_fields fix wrong union member selection:
+    - Format: ["StructName:field_name"] e.g. ["Item_ItemVars:leadead"]"""
 
     function_name: str = Field(description="Name of the function")
     source_file: str = Field(
         description='Object name from configure.py, e.g. "melee/lb/lbcommand.c"'
+    )
+    flags: list[str] | None = Field(
+        default=None,
+        description=(
+            'Optional m2c flags: "no_casts", "stack_structs", "globals_none", '
+            '"globals_all", "void", "no_andor", "no_switches", "no_unk_inference"'
+        ),
+    )
+    union_fields: list[str] | None = Field(
+        default=None,
+        description=(
+            'Optional union field selections, format: "StructName:field_name". '
+            'Fixes m2c defaulting to wrong union variant.'
+        ),
     )
 
 

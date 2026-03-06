@@ -25,7 +25,12 @@ def build_prefetched_m2c_block(
 ) -> str:
     """Run m2c once and format its output for inclusion in the first prompt."""
     try:
-        m2c = run_m2c(function_name, source_file, config)
+        m2c = run_m2c(
+            function_name,
+            source_file,
+            config,
+            flags=["no_casts", "globals_none"],
+        )
     except Exception as e:
         return (
             "\n\nPrefetched m2c output: unavailable "

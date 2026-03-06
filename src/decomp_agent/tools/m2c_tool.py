@@ -213,12 +213,64 @@ def generate_m2c_context(config: Config) -> None:
         )
 
 
+# Supported optional m2c flags that the agent can request.
+# Maps flag names to their m2c CLI representations.
+_SUPPORTED_M2C_FLAGS: dict[str, list[str]] = {
+    "no_casts": ["--no-casts"],
+    "stack_structs": ["--stack-structs"],
+    "globals_none": ["--globals", "none"],
+    "globals_all": ["--globals", "all"],
+    "void": ["--void"],
+    "no_andor": ["--no-andor"],
+    "no_switches": ["--no-switches"],
+    "no_unk_inference": ["--no-unk-inference"],
+}
+
+
+def _build_extra_flags(
+    flags: list[str] | None,
+    union_fields: list[str] | None,
+) -> list[str]:
+    """Convert agent-friendly flag names to m2c CLI arguments.
+
+    Args:
+        flags: List of flag names from _SUPPORTED_M2C_FLAGS
+        union_fields: List of "StructName:field_name" for --union-field
+
+    Returns:
+        List of CLI arguments to append to the m2c command.
+
+    Raises:
+        ValueError: If an unsupported flag name is provided.
+    """
+    extra: list[str] = []
+    for flag in flags or []:
+        if flag not in _SUPPORTED_M2C_FLAGS:
+            raise ValueError(
+                f"Unsupported m2c flag '{flag}'. "
+                f"Supported flags: {sorted(_SUPPORTED_M2C_FLAGS.keys())}"
+            )
+        extra.extend(_SUPPORTED_M2C_FLAGS[flag])
+
+    for uf in union_fields or []:
+        if ":" not in uf:
+            raise ValueError(
+                f"Invalid --union-field format '{uf}'. "
+                f"Expected 'StructName:field_name'."
+            )
+        extra.extend(["--union-field", uf])
+
+    return extra
+
+
 def run_m2c(
     function_name: str,
     source_file: str,
     config: Config,
     *,
     regenerate_ctx: bool = False,
+    flags: list[str] | None = None,
+    union_fields: list[str] | None = None,
 ) -> M2CResult:
     """Run m2c on a function's target assembly to produce C code.
 
@@ -232,6 +284,8 @@ def run_m2c(
         source_file: Object name e.g. "melee/lb/lbcommand.c"
         config: Project configuration
         regenerate_ctx: If True, regenerate ctx.c before running m2c
+        flags: Optional list of flag names (e.g. ["no_casts", "stack_structs"])
+        union_fields: Optional list of "StructName:field_name" for --union-field
     """
     # Ensure asm file exists (raises RuntimeError on failure)
     asm_path = _ensure_asm_exists(source_file, config)
@@ -239,6 +293,9 @@ def run_m2c(
     # Optionally regenerate m2c context (raises on failure)
     if regenerate_ctx:
         generate_m2c_context(config)
+
+    # Build extra flags from agent-friendly names
+    extra_flags = _build_extra_flags(flags, union_fields)
 
     # Build m2c command
     ctx_path = _ctx_file_path(config)
@@ -251,6 +308,9 @@ def run_m2c(
     # Add context if available
     if ctx_path.exists():
         m2c_args.extend(["--context", str(ctx_path)])
+
+    # Add optional flags before function/file args
+    m2c_args.extend(extra_flags)
 
     # Add function name and asm file
     m2c_args.extend(["--function", function_name, str(asm_path)])

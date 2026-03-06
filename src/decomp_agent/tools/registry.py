@@ -185,7 +185,16 @@ def _handle_get_m2c_decompilation(
 ) -> str:
     from decomp_agent.tools.m2c_tool import run_m2c
 
-    result = run_m2c(params.function_name, params.source_file, config)
+    try:
+        result = run_m2c(
+            params.function_name,
+            params.source_file,
+            config,
+            flags=params.flags,
+            union_fields=params.union_fields,
+        )
+    except ValueError as e:
+        return f"m2c error: {e}"
     if result.error:
         return f"m2c error: {result.error}"
     return result.c_code or "m2c produced no output"

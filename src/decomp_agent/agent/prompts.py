@@ -222,7 +222,9 @@ or similar placeholders as function bodies.
 
 - get_target_assembly(function_name, source_file) — Target PowerPC assembly
 {ghidra_tool}\
-- get_m2c_decompilation(function_name, source_file) — m2c auto-decompilation
+- get_m2c_decompilation(function_name, source_file, flags?, union_fields?) — m2c auto-decompilation. \
+Optional flags: ["no_casts", "stack_structs", "globals_none", "void", "no_andor"]. \
+Optional union_fields: ["StructName:field_name"] to fix wrong union variant selection.
 - get_context(function_name, source_file) — Headers, types, nearby matches
 - read_source_file(source_file) — Current source file contents
 - write_function(source_file, function_name, code) — Write, compile, and check match (reverts on compile failure)
