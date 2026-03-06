@@ -51,6 +51,25 @@ To build the frontend for production: `cd web-ui && npm run build` — output go
 
 Web dependencies: `pip install 'decomp-agent[web]'` (FastAPI, Uvicorn, websockets).
 
+## Building (IMPORTANT)
+
+**NEVER run `ninja`, `configure.py`, or `dtk` directly on the host.** Always use the Docker container via `run_in_repo()` or `docker exec`. The host has macOS ARM binaries in `build/tools/` which don't work in the Linux x86_64 container, and vice versa.
+
+The Docker container (`docker-worker-1`) has Linux build tools at:
+- `/usr/local/bin/dtk` — decomp-toolkit (must be provisioned separately from host dtk)
+- `build/tools/wibo` — Windows emulator (runs mwcceppc.exe)
+- `build/tools/sjiswrap.exe` — shift-JIS wrapper (runs under wibo)
+- `build/compilers/` — Metrowerks CodeWarrior compilers
+
+When `build.ninja` needs regeneration, `build.py` auto-passes `--dtk /usr/local/bin/dtk --compilers build/compilers --sjiswrap build/tools/sjiswrap.exe --wrapper build/tools/wibo` to `configure.py` inside Docker.
+
+If the container's dtk is missing or broken, provision it:
+```bash
+curl -L https://github.com/encounter/decomp-toolkit/releases/download/v1.8.3/dtk-linux-x86_64 -o /tmp/dtk-linux
+chmod +x /tmp/dtk-linux
+docker cp /tmp/dtk-linux docker-worker-1:/usr/local/bin/dtk
+```
+
 ## Agent Pipeline
 
 Two agent backends exist, both using the same tools and guardrails:

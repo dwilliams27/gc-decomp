@@ -88,7 +88,10 @@ def disassemble_object(obj_path: Path, config: Config) -> str:
         with tempfile.NamedTemporaryFile(suffix=".s", delete=False) as tmp:
             output_path = Path(tmp.name)
 
-    dtk_path = f"{config.melee.build_dir}/tools/dtk"
+    if config.docker.enabled:
+        dtk_path = "/usr/local/bin/dtk"
+    else:
+        dtk_path = f"{config.melee.build_dir}/tools/dtk"
 
     # Make obj_path relative to repo if it's absolute
     if obj_path.is_absolute():

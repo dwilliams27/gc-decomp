@@ -102,7 +102,15 @@ def compile_object(object_name: str, config: Config) -> CompileResult:
         error_text = result.stderr or result.stdout or ""
         if "rebuilding" in error_text and "subcommand failed" in error_text:
             log.info("build_ninja_stale", object=object_name)
-            run_in_repo(["python", "configure.py"], config=config)
+            configure_cmd = ["python", "configure.py"]
+            if config.docker.enabled:
+                configure_cmd.extend([
+                    "--dtk", "/usr/local/bin/dtk",
+                    "--compilers", "build/compilers",
+                    "--sjiswrap", "build/tools/sjiswrap.exe",
+                    "--wrapper", "build/tools/wibo",
+                ])
+            run_in_repo(configure_cmd, config=config)
             try:
                 result = run_in_repo(["ninja", target], config=config)
             except subprocess.TimeoutExpired:
