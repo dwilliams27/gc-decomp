@@ -16,8 +16,8 @@ from sqlmodel import Session
 
 from decomp_agent.config import Config
 from decomp_agent.cost import calculate_cost, estimate_batch_cost
-from decomp_agent.models.db import Function, get_candidate_batch
-from decomp_agent.orchestrator.runner import run_function
+from decomp_agent.models.db import Function, get_candidate_batch, get_candidate_files
+from decomp_agent.orchestrator.runner import run_file, run_function
 
 log = structlog.get_logger()
 console = Console()
@@ -161,6 +161,89 @@ def _run_one(
     return fr
 
 
+def _run_one_file(
+    source_file: str,
+    config: Config,
+    engine: Engine,
+    cost_lock: threading.Lock,
+    batch: BatchResult,
+    budget: float | None,
+    index: int,
+    total: int,
+) -> FunctionResult:
+    """Run file-mode agent on one source file, updating shared batch state."""
+    if budget is not None:
+        with cost_lock:
+            if batch.total_cost >= budget:
+                return FunctionResult(
+                    name=source_file,
+                    error="budget_exceeded",
+                    termination_reason="budget_exceeded",
+                )
+
+    worker_label = f"[{index}/{total}]"
+    log.info("batch_file_start", worker=worker_label, source_file=source_file)
+    console.print(f"\n[bold]{worker_label}[/bold] {source_file} (file-mode)")
+
+    try:
+        result = run_file(source_file, config, engine=engine, worker_label=worker_label)
+    except Exception as e:
+        log.error("batch_file_error", source_file=source_file, error=str(e))
+        fr = FunctionResult(name=source_file, error=str(e), termination_reason="exception")
+        with cost_lock:
+            batch.failed += 1
+            batch.attempted += 1
+            batch.errors.append(f"{source_file}: {e}")
+            batch.results.append(fr)
+        return fr
+
+    from decomp_agent.cost import calculate_cost as calc_cost
+    cost = calc_cost(result, config.pricing)
+    num_matched = len(result.newly_matched)
+
+    fr = FunctionResult(
+        name=source_file,
+        matched=result.matched,
+        best_match_pct=0.0,
+        tokens=result.total_tokens,
+        cost=cost,
+        elapsed=result.elapsed_seconds,
+        error=result.error,
+        termination_reason=result.termination_reason,
+    )
+
+    with cost_lock:
+        batch.attempted += 1
+        batch.total_tokens += result.total_tokens
+        batch.total_cost += cost
+        batch.results.append(fr)
+
+        if num_matched > 0:
+            batch.matched += num_matched
+            console.print(
+                f"  [green]Matched {num_matched} function(s)[/green] "
+                f"in {result.elapsed_seconds:.1f}s (${cost:.4f})"
+            )
+            for name in result.newly_matched:
+                console.print(f"    [green]✓[/green] {name}")
+        elif result.error:
+            batch.failed += 1
+            console.print(f"  [red]ERROR[/red]: {result.error}")
+        else:
+            batch.failed += 1
+            console.print(
+                f"  [yellow]{result.termination_reason}[/yellow] "
+                f"(${cost:.4f}, {result.elapsed_seconds:.1f}s)"
+            )
+
+        console.print(
+            f"  Totals: {batch.matched} matched, {batch.failed} failed, "
+            f"{batch.attempted} attempted, ${batch.total_cost:.4f}"
+        )
+
+    return fr
+
+
 def run_batch(
     config: Config,
     engine: Engine,
@@ -177,6 +260,7 @@ def run_batch(
     auto_approve: bool = False,
     cancel_flag: threading.Event | None = None,
     warm_start: bool = False,
+    file_mode: bool = False,
 ) -> BatchResult:
     """Run the agent on candidates with parallelism and budget control.
 
@@ -199,60 +283,86 @@ def run_batch(
         library=library,
     )
 
-    # 1. Fetch candidates
+    # 1. Fetch candidates (files or functions depending on mode)
+    candidate_files: list[str] = []
+    candidates: list[Function] = []
+
     with Session(engine) as session:
-        # Auto-dedup by source file when using multiple workers to avoid
-        # per-file lock serialization that would waste worker slots.
-        effective_unique_files = unique_files or workers > 1
-        candidates = get_candidate_batch(
-            session,
-            limit=limit,
-            max_size=max_size,
-            strategy=strategy,
-            library=library,
-            min_match=min_match,
-            max_match=max_match,
-            unique_files=effective_unique_files,
-        )
-
-        if not candidates:
-            console.print("[yellow]No candidates match the given filters.[/yellow]")
-            batch.elapsed = time.monotonic() - start
-            return batch
-
-        # 2. Estimate costs (skip for Claude Code headless — flat-rate subscription)
-        if config.claude_code.enabled:
-            estimated_cost = 0.0
+        if file_mode:
+            candidate_files = get_candidate_files(
+                session,
+                limit=limit,
+                library=library,
+            )
+            if not candidate_files:
+                console.print("[yellow]No candidate files match the given filters.[/yellow]")
+                batch.elapsed = time.monotonic() - start
+                return batch
+            estimated_cost = 0.0  # file-mode is always headless (flat rate)
         else:
-            estimated_cost = estimate_batch_cost(candidates, config.agent.model, session, config.pricing)
+            # Auto-dedup by source file when using multiple workers to avoid
+            # per-file lock serialization that would waste worker slots.
+            effective_unique_files = unique_files or workers > 1
+            candidates = get_candidate_batch(
+                session,
+                limit=limit,
+                max_size=max_size,
+                strategy=strategy,
+                library=library,
+                min_match=min_match,
+                max_match=max_match,
+                unique_files=effective_unique_files,
+            )
+
+            if not candidates:
+                console.print("[yellow]No candidates match the given filters.[/yellow]")
+                batch.elapsed = time.monotonic() - start
+                return batch
+
+            # 2. Estimate costs (skip for Claude Code headless — flat-rate subscription)
+            if config.claude_code.enabled:
+                estimated_cost = 0.0
+            else:
+                estimated_cost = estimate_batch_cost(candidates, config.agent.model, session, config.pricing)
 
     # 3. Display preview table
-    table = Table(title="Batch Preview")
-    table.add_column("Name", style="bold")
-    table.add_column("Source File")
-    table.add_column("Size", justify="right")
-    table.add_column("Match %", justify="right")
-
-    for c in candidates:
-        table.add_row(
-            c.name,
-            c.source_file,
-            str(c.size),
-            f"{min(c.current_match_pct, 99.99):.2f}%" if c.current_match_pct < 100.0 else "100%",
-        )
-
-    console.print(table)
-    if config.claude_code.enabled:
+    if file_mode:
+        table = Table(title="Batch Preview (file-mode)")
+        table.add_column("Source File", style="bold")
+        for sf in candidate_files:
+            table.add_row(sf)
+        console.print(table)
         console.print(
-            f"\n[bold]{len(candidates)}[/bold] functions "
-            f"(Claude Code headless — flat rate, no per-token cost)"
+            f"\n[bold]{len(candidate_files)}[/bold] files "
+            f"(file-mode — one session per file)"
         )
     else:
-        console.print(
-            f"\n[bold]{len(candidates)}[/bold] functions, "
-            f"estimated cost: [bold]${estimated_cost:.4f}[/bold]"
-            + (f", budget: [bold]${budget:.4f}[/bold]" if budget is not None else "")
-        )
+        table = Table(title="Batch Preview")
+        table.add_column("Name", style="bold")
+        table.add_column("Source File")
+        table.add_column("Size", justify="right")
+        table.add_column("Match %", justify="right")
+
+        for c in candidates:
+            table.add_row(
+                c.name,
+                c.source_file,
+                str(c.size),
+                f"{min(c.current_match_pct, 99.99):.2f}%" if c.current_match_pct < 100.0 else "100%",
+            )
+
+        console.print(table)
+        if config.claude_code.enabled:
+            console.print(
+                f"\n[bold]{len(candidates)}[/bold] functions "
+                f"(Claude Code headless — flat rate, no per-token cost)"
+            )
+        else:
+            console.print(
+                f"\n[bold]{len(candidates)}[/bold] functions, "
+                f"estimated cost: [bold]${estimated_cost:.4f}[/bold]"
+                + (f", budget: [bold]${budget:.4f}[/bold]" if budget is not None else "")
+            )
 
     # 4. Confirm
     if not auto_approve:
@@ -263,62 +373,101 @@ def run_batch(
 
     # 5. Execute
     cost_lock = threading.Lock()
-    total = len(candidates)
 
     def _is_cancelled() -> bool:
         return cancel_flag is not None and cancel_flag.is_set()
 
-    if workers <= 1:
-        # Sequential execution
-        for i, candidate in enumerate(candidates, 1):
-            if _is_cancelled():
-                console.print("[yellow]Batch cancelled.[/yellow]")
-                break
-            # Check budget
-            if budget is not None and batch.total_cost >= budget:
-                console.print(f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). Stopping.[/red]")
-                break
-            _run_one(candidate, config, engine, cost_lock, batch, budget, i, total, warm_start=warm_start)
-    else:
-        # Parallel execution — submit in chunks so cancel can stop new work
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            pending_candidates = list(enumerate(candidates, 1))
-            active_futures: dict = {}
-
-            def _submit_next():
-                """Submit candidates up to the worker limit."""
-                while pending_candidates and len(active_futures) < workers:
-                    if _is_cancelled():
-                        return
-                    if budget is not None and batch.total_cost >= budget:
-                        return
-                    i, candidate = pending_candidates.pop(0)
-                    future = executor.submit(
-                        _run_one, candidate, config, engine, cost_lock, batch, budget, i, total, warm_start
-                    )
-                    active_futures[future] = candidate.name
-
-            _submit_next()
-
-            while active_futures:
-                for future in as_completed(active_futures):
-                    del active_futures[future]
-                    fr = future.result()
-
-                    if _is_cancelled():
-                        console.print("[yellow]Batch cancelled.[/yellow]")
-                        break
-                    if budget is not None and batch.total_cost >= budget:
-                        console.print(
-                            f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). Stopping.[/red]"
-                        )
-                        break
-
-                    _submit_next()
-                    break  # Re-check active_futures after each completion
-
+    if file_mode:
+        # File-mode execution
+        total = len(candidate_files)
+        if workers <= 1:
+            for i, sf in enumerate(candidate_files, 1):
                 if _is_cancelled():
+                    console.print("[yellow]Batch cancelled.[/yellow]")
                     break
+                if budget is not None and batch.total_cost >= budget:
+                    console.print(f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). Stopping.[/red]")
+                    break
+                _run_one_file(sf, config, engine, cost_lock, batch, budget, i, total)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                pending = list(enumerate(candidate_files, 1))
+                active_futures: dict = {}
+
+                def _submit_next_file():
+                    while pending and len(active_futures) < workers:
+                        if _is_cancelled():
+                            return
+                        if budget is not None and batch.total_cost >= budget:
+                            return
+                        i, sf = pending.pop(0)
+                        future = executor.submit(
+                            _run_one_file, sf, config, engine, cost_lock, batch, budget, i, total
+                        )
+                        active_futures[future] = sf
+
+                _submit_next_file()
+                while active_futures:
+                    for future in as_completed(active_futures):
+                        del active_futures[future]
+                        future.result()
+                        if _is_cancelled() or (budget is not None and batch.total_cost >= budget):
+                            break
+                        _submit_next_file()
+                        break
+                    if _is_cancelled():
+                        break
+    else:
+        # Function-mode execution
+        total = len(candidates)
+        if workers <= 1:
+            for i, candidate in enumerate(candidates, 1):
+                if _is_cancelled():
+                    console.print("[yellow]Batch cancelled.[/yellow]")
+                    break
+                if budget is not None and batch.total_cost >= budget:
+                    console.print(f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). Stopping.[/red]")
+                    break
+                _run_one(candidate, config, engine, cost_lock, batch, budget, i, total, warm_start=warm_start)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                pending_candidates = list(enumerate(candidates, 1))
+                active_futures: dict = {}
+
+                def _submit_next():
+                    """Submit candidates up to the worker limit."""
+                    while pending_candidates and len(active_futures) < workers:
+                        if _is_cancelled():
+                            return
+                        if budget is not None and batch.total_cost >= budget:
+                            return
+                        i, candidate = pending_candidates.pop(0)
+                        future = executor.submit(
+                            _run_one, candidate, config, engine, cost_lock, batch, budget, i, total, warm_start
+                        )
+                        active_futures[future] = candidate.name
+
+                _submit_next()
+
+                while active_futures:
+                    for future in as_completed(active_futures):
+                        del active_futures[future]
+                        fr = future.result()
+
+                        if _is_cancelled():
+                            console.print("[yellow]Batch cancelled.[/yellow]")
+                            break
+                        if budget is not None and batch.total_cost >= budget:
+                            console.print(
+                                f"[red]Budget exceeded (${batch.total_cost:.4f} >= ${budget:.4f}). Stopping.[/red]"
+                            )
+                            break
+
+                        _submit_next()
+                        break  # Re-check active_futures after each completion
+
+                    if _is_cancelled():
+                        break
 
     batch.elapsed = time.monotonic() - start
     log.info(

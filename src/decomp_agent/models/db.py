@@ -42,13 +42,37 @@ class Function(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class Run(SQLModel, table=True):
+    """One agent session — targets 1 function (function-mode) or N functions (file-mode)."""
+    id: int | None = Field(default=None, primary_key=True)
+    source_file: str
+    function_name: str | None = None  # NULL for file-mode
+    session_id: str = ""
+    file_mode: bool = False
+    warm_start: bool = False
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None
+    total_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    cost: float = 0.0
+    elapsed_seconds: float = 0.0
+    iterations: int = 0
+    model: str = ""
+    termination_reason: str = ""
+    error: str | None = None
+
+
 class Attempt(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     function_id: int = Field(foreign_key="function.id")
+    run_id: int | None = Field(default=None, foreign_key="run.id")  # NULL for legacy
     started_at: datetime
     completed_at: datetime | None = None
     matched: bool = False
     best_match_pct: float = 0.0
+    before_match_pct: float = 0.0
     iterations: int = 0
     total_tokens: int = 0
     input_tokens: int = 0
@@ -62,9 +86,9 @@ class Attempt(SQLModel, table=True):
     reasoning_effort: str = ""
     match_history: str | None = None  # JSON: [[iteration, match_pct], ...]
     tool_counts: str | None = None  # JSON: {"tool_name": count, ...}
-    cost: float = 0.0  # Dollar cost of this attempt
-    warm_start: bool = False  # Whether this attempt was seeded with prior code
-    session_id: str = ""  # Claude Code session ID or OpenAI response ID
+    cost: float = 0.0  # Dollar cost (legacy only; new records use Run.cost)
+    warm_start: bool = False
+    session_id: str = ""  # Legacy; new records use Run.session_id
 
 
 def get_engine(db_path: Path | str) -> Engine:
@@ -94,6 +118,8 @@ def _migrate(engine: Engine) -> None:
         ("attempt", "cost", "REAL NOT NULL DEFAULT 0.0"),
         ("attempt", "warm_start", "BOOLEAN NOT NULL DEFAULT 0"),
         ("attempt", "session_id", "TEXT NOT NULL DEFAULT ''"),
+        ("attempt", "run_id", "INTEGER"),
+        ("attempt", "before_match_pct", "REAL NOT NULL DEFAULT 0.0"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -134,49 +160,143 @@ def get_next_candidate(
     return session.exec(stmt).first()
 
 
+def record_run(
+    session: Session,
+    result: AgentResult,
+    cost: float,
+    *,
+    function: Function | None = None,
+    functions_by_name: dict[str, Function] | None = None,
+    source_file: str = "",
+) -> Run:
+    """Create a Run + Attempt(s) from an AgentResult.
+
+    Function-mode: pass ``function`` — creates 1 Run + 1 Attempt.
+    File-mode: pass ``functions_by_name`` — creates 1 Run + N Attempts
+    from ``result.function_deltas``.
+
+    Session-level data (tokens, cost) lives on Run.
+    Per-function outcomes live on Attempt.
+    Updates Function statuses.
+    """
+    import json
+
+    now = datetime.now(timezone.utc)
+
+    # Determine source_file
+    if function is not None:
+        source_file = function.source_file
+    elif not source_file:
+        raise ValueError("record_run requires either function or source_file")
+
+    run = Run(
+        source_file=source_file,
+        function_name=function.name if function is not None else None,
+        session_id=result.session_id,
+        file_mode=result.file_mode,
+        warm_start=result.warm_start,
+        started_at=now,
+        completed_at=now,
+        total_tokens=result.total_tokens,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        cached_tokens=result.cached_tokens,
+        cost=cost,
+        elapsed_seconds=result.elapsed_seconds,
+        iterations=result.iterations,
+        model=result.model,
+        termination_reason=result.termination_reason,
+        error=result.error,
+    )
+    session.add(run)
+    session.flush()  # get run.id
+
+    if not result.file_mode:
+        # Function-mode: 1 Attempt
+        assert function is not None, "function-mode record_run requires function"
+        attempt = Attempt(
+            function_id=function.id,  # type: ignore[arg-type]
+            run_id=run.id,
+            started_at=now,
+            completed_at=now,
+            matched=result.matched,
+            best_match_pct=result.best_match_percent,
+            before_match_pct=function.current_match_pct,
+            iterations=result.iterations,
+            termination_reason=result.termination_reason,
+            final_code=result.final_code,
+            error=result.error,
+            model=result.model,
+            reasoning_effort=result.reasoning_effort,
+            match_history=json.dumps(result.match_history) if result.match_history else None,
+            tool_counts=json.dumps(result.tool_counts) if result.tool_counts else None,
+            warm_start=result.warm_start,
+            session_id=result.session_id,
+        )
+        session.add(attempt)
+
+        function.attempts += 1
+        if result.best_match_percent > function.current_match_pct:
+            function.current_match_pct = result.best_match_percent
+        function.updated_at = now
+        session.add(function)
+    else:
+        # File-mode: 1 Attempt per function in function_deltas
+        assert functions_by_name is not None, "file-mode record_run requires functions_by_name"
+        for func_name, (before, after) in result.function_deltas.items():
+            func = functions_by_name.get(func_name)
+            if func is None:
+                continue
+            matched = func_name in result.newly_matched
+            attempt = Attempt(
+                function_id=func.id,  # type: ignore[arg-type]
+                run_id=run.id,
+                started_at=now,
+                completed_at=now,
+                matched=matched,
+                best_match_pct=after,
+                before_match_pct=before,
+                termination_reason=result.termination_reason,
+                model=result.model,
+                warm_start=result.warm_start,
+                session_id=result.session_id,
+            )
+            session.add(attempt)
+
+            func.attempts += 1
+            if after > func.current_match_pct:
+                func.current_match_pct = after
+            if matched:
+                func.status = "matched"
+                func.matched_at = now
+            func.updated_at = now
+            session.add(func)
+
+    session.commit()
+    session.refresh(run)
+    return run
+
+
 def record_attempt(
     session: Session,
     function: Function,
     result: AgentResult,
     cost: float,
 ) -> Attempt:
-    """Create an Attempt record and update the Function from an AgentResult."""
-    import json
+    """Create an Attempt record and update the Function from an AgentResult.
 
-    now = datetime.now(timezone.utc)
-    attempt = Attempt(
-        function_id=function.id,  # type: ignore[arg-type]
-        started_at=now,
-        completed_at=now,
-        matched=result.matched,
-        best_match_pct=result.best_match_percent,
-        iterations=result.iterations,
-        total_tokens=result.total_tokens,
-        input_tokens=result.input_tokens,
-        output_tokens=result.output_tokens,
-        cached_tokens=result.cached_tokens,
-        elapsed_seconds=result.elapsed_seconds,
-        termination_reason=result.termination_reason,
-        final_code=result.final_code,
-        error=result.error,
-        model=result.model,
-        reasoning_effort=result.reasoning_effort,
-        match_history=json.dumps(result.match_history) if result.match_history else None,
-        tool_counts=json.dumps(result.tool_counts) if result.tool_counts else None,
-        cost=cost,
-        warm_start=result.warm_start,
-        session_id=result.session_id,
+    Legacy wrapper — new code should use record_run(). This delegates to
+    record_run() internally so all new records get a Run.
+    """
+    run = record_run(session, result, cost, function=function)
+
+    # Return the Attempt that was created (there's exactly one for function-mode)
+    stmt = (
+        select(Attempt)
+        .where(Attempt.run_id == run.id)
+        .limit(1)
     )
-    session.add(attempt)
-
-    function.attempts += 1
-    if result.best_match_percent > function.current_match_pct:
-        function.current_match_pct = result.best_match_percent
-    function.updated_at = now
-
-    session.add(function)
-    session.commit()
-    session.refresh(attempt)
+    attempt = session.exec(stmt).one()
     return attempt
 
 
@@ -311,3 +431,68 @@ def get_historical_avg_tokens(
     if result is None or result == 0:
         return None
     return float(result)
+
+
+def get_total_cost(session: Session) -> float:
+    """Total cost across all runs and legacy attempts.
+
+    New records: cost on Run. Legacy records (run_id IS NULL): cost on Attempt.
+    """
+    run_cost = session.exec(
+        select(sa_func.coalesce(sa_func.sum(Run.cost), 0.0))
+    ).one()
+    legacy_cost = session.exec(
+        select(sa_func.coalesce(sa_func.sum(Attempt.cost), 0.0))
+        .where(Attempt.run_id.is_(None))  # type: ignore[union-attr]
+    ).one()
+    return float(run_cost) + float(legacy_cost)
+
+
+def get_total_tokens(session: Session) -> int:
+    """Total tokens across all runs and legacy attempts."""
+    run_tokens = session.exec(
+        select(sa_func.coalesce(sa_func.sum(Run.total_tokens), 0))
+    ).one()
+    legacy_tokens = session.exec(
+        select(sa_func.coalesce(sa_func.sum(Attempt.total_tokens), 0))
+        .where(Attempt.run_id.is_(None))  # type: ignore[union-attr]
+    ).one()
+    return int(run_tokens) + int(legacy_tokens)
+
+
+def get_candidate_files(
+    session: Session,
+    *,
+    limit: int = 50,
+    library: str | None = None,
+) -> list[str]:
+    """Return distinct source files that have pending unmatched functions.
+
+    Ordered by number of pending functions (most first) to maximize
+    per-session productivity.
+    """
+    stmt = (
+        select(Function.source_file, sa_func.count(Function.id).label("cnt"))
+        .where(
+            Function.status.in_(["pending"]),  # type: ignore[attr-defined]
+            Function.current_match_pct < 100.0,
+            Function.library.notin_(EXCLUDED_LIBRARIES),  # type: ignore[attr-defined]
+        )
+        .group_by(Function.source_file)
+        .order_by(sa_func.count(Function.id).desc())  # type: ignore[arg-type]
+        .limit(limit)
+    )
+    if library is not None:
+        stmt = stmt.where(Function.library == library)
+
+    rows = session.exec(stmt).all()
+    return [row[0] for row in rows]
+
+
+def get_functions_for_file(
+    session: Session,
+    source_file: str,
+) -> dict[str, Function]:
+    """Return all Function records for a source file, keyed by name."""
+    stmt = select(Function).where(Function.source_file == source_file)
+    return {f.name: f for f in session.exec(stmt).all()}

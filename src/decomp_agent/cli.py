@@ -113,6 +113,42 @@ def run(ctx: click.Context, name: str, max_tokens: int | None, max_iterations: i
         console.print(f"[red]Error: {result.error}[/red]")
 
 
+@main.command("run-file")
+@click.argument("source_file")
+@click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
+@click.pass_context
+def run_file_cmd(ctx: click.Context, source_file: str, headless: bool) -> None:
+    """Run agent on all unmatched functions in a source file."""
+    config, engine = _load(ctx)
+
+    if headless:
+        config.claude_code.enabled = True
+
+    from decomp_agent.orchestrator.runner import run_file
+
+    console.print(f"Running file-mode agent on [bold]{source_file}[/bold]")
+    result = run_file(source_file, config, engine=engine)
+
+    if result.newly_matched:
+        console.print(f"[green]Matched {len(result.newly_matched)} function(s):[/green]")
+        for name in result.newly_matched:
+            console.print(f"  [green]✓[/green] {name}")
+    else:
+        console.print(f"[yellow]No new matches[/yellow] ({result.termination_reason})")
+
+    # Show improvements
+    for name, (before, after) in result.function_deltas.items():
+        if after > before and name not in result.newly_matched:
+            console.print(f"  [cyan]↑[/cyan] {name}: {before:.1f}% → {after:.1f}%")
+
+    console.print(
+        f"\nElapsed: {result.elapsed_seconds:.1f}s  "
+        f"Tokens: {result.total_tokens:,}"
+    )
+    if result.error:
+        console.print(f"[red]Error: {result.error}[/red]")
+
+
 @main.command()
 @click.option("--limit", default=None, type=int, help="Max functions to attempt")
 @click.option("--max-size", default=None, type=int, help="Max function size in bytes")
@@ -126,6 +162,7 @@ def run(ctx: click.Context, name: str, max_tokens: int | None, max_iterations: i
 @click.option("--log-file", default=None, type=click.Path(path_type=Path), help="Path for JSON-lines log file")
 @click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
 @click.option("--warm-start", is_flag=True, default=False, help="Seed with best prior attempt code")
+@click.option("--file-mode", is_flag=True, default=False, help="Run in file-mode: one session per source file")
 @click.pass_context
 def batch(
     ctx: click.Context,
@@ -141,6 +178,7 @@ def batch(
     log_file: Path | None,
     headless: bool,
     warm_start: bool,
+    file_mode: bool,
 ) -> None:
     """Run agent on candidates in batch mode."""
     if log_file is not None:
@@ -161,10 +199,10 @@ def batch(
     effective_budget = budget if budget is not None else config.orchestration.default_budget
     effective_strategy = strategy or "smallest_first"
 
+    mode_label = "file-mode" if file_mode else ("headless" if headless else "function-mode")
     console.print(
         f"Starting batch run (limit={effective_limit}, max_size={effective_max_size}, "
-        f"workers={effective_workers}, budget={effective_budget}"
-        + (", mode=headless" if headless else "") + ")"
+        f"workers={effective_workers}, budget={effective_budget}, mode={mode_label})"
     )
 
     result = run_batch(
@@ -180,6 +218,7 @@ def batch(
         max_match=max_match,
         auto_approve=auto_approve,
         warm_start=warm_start,
+        file_mode=file_mode,
     )
 
     console.print(f"\n[bold]Batch complete:[/bold]")
@@ -235,13 +274,12 @@ def status(ctx: click.Context) -> None:
         for status_val, count in rows:
             status_counts[status_val] = count
 
-        # Token spend
-        from decomp_agent.models.db import Attempt
+        from decomp_agent.models.db import Attempt, Run, get_total_cost, get_total_tokens
 
-        total_tokens = session.exec(
-            select(func.coalesce(func.sum(Attempt.total_tokens), 0))
-        ).one()
+        total_tokens = get_total_tokens(session)
+        total_cost = get_total_cost(session)
         total_attempts = session.exec(select(func.count(Attempt.id))).one()
+        total_runs = session.exec(select(func.count(Run.id))).one()
 
     table = Table(title="Decompilation Progress")
     table.add_column("Status", style="bold")
@@ -261,5 +299,7 @@ def status(ctx: click.Context) -> None:
     table.add_row("TOTAL", f"{total:,}", style="bold")
     console.print(table)
 
-    console.print(f"\nTotal attempts: {total_attempts:,}")
+    console.print(f"\nTotal runs:     {total_runs:,}")
+    console.print(f"Total attempts: {total_attempts:,}")
     console.print(f"Total tokens:   {total_tokens:,}")
+    console.print(f"Total cost:     ${total_cost:.4f}")

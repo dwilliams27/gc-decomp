@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func as sa_func
 from sqlmodel import Session, select
 
-from decomp_agent.models.db import Attempt, Function
+from decomp_agent.models.db import Attempt, Function, Run
 from decomp_agent.web.deps import get_session
 
 router = APIRouter(prefix="/api/functions", tags=["functions"])
@@ -167,30 +167,50 @@ def get_function_attempts(function_id: int, session: Session = Depends(get_sessi
     )
     attempts = session.exec(stmt).all()
 
+    # Batch-fetch linked Run records
+    run_ids = [a.run_id for a in attempts if a.run_id is not None]
+    runs_by_id: dict[int, Run] = {}
+    if run_ids:
+        run_rows = session.exec(select(Run).where(Run.id.in_(run_ids))).all()  # type: ignore[union-attr]
+        runs_by_id = {r.id: r for r in run_rows}  # type: ignore[misc]
+
+    result_attempts = []
+    for a in attempts:
+        run = runs_by_id.get(a.run_id) if a.run_id else None  # type: ignore[arg-type]
+        # For new records, session-level data comes from Run
+        total_tokens = run.total_tokens if run else a.total_tokens
+        input_tokens = run.input_tokens if run else a.input_tokens
+        output_tokens = run.output_tokens if run else a.output_tokens
+        cached_tokens = run.cached_tokens if run else a.cached_tokens
+        elapsed_seconds = run.elapsed_seconds if run else a.elapsed_seconds
+        cost = run.cost if run else a.cost
+
+        result_attempts.append({
+            "id": a.id,
+            "run_id": a.run_id,
+            "started_at": a.started_at.isoformat(),
+            "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+            "matched": a.matched,
+            "best_match_pct": a.best_match_pct,
+            "before_match_pct": a.before_match_pct,
+            "iterations": a.iterations,
+            "total_tokens": total_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "elapsed_seconds": elapsed_seconds,
+            "termination_reason": a.termination_reason,
+            "final_code": a.final_code,
+            "error": a.error,
+            "model": a.model,
+            "reasoning_effort": a.reasoning_effort,
+            "match_history": json.loads(a.match_history) if a.match_history else [],
+            "tool_counts": json.loads(a.tool_counts) if a.tool_counts else {},
+            "cost": cost,
+            "file_mode": run.file_mode if run else False,
+        })
+
     return {
         "function_name": func.name,
-        "attempts": [
-            {
-                "id": a.id,
-                "started_at": a.started_at.isoformat(),
-                "completed_at": a.completed_at.isoformat() if a.completed_at else None,
-                "matched": a.matched,
-                "best_match_pct": a.best_match_pct,
-                "iterations": a.iterations,
-                "total_tokens": a.total_tokens,
-                "input_tokens": a.input_tokens,
-                "output_tokens": a.output_tokens,
-                "cached_tokens": a.cached_tokens,
-                "elapsed_seconds": a.elapsed_seconds,
-                "termination_reason": a.termination_reason,
-                "final_code": a.final_code,
-                "error": a.error,
-                "model": a.model,
-                "reasoning_effort": a.reasoning_effort,
-                "match_history": json.loads(a.match_history) if a.match_history else [],
-                "tool_counts": json.loads(a.tool_counts) if a.tool_counts else {},
-                "cost": a.cost,
-            }
-            for a in attempts
-        ],
+        "attempts": result_attempts,
     }

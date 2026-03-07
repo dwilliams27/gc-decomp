@@ -13,7 +13,13 @@ from sqlmodel import Session
 from decomp_agent.agent.loop import AgentResult, run_agent
 from decomp_agent.config import Config
 from decomp_agent.cost import calculate_cost
-from decomp_agent.models.db import Function, get_best_attempt, record_attempt
+from decomp_agent.models.db import (
+    Function,
+    get_best_attempt,
+    get_functions_for_file,
+    record_attempt,
+    record_run,
+)
 from decomp_agent.tools.build import check_match
 
 log = structlog.get_logger()
@@ -327,6 +333,7 @@ def run_file(
     source_file: str,
     config: Config,
     *,
+    engine: Engine | None = None,
     worker_label: str = "",
 ) -> AgentResult:
     """Run the agent on an entire source file to match all unmatched functions.
@@ -338,7 +345,8 @@ def run_file(
     - Reverts only if previously-matched functions regressed (collateral damage)
     - Auto-commits each newly matched function
 
-    Does not require a DB engine — operates directly on the source file.
+    If ``engine`` is provided, creates a Run + per-function Attempts in the DB
+    and updates Function statuses.
     """
     bound_log = log.bind(
         source_file=source_file,
@@ -434,6 +442,21 @@ def run_file(
                 # Auto-commit each newly matched function
                 for func_name in result.newly_matched:
                     _auto_commit_match(func_name, source_file, config, bound_log)
+
+            # Record to DB
+            if engine is not None:
+                from decomp_agent.cost import calculate_cost
+
+                cost = calculate_cost(result, config.pricing)
+                with Session(engine) as session:
+                    functions_by_name = get_functions_for_file(session, source_file)
+                    record_run(
+                        session,
+                        result,
+                        cost,
+                        functions_by_name=functions_by_name,
+                        source_file=source_file,
+                    )
 
             # Log summary
             improved = [

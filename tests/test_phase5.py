@@ -260,7 +260,13 @@ class TestRecordAttempt:
 
         assert attempt.id is not None
         assert attempt.best_match_pct == 80.0
-        assert attempt.total_tokens == 1000
+        assert attempt.run_id is not None
+        # Session-level data (tokens, cost) lives on Run, not Attempt
+        from decomp_agent.models.db import Run
+        run = session.get(Run, attempt.run_id)
+        assert run is not None
+        assert run.total_tokens == 1000
+        assert run.cost == 0.05
         assert func.attempts == 1
         assert func.current_match_pct == 80.0
 
