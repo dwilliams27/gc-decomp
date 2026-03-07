@@ -50,21 +50,58 @@ def run_headless(
     )
 
     if prior_best_code is not None:
+        # Pre-fetch the diff if the prior code is already written to file
+        diff_block = ""
+        try:
+            from decomp_agent.tools.disasm import get_function_diff
+            diff_text = get_function_diff(function_name, source_file, config)
+            diff_block = (
+                f"\n\nCurrent diff (target vs compiled):\n```\n{diff_text}\n```"
+            )
+        except Exception:
+            pass
+
+        # Tailor guidance based on match quality
+        if prior_match_pct >= 80.0:
+            strategy = (
+                "You are VERY close. Make only tiny, targeted changes: "
+                "reorder variable declarations, split or merge expressions, "
+                "adjust casts, or change variable types. "
+                "DO NOT rewrite the function or change its structure."
+            )
+        elif prior_match_pct >= 50.0:
+            strategy = (
+                "The structure is mostly right. Focus on register allocation: "
+                "reorder variable declarations, change how temporaries are used, "
+                "split compound expressions, or merge separate statements. "
+                "Preserve the overall logic — do NOT rewrite from scratch."
+            )
+        else:
+            strategy = (
+                "Start by writing this code with write_function, then analyze "
+                "the diff to find remaining mismatches. Focus on improving from "
+                "this baseline rather than starting from scratch."
+            )
+
         prompt = (
             f"Match function {function_name} in {source_file}.\n\n"
             f"A previous attempt reached {prior_match_pct:.1f}% match with this code:\n\n"
             f"```c\n{prior_best_code}\n```\n\n"
-            f"Start by writing this code with write_function, then analyze the diff "
-            f"to find remaining mismatches. Focus on improving from this baseline "
-            f"rather than starting from scratch."
+            f"{strategy}"
+            f"{diff_block}"
             f"{m2c_seed}"
         )
     else:
         prompt = (
-            f"Match function {function_name} in {source_file}. "
-            f"Start by calling get_target_assembly, get_context, and "
-            f"get_m2c_decompilation to orient yourself before your first "
-            f"write_function."
+            f"Match function {function_name} in {source_file}.\n\n"
+            f"You have tools to read assembly, get context/headers, "
+            f"write code, check diffs, and iterate. The m2c output below "
+            f"is a starting scaffold. Use get_context and get_target_assembly "
+            f"to understand what the function does, then iterate with "
+            f"write_function and get_diff until you reach 100% match.\n\n"
+            f"If you hit compile errors from undeclared symbols, check the "
+            f"extern references section below — it tells you which headers "
+            f"to include or what extern declarations to add."
             f"{m2c_seed}"
         )
 
@@ -73,11 +110,15 @@ def run_headless(
     max_turns = config.claude_code.max_turns
     timeout = config.claude_code.timeout_seconds
 
-    # Boost max_turns for warm starts that are already close (75%+).
-    # These functions just need more iterations to close the final gap.
-    if prior_best_code is not None and prior_match_pct >= 75.0:
-        max_turns = max(max_turns, 80)
-        timeout = max(timeout, 3600)
+    # Warm starts get more turns — they skip orientation and spend all
+    # turns productively iterating on register allocation and fine-tuning.
+    if prior_best_code is not None:
+        if prior_match_pct >= 75.0:
+            max_turns = max(max_turns, 80)
+            timeout = max(timeout, 3600)
+        else:
+            max_turns = max(max_turns, 50)
+            timeout = max(timeout, 2400)
 
     # Build a shell command that reads the system prompt file inside the container
     system_prompt_path = "/app/system-prompt.md"

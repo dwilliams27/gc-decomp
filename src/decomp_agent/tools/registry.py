@@ -426,6 +426,18 @@ def _handle_write_function(
         return f"Error: source file not found: {src_path}"
 
     source = read_source_file(src_path)
+
+    # Capture prior match % for this function before overwriting
+    prior_match_pct = 0.0
+    try:
+        prior_result = check_match(params.source_file, config)
+        if prior_result.success:
+            prior_func = prior_result.get_function(params.function_name)
+            if prior_func is not None:
+                prior_match_pct = prior_func.fuzzy_match_percent
+    except Exception:
+        pass
+
     updated = replace_function(source, params.function_name, params.code)
     if updated is None:
         return (
@@ -443,6 +455,20 @@ def _handle_write_function(
         return (
             f"Wrote {params.function_name}, but compilation failed "
             f"(reverted to previous code):\n{result.error}"
+        )
+
+    # Check for match regression — reject writes that make things worse.
+    # Only applies when there was a prior non-zero match (not stubs).
+    new_func = result.get_function(params.function_name)
+    new_match_pct = new_func.fuzzy_match_percent if new_func else 0.0
+    if prior_match_pct > 5.0 and new_match_pct < prior_match_pct - 1.0:
+        write_source_file(src_path, source)
+        return (
+            f"Wrote {params.function_name}, but match REGRESSED from "
+            f"{prior_match_pct:.1f}% to {new_match_pct:.1f}% "
+            f"(reverted to previous code). Make smaller, targeted changes "
+            f"instead of rewriting. Use get_diff to see what's wrong and "
+            f"fix specific mismatches."
         )
 
     return (
