@@ -25,7 +25,7 @@ log = structlog.get_logger()
 
 @dataclass
 class AgentResult:
-    """Outcome of one agent run on a single function."""
+    """Outcome of one agent run on a single function or file."""
 
     matched: bool = False
     best_match_percent: float = 0.0
@@ -49,6 +49,14 @@ class AgentResult:
     """Whether this attempt was seeded with prior code."""
     session_id: str = ""
     """Claude Code session ID (headless mode) or OpenAI response ID."""
+
+    # File-mode fields: populated when running on a whole file
+    file_mode: bool = False
+    """Whether this was a file-level run (vs single function)."""
+    newly_matched: list[str] = field(default_factory=list)
+    """Functions that went from unmatched to 100% during this run."""
+    function_deltas: dict[str, tuple[float, float]] = field(default_factory=dict)
+    """Per-function (before, after) match % for all functions in the file."""
 
 
 _FUNC_MATCH_RE = re.compile(r"(\w+):\s*MATCH\b")

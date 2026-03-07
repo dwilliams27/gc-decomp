@@ -1,7 +1,8 @@
-"""Run the agent on a single function with DB lifecycle management."""
+"""Run the agent on a single function or file with DB lifecycle management."""
 
 from __future__ import annotations
 
+import subprocess
 import threading
 from datetime import datetime, timezone
 
@@ -319,4 +320,150 @@ def run_function(
             except Exception:
                 pass
 
+        raise
+
+
+def run_file(
+    source_file: str,
+    config: Config,
+    *,
+    worker_label: str = "",
+) -> AgentResult:
+    """Run the agent on an entire source file to match all unmatched functions.
+
+    Unlike run_function() which targets a single function:
+    - Tells the agent to match ALL unmatched functions in the file
+    - Captures baseline for all functions before the run
+    - Reports per-function deltas after the run
+    - Reverts only if previously-matched functions regressed (collateral damage)
+    - Auto-commits each newly matched function
+
+    Does not require a DB engine — operates directly on the source file.
+    """
+    bound_log = log.bind(
+        source_file=source_file,
+        worker=worker_label,
+        file_mode=True,
+    )
+
+    # Serialize on the source file
+    file_lock = _get_file_lock(source_file)
+    saved_source: bytes | None = None
+
+    try:
+        with file_lock:
+            # Save source for rollback
+            src_path = config.melee.resolve_source_path(source_file)
+            saved_source = src_path.read_bytes() if src_path.exists() else None
+
+            # Capture baseline
+            baseline: dict[str, float] = {}
+            try:
+                baseline_result = check_match(source_file, config)
+                if baseline_result.success:
+                    baseline = {
+                        f.name: f.fuzzy_match_percent
+                        for f in baseline_result.functions
+                    }
+            except Exception as e:
+                bound_log.warning("baseline_capture_error", error=str(e))
+
+            bound_log.info(
+                "file_run_start",
+                total_functions=len(baseline),
+                already_matched=sum(1 for v in baseline.values() if v >= 100.0),
+            )
+
+            # Run headless in file mode
+            try:
+                from decomp_agent.orchestrator.headless import run_headless
+
+                result = run_headless(
+                    None,  # file mode
+                    source_file,
+                    config,
+                    worker_label=worker_label,
+                )
+            except Exception as e:
+                bound_log.error("agent_crash", error=str(e))
+                result = AgentResult(
+                    error=str(e),
+                    termination_reason="agent_crash",
+                    file_mode=True,
+                )
+                return result
+
+            # Fill in baseline "before" values in function_deltas
+            for func_name, (_, after) in result.function_deltas.items():
+                before = baseline.get(func_name, 0.0)
+                result.function_deltas[func_name] = (before, after)
+
+            # Determine newly matched (wasn't 100% before, is now)
+            result.newly_matched = [
+                name for name, (before, after)
+                in result.function_deltas.items()
+                if before < 100.0 and after >= 100.0
+            ]
+            result.matched = len(result.newly_matched) > 0
+
+            # Collateral damage check: did any previously-matched function regress?
+            collateral = []
+            for func_name, (before, after) in result.function_deltas.items():
+                if before >= 100.0 and after < 100.0:
+                    collateral.append((func_name, before, after))
+
+            if collateral:
+                for fn, before, after in collateral:
+                    bound_log.warning(
+                        "collateral_damage",
+                        damaged_function=fn,
+                        before=before,
+                        after=after,
+                    )
+                # Revert the whole file — can't accept breaking matched functions
+                if saved_source is not None:
+                    src_path.write_bytes(saved_source)
+                result.matched = False
+                result.newly_matched = []
+                result.termination_reason = "collateral_damage"
+                bound_log.warning(
+                    "file_reverted_collateral_damage",
+                    num_damaged=len(collateral),
+                )
+            elif result.newly_matched:
+                # Auto-commit each newly matched function
+                for func_name in result.newly_matched:
+                    _auto_commit_match(func_name, source_file, config, bound_log)
+
+            # Log summary
+            improved = [
+                (name, before, after)
+                for name, (before, after) in result.function_deltas.items()
+                if after > before and name not in result.newly_matched
+            ]
+            bound_log.info(
+                "file_run_complete",
+                newly_matched=result.newly_matched,
+                num_improved=len(improved),
+                reason=result.termination_reason,
+                elapsed=round(result.elapsed_seconds, 1),
+            )
+            for name, before, after in improved:
+                bound_log.info(
+                    "function_improved",
+                    function=name,
+                    before=round(before, 1),
+                    after=round(after, 1),
+                )
+
+            return result
+
+    except (KeyboardInterrupt, SystemExit):
+        bound_log.warning("interrupted")
+        if saved_source is not None:
+            try:
+                src_path = config.melee.resolve_source_path(source_file)
+                src_path.write_bytes(saved_source)
+            except Exception:
+                pass
         raise

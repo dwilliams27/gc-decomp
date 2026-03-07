@@ -22,8 +22,42 @@ from decomp_agent.config import Config
 log = structlog.get_logger()
 
 
+def _build_file_status(source_file: str, config: Config) -> str:
+    """Build a status summary of all functions in a source file."""
+    try:
+        from decomp_agent.tools.build import check_match
+
+        result = check_match(source_file, config)
+        if not result.success:
+            return f"(could not compile {source_file} to check status)"
+
+        lines = []
+        matched = []
+        unmatched = []
+        for f in result.functions:
+            if f.is_matched:
+                matched.append(f.name)
+                lines.append(f"  {f.name}: MATCH ({f.size} bytes)")
+            elif f.fuzzy_match_percent > 0:
+                unmatched.append(f.name)
+                lines.append(
+                    f"  {f.name}: {f.fuzzy_match_percent:.1f}% ({f.size} bytes)"
+                )
+            else:
+                unmatched.append(f.name)
+                lines.append(f"  {f.name}: stub ({f.size} bytes)")
+
+        header = (
+            f"{len(matched)}/{len(result.functions)} matched, "
+            f"{len(unmatched)} remaining"
+        )
+        return header + "\n" + "\n".join(lines)
+    except Exception as e:
+        return f"(error getting file status: {e})"
+
+
 def run_headless(
-    function_name: str,
+    function_name: str | None,
     source_file: str,
     config: Config,
     *,
@@ -31,25 +65,49 @@ def run_headless(
     prior_best_code: str | None = None,
     prior_match_pct: float = 0,
 ) -> AgentResult:
-    """Run Claude Code headless to match a single function.
+    """Run Claude Code headless to match function(s).
 
-    Constructs a prompt, invokes `docker exec <container> claude -p ...`
-    with the MCP server and system prompt, parses the JSON output, and
-    returns an AgentResult.
+    Args:
+        function_name: Target function, or None for file mode (match all).
+        source_file: Source file path e.g. "melee/mn/mngallery.c"
+        config: Project configuration.
+        worker_label: Label for logging.
+        prior_best_code: Prior best code for warm starts (function mode only).
+        prior_match_pct: Prior match % for warm starts.
+
+    Returns:
+        AgentResult with match results.
     """
+    file_mode = function_name is None
     start_time = time.monotonic()
     bound_log = log.bind(
-        function=function_name,
+        function=function_name or "(file mode)",
         source_file=source_file,
         worker=worker_label,
+        file_mode=file_mode,
     )
 
-    # Build the prompt
-    m2c_seed = build_prefetched_m2c_block(
-        function_name, source_file, config, max_chars=6000
-    )
-
-    if prior_best_code is not None:
+    if file_mode:
+        # File mode: match all unmatched functions
+        file_status = _build_file_status(source_file, config)
+        prompt = (
+            f"Match all unmatched functions in {source_file}.\n\n"
+            f"Current status:\n{file_status}\n\n"
+            f"Work through the unmatched functions, starting with the smallest "
+            f"or easiest ones. For each function:\n"
+            f"- Use get_target_assembly and get_context to understand it\n"
+            f"- Use write_function to write and test your code\n"
+            f"- Use get_diff to analyze mismatches and iterate\n"
+            f"- Call mark_complete when a function hits 100%%\n\n"
+            f"You have full access to the codebase. Edit headers, add "
+            f"#includes, fix UNK_RET/UNK_PARAMS signatures, add extern "
+            f"declarations — whatever helps. Each improvement you make to "
+            f"headers and types helps all subsequent functions.\n\n"
+            f"If you get stuck on one function, move on to another and come "
+            f"back later with fresh context."
+        )
+    elif prior_best_code is not None:
+        # Function mode: warm start
         # Pre-fetch the diff if the prior code is already written to file
         diff_block = ""
         try:
@@ -83,6 +141,10 @@ def run_headless(
                 "this baseline rather than starting from scratch."
             )
 
+        # Build m2c seed for function mode warm starts
+        m2c_seed = build_prefetched_m2c_block(
+            function_name, source_file, config, max_chars=6000
+        )
         prompt = (
             f"Match function {function_name} in {source_file}.\n\n"
             f"A previous attempt reached {prior_match_pct:.1f}% match with this code:\n\n"
@@ -92,6 +154,10 @@ def run_headless(
             f"{m2c_seed}"
         )
     else:
+        # Function mode: cold start
+        m2c_seed = build_prefetched_m2c_block(
+            function_name, source_file, config, max_chars=6000
+        )
         prompt = (
             f"Match function {function_name} in {source_file}.\n\n"
             f"You have tools to read assembly, get context/headers, "
@@ -110,9 +176,12 @@ def run_headless(
     max_turns = config.claude_code.max_turns
     timeout = config.claude_code.timeout_seconds
 
-    # Warm starts get more turns — they skip orientation and spend all
-    # turns productively iterating on register allocation and fine-tuning.
-    if prior_best_code is not None:
+    # File mode gets many more turns — it's working on multiple functions.
+    # Warm starts get more turns than cold starts.
+    if file_mode:
+        max_turns = max(max_turns, 100)
+        timeout = max(timeout, 5400)  # 90 min
+    elif prior_best_code is not None:
         if prior_match_pct >= 75.0:
             max_turns = max(max_turns, 80)
             timeout = max(timeout, 3600)
@@ -267,12 +336,27 @@ def run_headless(
 
     # Post-run verification: compile and check match from the host side.
     # This catches matches even when the result text is empty (e.g. max_turns).
-    if not result.matched:
-        try:
-            from decomp_agent.tools.build import check_match
+    try:
+        from decomp_agent.tools.build import check_match
 
-            check = check_match(source_file, config)
-            if check.success:
+        check = check_match(source_file, config)
+        if check.success:
+            if file_mode:
+                # File mode: capture per-function results
+                result.file_mode = True
+                for func_result in check.functions:
+                    after_pct = func_result.fuzzy_match_percent
+                    result.function_deltas[func_result.name] = (0.0, after_pct)
+                    if func_result.is_matched:
+                        result.newly_matched.append(func_result.name)
+                if result.newly_matched:
+                    result.matched = True
+                    result.termination_reason = "matched"
+                result.best_match_percent = (
+                    sum(f.fuzzy_match_percent for f in check.functions)
+                    / max(len(check.functions), 1)
+                )
+            elif not result.matched and function_name is not None:
                 func_result = check.get_function(function_name)
                 if func_result is not None:
                     result.best_match_percent = max(
@@ -283,24 +367,24 @@ def run_headless(
                         result.matched = True
                         result.termination_reason = "matched"
                         result.best_match_percent = 100.0
-        except Exception:
-            bound_log.warning("post_run_check_failed", exc_info=True)
+    except Exception:
+        bound_log.warning("post_run_check_failed", exc_info=True)
 
     # Read final function code from source file (bind-mounted, visible from host)
-    try:
-        from decomp_agent.tools.source import get_function_source, read_source_file
+    if function_name is not None:
+        try:
+            from decomp_agent.tools.source import get_function_source, read_source_file
 
-        src_path = config.melee.resolve_source_path(source_file)
-        if src_path.exists():
-            source = read_source_file(src_path)
-            result.final_code = get_function_source(source, function_name)
-    except Exception:
-        bound_log.warning("final_code_read_failed", exc_info=True)
+            src_path = config.melee.resolve_source_path(source_file)
+            if src_path.exists():
+                source = read_source_file(src_path)
+                result.final_code = get_function_source(source, function_name)
+        except Exception:
+            bound_log.warning("final_code_read_failed", exc_info=True)
 
     result.elapsed_seconds = time.monotonic() - start_time
 
-    bound_log.info(
-        "headless_finished",
+    log_kwargs = dict(
         reason=result.termination_reason,
         matched=result.matched,
         best_match=result.best_match_percent,
@@ -311,5 +395,9 @@ def run_headless(
         elapsed=round(result.elapsed_seconds, 1),
         session_id=session_id,
     )
+    if file_mode:
+        log_kwargs["newly_matched"] = result.newly_matched
+        log_kwargs["file_mode"] = True
+    bound_log.info("headless_finished", **log_kwargs)
 
     return result
