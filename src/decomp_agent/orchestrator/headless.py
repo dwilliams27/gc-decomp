@@ -201,6 +201,7 @@ def run_headless(
         "--mcp-config", "/app/mcp.json",
         "--dangerously-skip-permissions",
         "--max-turns", str(max_turns),
+        "--effort", "high",
     ]
 
     # Use shell inside container so $(cat ...) expands

@@ -98,6 +98,25 @@ Both backends:
 
 - **Always validate new features by running them the way the agent would.** Don't just run unit tests — call the actual tool functions through `registry.dispatch()` (or the underlying function directly) with real data and verify the output is what you'd want the LLM to see. Unit tests with synthetic fixtures are not sufficient; real data from the melee build catches issues that synthetic data misses.
 
+## Current Goal: mn/ Module Ownership
+
+We are taking the `mn/` (Menus) module from partial to fully matched, file by file. The goal is whole-file completion — every function in a file at 100% — so we can submit clean PRs ("Complete mn/mngallery.c" etc). See `docs/UNTOUCHED_FILES_PLAN.md` for the full strategy.
+
+**Why mn/:** Untouched files with no active contributors = no merge conflict risk. Same module as already-matched files (mndeflicker, mnhyaku, mnlanguage) we can study for patterns.
+
+**Current targets (in priority order):**
+1. `melee/mn/mngallery.c` — 4/11 matched, 7 remaining. **Finish this first.**
+2. `melee/mn/mnstagesel.c` — 1 function at 99.2%. Near-done.
+3. `melee/mn/mnmain.c` — 6 functions all at ~98%. Near-done.
+4. `melee/mn/mnsound.c` — 3 functions at ~93%. Close.
+5. `melee/mn/mnsnap.c` — 11 functions at ~93%. Close.
+6. `melee/mn/mnevent.c` — 14 functions, untouched (0%). Original plan target.
+7. `melee/mn/mnitemsw.c` — 10 functions, untouched (0.6%). Original plan target.
+
+**After closing near-done files**, push into untouched targets. Each completed file = a PR.
+
+**Do NOT scatter runs across random libraries.** Stay focused on mn/ until the module is done.
+
 ## Key Conventions
 
 - All paths to source files use the "object name" format from configure.py: `"melee/lb/lbcommand.c"`

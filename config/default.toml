@@ -33,6 +33,7 @@ default_workers = 1
 max_attempts_per_function = 10
 # default_budget — omit to leave unlimited
 
+# TODO: Look up actual gpt-5.4 pricing — these are estimates
 [pricing.models."gpt-5.4"]
 input_per_million = 2.00
 cached_input_per_million = 0.20
