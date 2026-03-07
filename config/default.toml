@@ -4,7 +4,7 @@ version = "GALE01"
 build_dir = "build"
 
 [agent]
-model = "gpt-5.2-codex"
+model = "gpt-5.4"
 max_iterations = 30
 max_tokens_per_attempt = 2000000
 max_ctx_chars = 20000
@@ -33,10 +33,10 @@ default_workers = 1
 max_attempts_per_function = 10
 # default_budget — omit to leave unlimited
 
-[pricing.models."gpt-5.2-codex"]
-input_per_million = 1.75
-cached_input_per_million = 0.175
-output_per_million = 14.00
+[pricing.models."gpt-5.4"]
+input_per_million = 2.00
+cached_input_per_million = 0.20
+output_per_million = 16.00
 
 [pricing.models."o3"]
 input_per_million = 10.00

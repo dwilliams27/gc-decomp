@@ -86,6 +86,7 @@ def run_headless(
         "claude",
         "-p", shlex.quote(prompt),
         "--output-format", "json",
+        "--model", "claude-opus-4-6",
         "--append-system-prompt", f'"$(cat {system_prompt_path})"',
         "--mcp-config", "/app/mcp.json",
         "--dangerously-skip-permissions",

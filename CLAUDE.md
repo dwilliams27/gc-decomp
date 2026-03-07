@@ -8,6 +8,8 @@
 
 - **Do not hide missing setup behind graceful degradation.** If Ghidra isn't configured, m2c isn't installed, or the build environment isn't ready — raise an error, don't return a stub result and pretend everything is fine. The caller (the agent loop) needs to know what's actually available.
 
+- **ALWAYS use the latest models.** Headless Claude Code agents MUST use `claude-opus-4-6` (the latest Opus). API agents should use `gpt-5.4` (latest GPT) or equivalent top-tier model. Never let a stale default regress us to an older model — this directly impacts match quality. Check model versions when debugging poor agent performance.
+
 ## Project Structure
 
 - `src/decomp_agent/` — Main package
