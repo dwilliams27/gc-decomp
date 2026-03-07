@@ -8,6 +8,7 @@ from pathlib import Path
 from decomp_agent.config import Config
 from decomp_agent.melee.report import Report
 from decomp_agent.tools.ctx_filter import filter_ctx
+from decomp_agent.tools.extern_refs import ExternContext, resolve_extern_context
 from decomp_agent.tools.run import run_in_repo
 from decomp_agent.tools.source import find_functions, read_source_file
 
@@ -31,6 +32,9 @@ class FunctionContext:
     # Header content directly included by this file
     includes: list[str] = field(default_factory=list)
 
+    # Extern references resolved from target assembly
+    extern_context: ExternContext | None = None
+
     def format_for_llm(self, max_ctx_chars: int = 50_000) -> str:
         """Format context into a string suitable for LLM input.
 
@@ -42,6 +46,12 @@ class FunctionContext:
         parts.append(f"=== Context for {self.function_name} ===")
         parts.append(f"Source file: src/{self.source_file}")
         parts.append("")
+
+        if self.extern_context:
+            extern_text = self.extern_context.format_for_llm()
+            if extern_text:
+                parts.append(extern_text)
+                parts.append("")
 
         if self.preprocessed_ctx:
             parts.append("=== Preprocessed headers and types ===")
@@ -208,5 +218,13 @@ def get_function_context(
             stripped = line.strip()
             if stripped.startswith("#include"):
                 ctx.includes.append(stripped)
+
+    # Resolve extern references from target assembly
+    try:
+        ctx.extern_context = resolve_extern_context(
+            function_name, source_file, config
+        )
+    except Exception:
+        pass  # Non-critical — don't block context on extern resolution
 
     return ctx

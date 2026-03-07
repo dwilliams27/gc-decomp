@@ -1,4 +1,4 @@
-"""Utilities for prefetching m2c output into the first model prompt."""
+"""Utilities for prefetching m2c output and extern context into the first prompt."""
 
 from __future__ import annotations
 
@@ -16,6 +16,24 @@ def _truncate_m2c(code: str, max_chars: int) -> str:
     return code[:keep] + _TRUNCATION_NOTICE
 
 
+def _build_extern_block(
+    function_name: str,
+    source_file: str,
+    config: Config,
+) -> str:
+    """Resolve extern references and format for prompt injection."""
+    try:
+        from decomp_agent.tools.extern_refs import resolve_extern_context
+
+        ctx = resolve_extern_context(function_name, source_file, config)
+        text = ctx.format_for_llm()
+        if text:
+            return "\n\n" + text
+    except Exception:
+        pass
+    return ""
+
+
 def build_prefetched_m2c_block(
     function_name: str,
     source_file: str,
@@ -23,7 +41,14 @@ def build_prefetched_m2c_block(
     *,
     max_chars: int = _DEFAULT_MAX_CHARS,
 ) -> str:
-    """Run m2c once and format its output for inclusion in the first prompt."""
+    """Run m2c once and format its output for inclusion in the first prompt.
+
+    Also includes resolved extern references from the target assembly so
+    the agent knows what functions and globals are available.
+    """
+    # Build extern context (non-blocking)
+    extern_block = _build_extern_block(function_name, source_file, config)
+
     try:
         m2c = run_m2c(
             function_name,
@@ -33,17 +58,22 @@ def build_prefetched_m2c_block(
         )
     except Exception as e:
         return (
-            "\n\nPrefetched m2c output: unavailable "
+            extern_block
+            + "\n\nPrefetched m2c output: unavailable "
             f"({type(e).__name__}: {e})."
         )
 
     if m2c.error:
         error = " ".join(m2c.error.split())
-        return f"\n\nPrefetched m2c output: unavailable ({error})."
+        return (
+            extern_block
+            + f"\n\nPrefetched m2c output: unavailable ({error})."
+        )
 
     code = _truncate_m2c(m2c.c_code or "", max_chars=max_chars)
     return (
-        "\n\nPrefetched m2c first-pass output "
+        extern_block
+        + "\n\nPrefetched m2c first-pass output "
         "(use as an initial scaffold, not ground truth):\n\n"
         f"```c\n{code}\n```"
     )
