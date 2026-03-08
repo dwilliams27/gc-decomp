@@ -257,6 +257,33 @@ def run_function(
                         error=str(e),
                     )
 
+            # Capture final function code BEFORE reverting — this is our
+            # safety net.  headless.py already sets result.final_code, but
+            # if that failed (get_function_source returned None), we read
+            # the source file here while it still contains the agent's work.
+            if not result.final_code:
+                try:
+                    from decomp_agent.tools.source import (
+                        get_function_source,
+                        read_source_file,
+                    )
+
+                    current_source = read_source_file(src_path)
+                    captured = get_function_source(current_source, func_name)
+                    if captured:
+                        result.final_code = captured
+                        bound_log.info(
+                            "final_code_captured_before_revert",
+                            function=func_name,
+                            code_len=len(captured),
+                        )
+                except Exception as e:
+                    bound_log.warning(
+                        "final_code_capture_failed",
+                        function=func_name,
+                        error=str(e),
+                    )
+
             # Revert source file if function didn't match
             if not result.matched and saved_source is not None:
                 src_path.write_bytes(saved_source)
