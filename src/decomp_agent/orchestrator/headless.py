@@ -245,13 +245,15 @@ def run_headless(
     stdout = proc.stdout or ""
     all_output = f"{stderr}\n{stdout}".lower()
 
-    # Check for rate limiting in any output
+    # Check for rate limiting in stderr only — stdout contains JSON with
+    # large numbers that can false-positive on "429" substring matching.
+    stderr_lower = stderr.lower()
     rate_limited = (
-        "rate limit" in all_output
-        or "rate_limit" in all_output
-        or "429" in all_output
-        or "overloaded" in all_output
-        or "too many requests" in all_output
+        "rate limit" in stderr_lower
+        or "rate_limit" in stderr_lower
+        or "429" in stderr_lower
+        or "overloaded" in stderr_lower
+        or "too many requests" in stderr_lower
     )
     if rate_limited:
         result.elapsed_seconds = time.monotonic() - start_time
