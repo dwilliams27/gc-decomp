@@ -255,6 +255,92 @@ def serve(ctx: click.Context, host: str, port: int) -> None:
 
 
 @main.command()
+@click.argument("function_name")
+@click.argument("source_file")
+@click.option("--timeout", default=1800, type=int, help="Max seconds to run (default 1800)")
+@click.option("-j", "--workers", default=8, type=int, help="Parallel permuter workers (default 8)")
+@click.option("--apply", is_flag=True, default=False, help="Apply best result to source file")
+@click.pass_context
+def permuter(
+    ctx: click.Context,
+    function_name: str,
+    source_file: str,
+    timeout: int,
+    workers: int,
+    apply: bool,
+) -> None:
+    """Run decomp-permuter on a function to search for matching permutations."""
+    config, _engine = _load(ctx)
+
+    from decomp_agent.tools.permuter import run_permuter
+
+    console.print(
+        f"Running permuter on [bold]{function_name}[/bold] in {source_file} "
+        f"(timeout={timeout}s, workers={workers})"
+    )
+
+    result = run_permuter(
+        function_name, source_file, config,
+        timeout=timeout, workers=workers,
+    )
+
+    if result.error:
+        console.print(f"[red]Error: {result.error}[/red]")
+    if result.best_score is not None:
+        console.print(f"Best score: [bold]{result.best_score}[/bold]")
+    console.print(f"Iterations: {result.iterations}")
+
+    if result.success:
+        console.print("[green]Perfect match found![/green]")
+    elif result.improved:
+        console.print(f"[cyan]Improved code found (score {result.best_score})[/cyan]")
+
+    if result.best_code and apply:
+        from decomp_agent.tools.source import (
+            read_source_file,
+            replace_function,
+            write_source_file,
+        )
+
+        src_path = config.melee.resolve_source_path(source_file)
+        source = read_source_file(src_path)
+
+        # Extract only the target function from the permuter's preprocessed output
+        from decomp_agent.tools.source import get_function_source
+
+        new_func = get_function_source(result.best_code, function_name)
+        if new_func is None:
+            console.print("[red]Could not extract function from permuter output[/red]")
+            return
+
+        updated = replace_function(source, function_name, new_func)
+        if updated is None:
+            console.print(f"[red]Could not find {function_name} in source file[/red]")
+            return
+
+        write_source_file(src_path, updated)
+        console.print(f"[green]Applied best code to {source_file}[/green]")
+
+        # Verify by compiling
+        from decomp_agent.tools.build import check_match
+
+        match_result = check_match(source_file, config)
+        if match_result.success:
+            func = match_result.get_function(function_name)
+            if func:
+                status_str = "MATCH" if func.is_matched else f"{func.fuzzy_match_percent:.1f}%"
+                console.print(f"  {function_name}: {status_str}")
+        else:
+            console.print(f"[red]Compilation failed after apply: {match_result.error}[/red]")
+            # Revert
+            write_source_file(src_path, source)
+            console.print("[yellow]Reverted to previous code[/yellow]")
+    elif result.best_code:
+        console.print("\nBest code (use --apply to write it):")
+        console.print(result.best_code[:2000])
+
+
+@main.command()
 @click.pass_context
 def status(ctx: click.Context) -> None:
     """Show progress summary."""

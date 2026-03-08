@@ -495,7 +495,10 @@ def _handle_get_diff(params: GetDiffParams, config: Config) -> str:
 def _handle_run_permuter(params: RunPermuterParams, config: Config) -> str:
     from decomp_agent.tools.permuter import run_permuter
 
-    result = run_permuter(params.function_name, params.source_file, config)
+    result = run_permuter(
+        params.function_name, params.source_file, config,
+        timeout=params.timeout, workers=params.workers,
+    )
     if result.error:
         return f"Permuter error: {result.error}"
     if result.success:

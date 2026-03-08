@@ -130,6 +130,14 @@ class RunPermuterParams(BaseModel):
     source_file: str = Field(
         description='Object name from configure.py, e.g. "melee/lb/lbcommand.c"'
     )
+    timeout: int = Field(
+        default=1800,
+        description="Max seconds to run (default 1800 = 30 min)",
+    )
+    workers: int = Field(
+        default=8,
+        description="Number of parallel permuter workers (default 8)",
+    )
 
 
 class MarkCompleteParams(BaseModel):
