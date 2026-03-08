@@ -242,14 +242,17 @@ def _build_compile_sh(
     function_name: str,
     source_file: str,
     config: Config,
+    splice_helper: Path,
+    stripped_src: Path,
 ) -> str:
     """Generate compile.sh for the permuter.
 
     The permuter invokes: ./compile.sh <permuted.c> -o <output.o>
 
-    The permuted file is already preprocessed (base.c with permutations),
-    so we compile it directly with MWCC — no splice step needed.
-    Uses $$ (bash PID) in temp paths for parallel-worker safety.
+    The permuted file is a preprocessed C file (base.c with permutations).
+    We extract just the target function from it, splice it into the
+    original stripped source (which has proper #includes), and compile
+    with MWCC. Uses $$ (bash PID) in temp paths for parallel-worker safety.
     """
     repo = config.melee.repo_path
     src_dir = Path(source_file).parent  # e.g. "melee/mn"
@@ -282,8 +285,9 @@ trap 'rm -f "$TEMP_SRC_ABS"; rm -rf "$OUTDIR_ABS"' EXIT
 
 mkdir -p "$OUTDIR_ABS"
 
-# Copy preprocessed input directly (no splice needed)
-cp "$INPUT" "$TEMP_SRC_ABS"
+# Copy stripped source (with #includes) and splice in permuted function
+cp "{stripped_src}" "$TEMP_SRC_ABS"
+python3 "{splice_helper}" "$INPUT" "$TEMP_SRC_ABS" "{function_name}"
 
 # Compile with MWCC via Docker
 docker exec -w "$REPO" {container} wibo {mwcc_line} "$TEMP_SRC_REL" -o "$OUTDIR_REL"
@@ -304,8 +308,9 @@ TEMP_SRC_ABS="$REPO/$TEMP_SRC_REL"
 
 trap 'rm -f "$TEMP_SRC_ABS"' EXIT
 
-# Copy preprocessed input directly (no splice needed)
-cp "$INPUT" "$TEMP_SRC_ABS"
+# Copy stripped source (with #includes) and splice in permuted function
+cp "{stripped_src}" "$TEMP_SRC_ABS"
+python3 "{splice_helper}" "$INPUT" "$TEMP_SRC_ABS" "{function_name}"
 
 # MWCC's -o flag takes a DIRECTORY, not a file path.
 OUTDIR=$(mktemp -d)
@@ -313,6 +318,102 @@ cd "$REPO" && wine {mwcc_line} "$TEMP_SRC_REL" -o "$OUTDIR"
 mv "$OUTDIR/$STEM.o" "$OUTPUT"
 rm -rf "$OUTDIR"
 """
+
+
+# Standalone splice helper written to work_dir/_splice.py
+# Extracts a function from the permuted (preprocessed) file and
+# replaces that function in the original stripped source.
+_SPLICE_HELPER = r'''"""Extract function from permuted file, splice into stripped source."""
+import re
+import sys
+
+
+def find_function(source, func_name):
+    """Find and extract a function definition (signature + body) from source."""
+    pattern = (
+        r"(?:^|\n)"
+        + r"([a-zA-Z_][\w\s*]*?"
+        + re.escape(func_name)
+        + r"\s*\([^)]*\)\s*)\{"
+    )
+    m = re.search(pattern, source)
+    if not m:
+        return None
+
+    start = m.start()
+    if source[start] == "\n":
+        start += 1
+
+    brace_start = source.index("{", m.end() - 1)
+    depth = 0
+    pos = brace_start
+    while pos < len(source):
+        if source[pos] == "{":
+            depth += 1
+        elif source[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        pos += 1
+    end = pos + 1
+
+    return source[start:end]
+
+
+def replace_function(source, func_name, new_code):
+    """Replace a function definition in source with new_code."""
+    pattern = (
+        r"(?:^|\n)"
+        + r"([a-zA-Z_][\w\s*]*?"
+        + re.escape(func_name)
+        + r"\s*\([^)]*\)\s*)\{"
+    )
+    m = re.search(pattern, source)
+    if not m:
+        return None
+
+    start = m.start()
+    if source[start] == "\n":
+        start += 1
+
+    brace_start = source.index("{", m.end() - 1)
+    depth = 0
+    pos = brace_start
+    while pos < len(source):
+        if source[pos] == "{":
+            depth += 1
+        elif source[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        pos += 1
+    end = pos + 1
+
+    return source[:start] + new_code + source[end:]
+
+
+if __name__ == "__main__":
+    input_c, src_path, func_name = sys.argv[1], sys.argv[2], sys.argv[3]
+
+    # Extract function from the permuted (preprocessed) file
+    with open(input_c) as f:
+        permuted = f.read()
+    new_func = find_function(permuted, func_name)
+    if new_func is None:
+        print(f"Error: {func_name} not found in input", file=sys.stderr)
+        sys.exit(1)
+
+    # Replace function in the stripped source
+    with open(src_path) as f:
+        source = f.read()
+    updated = replace_function(source, func_name, new_func)
+    if updated is None:
+        print(f"Error: {func_name} not found in {src_path}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(src_path, "w") as f:
+        f.write(updated)
+'''
 
 
 def run_permuter(
@@ -418,10 +519,15 @@ def run_permuter(
                 error="Failed to assemble target assembly into .o file",
             )
 
-        # 4. Write compile.sh
+        # 4. Write splice helper
+        splice_helper = work_dir / "_splice.py"
+        splice_helper.write_text(_SPLICE_HELPER, encoding="utf-8")
+
+        # 5. Write compile.sh
         try:
             compile_script = _build_compile_sh(
                 function_name, source_file, config,
+                splice_helper, stripped_path,
             )
         except RuntimeError as e:
             return PermuterResult(
@@ -431,14 +537,14 @@ def run_permuter(
         compile_sh.write_text(compile_script, encoding="utf-8")
         compile_sh.chmod(0o755)
 
-        # 5. Write settings.toml (permuter reads compiler_type, not compiler)
+        # 6. Write settings.toml (permuter reads compiler_type, not compiler)
         (work_dir / "settings.toml").write_text(
             f'func_name = "{function_name}"\n'
             f'compiler_type = "mwcc"\n',
             encoding="utf-8",
         )
 
-        # 6. Add binutils to PATH and run permuter
+        # 7. Add binutils to PATH and run permuter
         env = os.environ.copy()
         env["PATH"] = str(binutils) + ":" + env.get("PATH", "")
 
