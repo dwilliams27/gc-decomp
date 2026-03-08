@@ -566,9 +566,10 @@ def run_permuter(
             )
         except subprocess.TimeoutExpired:
             # Check for best output even on timeout
-            best_code = _read_best_output(work_dir)
+            best_code, best_score = _read_best_output(work_dir)
             return PermuterResult(
                 function_name=function_name,
+                best_score=best_score,
                 best_code=best_code,
                 error=f"Permuter timed out after {timeout}s"
                 + (" (found improved code)" if best_code else ""),
@@ -576,7 +577,9 @@ def run_permuter(
 
         output = proc.stdout + proc.stderr
         best_score, iterations = _parse_permuter_output(output)
-        best_code = _read_best_output(work_dir)
+        best_code, file_score = _read_best_output(work_dir)
+        if file_score is not None and (best_score is None or file_score < best_score):
+            best_score = file_score
 
         if proc.returncode != 0 and best_code is None:
             return PermuterResult(
@@ -621,15 +624,15 @@ def _parse_permuter_output(output: str) -> tuple[int | None, int]:
     return best_score, iterations
 
 
-def _read_best_output(work_dir: Path) -> str | None:
+def _read_best_output(work_dir: Path) -> tuple[str | None, int | None]:
     """Read the best permutation output if it exists.
 
     The permuter writes improved results to output-{score}-{ctr}/source.c
-    directories. We find the lowest score and return that source.
+    directories. We find the lowest score and return (source, score).
     """
     candidates = list(work_dir.glob("output-*/source.c"))
     if not candidates:
-        return None
+        return None, None
 
     best_path = None
     best_score = None
@@ -642,5 +645,5 @@ def _read_best_output(work_dir: Path) -> str | None:
                 best_path = path
 
     if best_path is None:
-        return None
-    return best_path.read_text(encoding="utf-8")
+        return None, None
+    return best_path.read_text(encoding="utf-8"), best_score
