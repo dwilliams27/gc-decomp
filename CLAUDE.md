@@ -55,6 +55,24 @@ To build the frontend for production: `cd web-ui && npm run build` — output go
 
 Web dependencies: `pip install 'decomp-agent[web]'` (FastAPI, Uvicorn, websockets).
 
+## Checking Match Status
+
+**NEVER use `dtk` CLI directly to check function match percentages.** The dtk CLI has multiple subcommands with different argument formats that change across versions — it's easy to waste time guessing. Instead, use the project's Python tooling which wraps dtk correctly:
+
+```python
+from decomp_agent.config import load_config
+from decomp_agent.tools.build import check_match
+
+config = load_config()
+result = check_match('melee/mn/mngallery.c', config)
+for f in result.functions:
+    print(f"{f.name}: {f.fuzzy_match_percent}% fuzzy, {f.structural_match_percent}% structural")
+```
+
+`check_match()` handles Docker delegation, dtk invocation, and output parsing. It returns a `CompileResult` with per-function `FunctionMatch` objects containing `fuzzy_match_percent`, `structural_match_percent`, and `mismatch_type`.
+
+To compile first then check: use `compile_object()` from the same module.
+
 ## Building (IMPORTANT)
 
 **NEVER run `ninja`, `configure.py`, or `dtk` directly on the host.** Always use the Docker container via `run_in_repo()` or `docker exec`. The host has macOS ARM binaries in `build/tools/` which don't work in the Linux x86_64 container, and vice versa.
@@ -130,6 +148,16 @@ We are taking the `mn/` (Menus) module from partial to fully matched, file by fi
 **Prefer running investigation/experiment work inside the Docker container** by delegating to a Claude Code agent inside `docker-worker-1` (which has `--dangerously-skip-permissions`). The container has NO NETWORK ACCESS — if the delegated agent needs something from the internet, it must stop and report back so the host can fetch it. Anything that needs host-side commands (Ghidra, git, web fetches) should run directly on the host.
 
 Pattern: host agent launches container agent for compile/test/binary-analysis tasks → container agent works autonomously → reports results back.
+
+## Source File Contention
+
+**NEVER have multiple agents modify the same source file simultaneously.** When running parallel experiments (permuter, declaration sweeps, expression tests), each agent must work in isolation:
+
+- **Permuter**: Use the decomp-permuter tool which works on preprocessed copies — it never modifies the real source file.
+- **Sub-agents doing source experiments**: Launch with `isolation: "worktree"` to give each agent its own git worktree copy of the repo. This prevents agents from fighting over the same file.
+- **Sweep scripts**: Use a backup/restore pattern — copy source to `/tmp/` backup before sweeping, restore after each iteration. But this still blocks other agents from using the file.
+
+If you need to run experiments in parallel, use worktree isolation or the permuter tool — never have two agents directly editing the melee source tree at the same time.
 
 ## Key Conventions
 

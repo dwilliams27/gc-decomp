@@ -2,153 +2,137 @@
 
 **Status as of 2026-03-08**: 10/12 matched, 2 remaining.
 
-| Function | Match | Committed | Blocker |
-|----------|-------|-----------|---------|
-| ~~mnGallery_80258A08~~ | ~~100%~~ | ~~Yes~~ | ~~SOLVED~~ |
-| fn_802590C4 | 90.3% | Yes | Register alloc + opcode in loop |
-| mnGallery_80259868 | 89.5% | Yes | Prologue scheduling (lbzu vs addi+lbz) |
+| Function | Byte Match | Insn Match | Committed | Blocker |
+|----------|-----------|------------|-----------|---------|
+| fn_802590C4 | 92.1% | 82.3% (51/62) | Yes | Register coloring + constant folding in loop |
+| mnGallery_80259868 | ~89.5% | — | Yes | Instruction selection (lbzu vs addi+lbz) |
 
 ---
 
-## SOLVED: mnGallery_80258A08 — 100% Match
+## fn_802590C4 (92.1% byte match) — COMPILER FLOOR CONFIRMED
 
-### Solution
-`#pragma opt_propagation off` + `f32 near_val = zero` variable + declaration order `(top, bottom, left, right)`.
+### Current Best Code
+- **Declaration order:** `store, data, zero, i, jobj, ud` → gives jobj=r31, ud=r27 (matches target)
+- **No pragmas** (all tested, none help)
+- **Loop structure:** do-while (for/while produce identical output)
+- **Source file:** `melee/src/melee/mn/mngallery.c` lines 342-396
 
-### What Was Tried (16+ approaches before solution)
-See git history. Key insight: studying sobjlib.c's 99.84% camera function revealed the `near_val` pattern.
+### The 11 Remaining Diffs (all in loop setup, lines 33-44)
+
+**3 instruction-level differences:**
+```
+Line 35: target=[addi r26, r27, 0x0] compiled=[add r30, r27, r0]    ← copy ud vs compute ud+offset
+Line 36: target=[addi r30, r29, 0x0] compiled=[addi r29, r30, 0x0]  ← copy i→zero vs copy read→write
+Line 37: target=[add r27, r27, r0]   compiled=[li r27, 0x0]          ← ud+offset vs literal zero
+```
+
+**8 register-naming differences** (consequences of above):
+- Target: i=r29, zero=r30, read_ptr=r27, write_ptr=r26
+- Compiled: i=r26, zero=r27, read_ptr=r30, write_ptr=r29
+- data=r28 and jobj=r31 match perfectly
+
+**Root cause:**
+1. **Constant folding:** Compiler sees `i=0; zero=i` and folds to `li zero, 0` instead of keeping register copy `addi zero, i, 0`. This happens BEFORE register coloring and persists even with `#pragma opt_propagation off`.
+2. **Scheduling:** Compiler computes read_ptr (add ud+offset) before write_ptr (copy ud). Target does the reverse: copy ud first, then advance in-place.
+3. **Register coloring consequence:** Different scheduling creates different interference graph, leading to different register assignments for loop variables.
+
+### Exhaustive Testing Summary (2026-03-08)
+
+#### A. Declaration Order (720 permutations — ALL tested)
+- Best: `store,data,zero,i,jobj,ud` → 11 diffs, jobj=r31, ud=r27
+- Original: `store,i,data,jobj,ud,zero` → 12 diffs, jobj=r27 (wrong register)
+- All 720 tested via automated sweep script. Multiple tied orderings.
+
+#### B-H. Structural Variants (25+ variants — ALL tested with best decl order)
+| Variant | Diffs | Notes |
+|---------|-------|-------|
+| BASELINE (best decl order) | 11 | Reference |
+| E2_STORE_TYPED (struct* store) | 11 | Same pattern |
+| V2_FOR_LOOP | 11 | Identical to do-while |
+| V3_WHILE_LOOP | 11 | Identical to do-while |
+| V4_VOID_ZERO (cast) | 11 | Cast doesn't affect codegen |
+| V7_TEMP_IN_LOOP | 11 | Local temp optimized away |
+| V10_DATA_FOR_WRITE | 11 | data ptr for write side |
+| V11_ZERO_LITERAL (zero=0) | 11 | Same as zero=i |
+| V12_PTR_WRITE | 11 | Raw pointer arithmetic |
+| C_INDEP_LOADS | 12 | Separate gobj->user_data loads |
+| E_REVERSED (store=ud swap) | 12 | Changes ud register |
+| V14_UD_TYPED | 12 | Typed ud pointer |
+| F_ZERO_BEFORE_CALL | 13 | Worse scheduling |
+| F2_IZERO_BEFORE_CALL | 13 | Worse scheduling |
+| COMBO_REVERSED_ZERO_BEFORE | 13 | Worse scheduling |
+| COMBO_INDEP_ZERO_BEFORE | 13 | Worse scheduling |
+| V9_ZERO_EARLY | 13 | Worse scheduling |
+| B_NULL | 21 | Breaks register pressure |
+| B_ZERO_LITERAL | 21 | Breaks register pressure |
+| V8_VOID_I_CAST | 21 | Cast chain breaks allocation |
+| V6_STORE_FIRST | 30 | Wrong semantics |
+| V1_SINGLE_PTR | 39 | Wrong instruction count |
+| H_DATA_PTR_LOOP | 40 | Wrong instruction count |
+| V13_UNROLLED | 57 | Completely different codegen |
+
+**Conclusion: ALL variants with correct semantics produce exactly 11 diffs with identical diff pattern.**
+
+#### Pragmas (14 tested — ALL at 11 diffs with best decl order)
+| Pragma | Diffs | Notes |
+|--------|-------|-------|
+| opt_propagation off | 11 | Does NOT prevent zero=i constant fold |
+| optimization_level 3 | 11 | No effect on loop |
+| opt_peephole off | 11 | No effect |
+| opt_common_subexpressions off | 11 | No effect |
+| opt_lifetimes off | 11 | No effect |
+| opt_dead_assignments off | 11 | No effect |
+| opt_propagation + opt_cse off | 11 | No effect |
+| opt_loop_invariants off | 11 | No effect |
+| opt_propagation + opt_peephole off | 11 | No effect |
+| opt_dead_code off | 11 | No effect |
+| opt_propagation + opt_lifetimes off | 11 | No effect |
+| opt_unroll_loops off | 11 | No effect |
+| scheduling off | 19 | Worse (expected) |
+| opt_strength_reduction off | 40 | Catastrophic |
+
+**Additional pragmas tested at old baseline (from prior sessions):**
+opt_dead_assignments, opt_strength_reduction_strict, defer_codegen, side_effects, dont_inline, fp_contract, opt_common_subs, pool_data, pool_strings, float_constants, global_optimizer, auto_inline, function_align, disable_registers, use_lmw_stmw, optimize_for_size
+
+**CONCLUSION: ALL known MWCC pragmas exhausted. None affect the 3 core instruction differences.**
 
 ---
 
-## fn_802590C4 (90.3%) — Register Allocation + Opcode Diffs
-
-### The Problem (at 90.3%)
-11 differing instructions in a 2-iteration do-while loop:
-
-**Register swaps** (jobj wrong register, cascades):
-```
-Target: jobj=r31, ud_load=r27
-Ours:   jobj=r27, ud_load=r30
-```
-
-**Opcode/scheduling diffs** (loop init sequence):
-```
-Target: addi r26, r27, 0   (copy ud → write_ptr)
-        addi r30, r29, 0   (zero = i, register copy)
-        add  r27, r27, r0  (advance store ptr IN-PLACE)
-
-Ours:   add  r31, r30, r0  (compute store = ud + offset, NEW register)
-        addi r30, r31, 0   (copy back)
-        li   r26, 0        (zero = literal 0, NOT register copy)
-```
-
-Key: target advances store IN-PLACE in same register as ud, and copies `zero = i` as register move. Our code creates a new register for store and loads zero as literal.
-
-### What Was Tried (EVERYTHING below failed to beat 90.3%)
-
-**Declaration order (exhaustive):**
-- All 720 permutations tested
-- Best: 90.3% with `(store, i, data, jobj, ud, zero)` — 24 orderings tied
-- Previous: 82.3% with `(store, ud, data, i, zero, jobj)`
-
-**Pragmas (tested at both 82.3% and 90.3% baselines):**
-- opt_strength_reduction off → 48% | opt_lifetimes off → 82%
-- opt_propagation + lifetimes → 90.3% (no change from propagation alone)
-- opt_dead_code/loop_invariants/unroll_loops/cse off → no effect
-- optimization_level 0/1/2 → 47-56% | peephole off → 63-83%
-- schedule off → 82% | No pragmas → 82%
-- **NEW (all at 90.3%, no effect):** opt_dead_assignments, opt_strength_reduction_strict, defer_codegen, side_effects, dont_inline, fp_contract, opt_common_subs, pool_data, pool_strings, float_constants, global_optimizer, auto_inline, function_align
-- **disable_registers on/off/gpr27** → 81.8% (recognized but harmful)
-- **CONCLUSION: ALL pragmas in MWCC binary exhausted. No pragma can fix this.**
-
-**FAKE MATCH tricks (all at 90.3% baseline):**
-- `(0, expr)` comma operators → CATASTROPHIC (37-52%)
-- `data = data = x` self-assignment → no effect (90.3%)
-- `jobj = jobj = x` → 37.5% (catastrophic)
-- `!jobj;` / `!data;` no-ops → no effect
-- `if (gobj && gobj) {}` / `if (store && store) {}` → no effect
-- `new_var = gobj->user_data; ud=new_var; store=new_var` → 90.3% (shifted regs but not enough)
-- store for both read+write → 53.7%
-
-**Type/cast/structural:**
-- Typed struct* for store/ud → no effect
-- Reversed copy direction → 41.5-82.3%
-- NULL instead of zero → 40%
-- Explicit pointer variables → 46%
-- Single pointer, no store/ud split → 57%
-- Using `data` for loop → 74%
-- volatile zero → 59%
-
-**Loop structure:**
-- while/for/do-while → all 90.3%
-- Unrolled → 50%
-- i != 2 condition → 81%
-
-**External:** No community solutions. No upstream attempts. Same compiler flags everywhere.
-
----
-
-## mnGallery_80259868 (89.5%) — Prologue Scheduling
+## mnGallery_80259868 (~89.5%) — Instruction Selection
 
 ### The Problem
-32 diffs in first ~31 instructions. Last 67 instructions match 100%.
+Compiler generates `addi r5, r4, mn_804A04F0@l` + `lbz r0, 0(r5)` (2 instructions) where target uses `lbzu r0, mn_804A04F0@l(r3)` (1 instruction). Cascades through entire prologue scheduling.
 
-Core issue: compiler generates `addi r5, r4, mn_804A04F0@l` + `lbz r0, 0(r5)` (2 instructions) where target uses `lbzu r0, mn_804A04F0@l(r3)` (1 instruction that combines load + address update). The extra instruction cascades scheduling through the entire prologue.
-
-### What Was Tried (~80 variants, ALL failed to beat 89.5%)
-
-**Statement order:** All permutations of state assignments with archive before/after. Best 89.5% with `(archive, hovered, prev_cur, cooldown)`.
-
-**Pragmas:** opt_propagation/lifetimes/strength_reduction/scheduling/peephole/global_optimizer/use_lmw_stmw/optimize_for_size/optimization_level/dont_reuse_strings off — none helped, many catastrophic.
-- **NEW (all 89.5%, no effect):** opt_dead_assignments, opt_strength_reduction_strict, defer_codegen, side_effects, fp_contract, opt_common_subs, pool_data, pool_strings, float_constants, auto_inline, function_align, opt_lifetimes
-- **scheduling off → 39.6% (catastrophic)**
-- **CONCLUSION: ALL pragmas in MWCC binary exhausted. No pragma can fix this.**
-
-**FAKE MATCH tricks:** comma operators (87.4%), self-assignment arr (67.1%), !arr no-op (76.4%), volatile state_addr (87.4%).
-
-**Structural:** Different PAD_STACK sizes (0x28-0x40), no PAD_STACK, arr offset variables, global access directly, char** cast, inner struct variations, block scoping tricks.
-
-**Declaration order:** ~6 permutations of key variables. No improvement.
-
-**Reference function:** mnHyaku_8024CD64 (matched, same pattern) gets `lbzu` because it's simpler with different register pressure. That order applied here drops to 87.9%.
+### What Was Tried (~80 variants, ALL failed)
+See previous sessions. Statement ordering, pragmas, fake match tricks, structural variants, PAD_STACK sizes, declaration order permutations. Reference function mnHyaku_8024CD64 gets lbzu in simpler context.
 
 ### Root Cause
-The `lbzu` vs `addi+lbz` decision is MWCC's instruction selector reacting to register pressure at the point of first `mn_804A04F0` access. In simpler functions (mnhyaku), there's pressure to combine operations. In our larger function with more locals and PAD_STACK, the compiler eagerly computes the address.
+lbzu decision is MWCC instruction selector reacting to register pressure. More locals = compiler eagerly computes address in 2 insns instead of combining.
 
 ---
 
-## Remaining Attack Vectors
+## Next Steps (Prioritized)
 
-### 1. Permuter (overnight run)
-Best remaining systematic option. With fixed tooling: 8 workers, ~200 iter/min, 8 hours = ~96,000 iterations. The permuter does random equivalent transformations (expression rewriting, statement reordering, variable renaming) that might stumble on patterns we haven't tried.
+### Option A: Accept 92.1% and Submit PR
+- Mark fn_802590C4 and mnGallery_80259868 as `Equivalent` status
+- Submit PR "Complete mn/mngallery.c (10/12 matched, 2 equivalent)"
+- Community standard accepts Equivalent for compiler-limit functions
+- **Effort: 1-2 hours. Guaranteed outcome.**
 
-### 2. Micro-benchmark isolation
-Strip each function to JUST the problematic code section, compile in isolation, and systematically test what triggers the desired codegen. Then gradually add back surrounding context to find exactly where it breaks.
+### Option B: Reverse-Engineer MWCC Internals (Phase 0-3 from plan)
+- Phase 0: Test `#pragma dumpir on` (hidden pragma, 3-4 hours)
+- Phase 1: Ghidra structural mapping of mwcceppc.exe (6-8 hours)
+- Phase 2: Reverse-engineer register coloring algorithm (10-12 hours)
+- Phase 3: Reverse-engineer instruction selector for lbzu (8-10 hours)
+- **Effort: 30-40 hours. Uncertain outcome. Community-wide value.**
 
-### 3. Reverse-engineer MWCC register allocator
-MWCC (mwcceppc.exe) is a PE binary we run under wibo. Could load into Ghidra and study the register allocation / instruction scheduling heuristics. Extreme effort but would give definitive answers.
+### Option C: Permuter Overnight Run
+- 8 workers × 8 hours = ~96K iterations of random equivalent transforms
+- Unlikely to beat compiler floor but worth running overnight
+- **Effort: 0 active hours (overnight). Low probability of improvement.**
 
-### 4. MWCC undocumented pragmas (SCANNED — key findings)
-Binary scan of mwcceppc.exe revealed untested pragmas:
-- **`disable_registers`** — Can disable specific register usage! Could force jobj off r27.
-- **`opt_dead_assignments`** — Separate from opt_dead_code. Never tested. Could affect `zero = i`.
-- **`opt_strength_reduction_strict`** — Stricter variant, never tested.
-- **`defer_codegen`** — Defers codegen to end of TU. Could change optimization decisions.
-- **`side_effects`** — Side effect tracking.
-- **Optimizer pass order**: Copy prop → Const fold → CSE → Code motion → Strength reduction → Copy prop 2 → Loop unroll → Peephole → **Register coloring (graph coloring with coalescing)** → Scheduling.
-
-### 5. Key analysis of 24 tied orderings (fn_802590C4)
-- `store`, `ud`, `zero` positions DON'T MATTER — produce identical binary
-- Only constraint: `i` before `data` before `jobj`
-- **UPDATE (2026-03-08):** Ghidra RE + micro-benchmarks confirmed declaration order `(store, i, data, jobj, ud, zero)` produces jobj=r31 matching target. The 90.3% code already has correct register assignments. Remaining diffs are scheduling/copy-propagation, not register coloring:
-  - Target does `addi` (copy) then `add` (advance IN-PLACE); ours does `add` (new reg) then `addi` (copy back)
-  - Target treats `zero = i` as register copy (`addi r30, r29, 0`); ours optimizes to `li r26, 0` despite opt_propagation off
-
-### 6. Binary verification
-Swap register fields in our compiled .o bytes to verify the code is semantically identical.
-
-### 7. Deferred ideas
-- Reverse-engineer MWCC register allocator in Ghidra
-- Custom permuter with FAKE MATCH transformations
-- Cross-function register pressure manipulation
-- Submit PR with 10/12 matched + Equivalent status for remaining 2
+### Option D: Move to Other mn/ Targets
+- mnstagesel.c: 1 function at 99.2%
+- mnmain.c: 6 functions at ~98%
+- mnsound.c: 3 functions at ~93%
+- **Effort: 4-8 hours per file. High probability of new matches.**

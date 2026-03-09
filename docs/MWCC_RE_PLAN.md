@@ -272,3 +272,234 @@ void pressure(int a, int b, int c, int d, int e) {
 #### Files
 - Ghidra output: `/tmp/ghidra_mwcc_peep_handlers.txt` (1826 lines, all 15 handlers decompiled)
 - Ghidra scripts: `/opt/homebrew/Cellar/ghidra/12.0.2/libexec/Ghidra/Features/Base/ghidra_scripts/CreateAndDecompHandlers.java`
+
+---
+
+## Phase 5: IR Constant Folding & Instruction Scheduler Deep-Dive
+
+**Goal:** Close the last 2 functions in mngallery.c by reverse-engineering the two compiler subsystems responsible for the remaining diffs.
+
+**Context:** Phases 0-3 exhaustively covered register coloring (Chaitin-Briggs), peephole/lbzu (Peep_UpdateFormCombine), and all 720 declaration orderings / 25+ structural variants / 30+ pragma combos. The remaining diffs are:
+
+1. **IR Constant Folding** — folds `zero = i` (i=0) to `li 0` instead of keeping register copy `addi r30, r29, 0`
+2. **Instruction Scheduler** — orders instructions differently (read_ptr before write_ptr, sth/stb/addi interleaving)
+
+**Key discovery:** `FUN_00455a70` (IRO_ConstantFolding) runs UNCONDITIONALLY in the IR optimizer pipeline — it is NOT gated by `DAT_005842e6` (the `opt_propagation` flag). This is almost certainly why `#pragma opt_propagation off` doesn't prevent the folding.
+
+---
+
+### Track A: IR Constant Folding (fn_802590C4's core blocker)
+
+#### A1. Map pragma names → global flags (2-3 hrs)
+
+- Find the pragma handler in the front-end (search for string `"opt_propagation"` xrefs)
+- Trace which `DAT_005842e*` globals each `#pragma opt_*` sets/clears
+- **Critical question:** Is there ANY flag that gates `FUN_00455a70`?
+- Check if `#pragma optimization_level 0` bypasses the entire IR optimizer
+- Files: Ghidra project, look in CPrep.c / CParser.c area of the binary
+
+#### A2. Decompile `FUN_00455a70` (IRO_ConstantFolding) (3-4 hrs)
+
+- Understand what folding operations it performs
+- Does it fold `x = y` when `y` is known constant? Or just `x = 3 + 5` → `x = 8`?
+- Is there a condition check we missed that could gate it?
+- Create Ghidra decompile script targeting this function + callees
+
+#### A3. Decompile `FUN_00458970` (IRO_CopyAndConstantPropagation) (3-4 hrs)
+
+- This IS gated by `opt_propagation` flag (`DAT_005842e6`)
+- Understand: does it replace `zero = i` with `zero = 0` (value propagation)?
+- Or does the standalone constant folder in A2 handle this?
+- Source file: `IroPropagate.c` (string at `00553d3c`)
+
+#### A4. Micro-benchmark validation (2-3 hrs)
+
+Compile in Docker with Melee flags (`-O4,p -proc gekko`):
+```c
+// Test 1: constant copy — does it fold?
+int i = 0; int z = i; use(z); i++;
+
+// Test 2: every relevant #pragma combination
+#pragma optimization_level 0  // does this bypass the entire optimizer?
+#pragma opt_propagation off    // known to NOT prevent folding
+#pragma opt_dead_code off      // etc.
+
+// Test 3: non-constant prevents folding?
+int i = func(); int z = i; use(z);  // non-constant i should preserve the copy
+
+// Test 4: timing — before or after instruction selection?
+// If folding is IR-level, it happens before isel. If machine-level, after.
+```
+
+#### A-Success Criteria
+
+- **Win:** Find a pragma/flag that prevents `FUN_00455a70` from folding `zero = i`, getting `addi` instead of `li`
+- **Partial win:** Confirm no pragma prevents it, but document the exact pass for the decomp community
+- **Key insight:** If constant folding is truly unconditional, no source-level trick can prevent it. The 11-diff floor is absolute.
+
+---
+
+### Track B: Instruction Scheduler (both functions need this)
+
+#### B1. Annotate `FUN_004ccdc0` (scheduler priority/SelectBest) (3-4 hrs)
+
+This is the scheduler's core: selects which ready instruction to emit next.
+Already partially decompiled in `/tmp/ghidra_mwcc_lbzu.txt` lines 827-889.
+
+Confirm the priority cascade:
+1. **Ready check**: predecessors done, earliest start ≤ current cycle
+   - `*(short *)(node + 0x18) != 0` = pending predecessors
+   - `param_2 < *(ushort *)(node + 0x12)` = earliest start > current cycle
+2. **Schedulability check**: `(*(code **)(DAT_00581b80 + 0x10))(node[3])` — processor model callback
+3. **Slack preference**: `*(ushort *)(node + 0x14)` — tighter slack wins (lower value = schedule first)
+4. **Successor count**: count successors with `*(short *)(succ[1] + 0x18) == 1` — more ready successors = wins
+5. **Latency**: `*(ushort *)(node + 0x16)` — higher latency starts earlier
+6. **Tie-breaker: opcode class** — `(&DAT_005654b9)[opcode * 0x10]` — but ONLY if `DAT_00587648 != 0` (for GC/PPC, this is always 0, so this tie-breaker never fires)
+7. **Final fallback: list order** — first found in linked list wins (= IR emission order)
+
+Map all node struct field offsets:
+| Offset | Type | Meaning |
+|--------|------|---------|
+| `+0x00` | ptr | next node in ready list |
+| `+0x08` | ptr | successors list |
+| `+0x0C` | ptr | instruction reference |
+| `+0x12` | u16 | earliest start cycle |
+| `+0x14` | u16 | slack (latest start - earliest start) |
+| `+0x16` | u16 | latency |
+| `+0x18` | s16 | pending predecessor count |
+
+#### B2. Decode PPC750 processor model table (4-6 hrs)
+
+Table at `DAT_00574d70` — contains function pointers for latency, schedulability.
+- Decompile the `get_latency(instruction)` function pointer at `[2]` (offset +0x10 from table base)
+- **Critical:** What are latencies for `li`, `addi`, `add`, `lwz`, `stw`, `sth`, `stb`?
+- These specific opcodes are in our stuck functions' diff regions
+- If `addi` and `add` have different latencies, that explains scheduling differences
+
+Known table structure (from SelectBest decompilation):
+```
+DAT_00581b80 → processor model struct:
+  +0x00: ???
+  +0x04: ???
+  +0x08: ???
+  +0x0C: ???
+  +0x10: is_schedulable(instr) function pointer — called during ready check
+  +0x14: ???
+```
+
+#### B3. Trace source order → instruction list order (3-4 hrs)
+
+- Instruction selection at `FUN_004be990` converts IR → machine instructions
+- Does it preserve IR statement order in the instruction list?
+- If the scheduler's tie-breaker is list order, and list order = source order, then **source statement reordering DIRECTLY controls scheduling ties**
+- Trace: source statement → IR node → instruction selection → instruction list → scheduler input
+
+#### B4. Micro-benchmark: scheduling order validation (3-4 hrs)
+
+```c
+// Test 1: Two independent addi — does source order = output order?
+int a = get() + 1;
+int b = get() + 2;
+use(a, b);  // swap source order, check if output order swaps
+
+// Test 2: lis+addi followed by li — does scheduler interleave?
+extern char *arr;
+int x = 5;
+arr[0] = 'a';  // needs lis+addi for arr
+// Does 'li r0, 5' appear before or after the lis+addi?
+
+// Test 3: fn_802590C4's exact pattern
+void *ud_copy = ud;
+void *read_ptr = (char*)ud + offset;
+// Swap source order → does output swap?
+
+// Test 4: mnGallery_80259868's pattern
+// lis r4, ha / addi r4, r4, lo / li r0, 5
+// Vary source order of arr setup vs constant assignment
+```
+
+#### B5. Test `addi r4,r4,lo` vs `addi r0,r4,lo + mr r4,r0` (2-3 hrs)
+
+mnGallery_80259868 has this extra `mr` instruction — when r4 is still live, compiler uses temp register.
+
+```c
+// Hypothesis: if arr assignment comes BEFORE other uses of the same register,
+// the self-modifying `addi r4, r4, lo` should be possible.
+// If arr comes AFTER, r4 is still live → compiler uses temp + mr.
+
+// Test: change when arr is first referenced relative to other statements
+// that use the same calling-convention register.
+```
+
+#### B-Success Criteria
+
+- **Win:** Understand priority function well enough to predict scheduling. Design source code where tie-breaking by list order produces the target output.
+- **Partial win:** Confirm scheduler behavior empirically with micro-benchmarks even without full RE.
+
+---
+
+### Track C: Apply Findings (after A and B)
+
+#### C1. Fix fn_802590C4 (2-4 hrs)
+
+- If A finds a way to prevent constant folding → apply it (the dependency graph changes, which may also fix scheduling)
+- If only B gives results → try source reordering to exploit tie-breaking
+- Note: if `zero = i` stays as `li 0`, the dependency graph differs from target, so scheduling priorities also differ. Constant folding fix is the primary lever.
+
+#### C2. Fix mnGallery_80259868 (2-4 hrs)
+
+- Use B5 findings to eliminate the extra `mr r4, r0`
+- Use B4 findings to fix the 3-instruction scheduling swap
+- If neither works, this function may also be at compiler floor
+
+---
+
+### Execution Strategy
+
+**Parallel tracks:** A1+B1 first (both are Ghidra annotation work, 1 session). Then A2+B3 (both are decompilation, 1 session). Then micro-benchmarks A4+B4+B5 (validation, 1 session). Finally C1+C2 (application).
+
+**Minimum viable:** If time is limited, do A1+A4 and B4+B5 only (pragma mapping + micro-benchmarks, ~8 hrs). This skips deep RE but may still find the lever through empirical testing.
+
+**Estimated total:** 25-40 hours for full RE, or 8-12 hours for the empirical shortcut.
+
+---
+
+### Fallback: Accept as Equivalent
+
+If RE confirms these are true compiler floors:
+- Submit PR "Complete mn/mngallery.c" with 10/12 matched + 2 Equivalent
+- Document compiler internals as the reason (first public MWCC constant folding + scheduler analysis)
+- Move to other mn/ targets: mnstagesel.c (99.2%), mnmain.c (~98%), mnsound.c (~93%)
+
+---
+
+### Key Addresses (Phase 5)
+
+| Address | Function | Subsystem |
+|---------|----------|-----------|
+| `0042cd10` | IROPipeline | IR optimizer driver |
+| `00455a70` | IRO_ConstantFolding | **UNGATED** constant folder |
+| `00458970` | IRO_CopyAndConstantPropagation | Gated by `DAT_005842e6` (opt_propagation) |
+| `004582f0` | CopyPropagation engine | Gated by `DAT_005842e6` |
+| `004ccdc0` | Scheduler_SelectBest | Priority/tie-breaking function |
+| `004ccbf0` | Scheduler_Main | List scheduler loop |
+| `004ccf10` | Scheduler_BuildDAG | Dependency graph construction |
+| `00574d70` | PPC750_ModelTable | Processor latency model |
+| `004c6100` | InstrSchedule | Scheduling pass entry point |
+| `004be990` | InstrSelection | IR → machine instructions |
+
+### Pragma → Global Flag Map (to be filled in A1)
+
+| Pragma | Global | Default | Effect |
+|--------|--------|---------|--------|
+| `opt_propagation` | `DAT_005842e6` | on | Gates CopyAndConstantPropagation (00458970) + CopyPropagation (004582f0) |
+| `opt_dead_code` | `DAT_005842ea` | on | Gates RemoveUnreachable in cleanup loop |
+| `opt_common_subs` | `DAT_005842e4` | on | Gates CommonSubexpressions (0044f1c0, 0044ecc0, 0044df00) |
+| `opt_loop_invariants` | `DAT_005842e5` | on | Gates FindLoops + LoopInvariant code motion |
+| `opt_strength_reduction` | `DAT_005842e8` | on | Gates FindLoops (shared with loop_invariants) |
+| `opt_unroll_loops` | `DAT_005842ed` | on | Gates LoopUnroller (0045fa80), also needs `DAT_005842e2 == 0` |
+| `opt_lifetimes` | `DAT_005842e7` | on | Gates UseDef pass (00459b30, shared with propagation) |
+| `optimization_level` | `DAT_005842e1` | >0 | Gates ENTIRE IR optimizer (all passes except flow graph build) |
+| `opt_branch_folding` | `DAT_005842ef` | off | Controls loop iteration count (1 vs 2 passes through optimizer) |
+| `opt_peephole` | TBD | on | Gates peephole passes (both pre- and post-coloring) |
+| TBD | TBD | — | **Does anything gate FUN_00455a70 (ConstantFolding)?** |
