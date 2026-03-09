@@ -12,3 +12,4 @@ data/
 *.db-wal
 build.ninja
 node_modules/
+ghidra_projects/

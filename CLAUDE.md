@@ -10,6 +10,8 @@
 
 - **ALWAYS use the latest models.** Headless Claude Code agents MUST use `claude-opus-4-6` (the latest Opus). API agents should use `gpt-5.4` (latest GPT) or equivalent top-tier model. Never let a stale default regress us to an older model — this directly impacts match quality. Check model versions when debugging poor agent performance.
 
+- **Run sub-agents in background, not foreground.** When launching multiple research/experiment agents, run them with `run_in_background: true` so the main thread stays responsive. Use a polling loop to check for completed agents, process each result as it finishes (synthesize, decide whether to send the agent back for more), and keep the user informed incrementally. NEVER block the main thread waiting for all agents at once — the user can't send messages while tool calls are pending. The pattern is: launch background agents → return to conversation → poll/process results as they arrive → synthesize when all done.
+
 ## Project Structure
 
 - `src/decomp_agent/` — Main package
@@ -56,6 +58,12 @@ Web dependencies: `pip install 'decomp-agent[web]'` (FastAPI, Uvicorn, websocket
 ## Building (IMPORTANT)
 
 **NEVER run `ninja`, `configure.py`, or `dtk` directly on the host.** Always use the Docker container via `run_in_repo()` or `docker exec`. The host has macOS ARM binaries in `build/tools/` which don't work in the Linux x86_64 container, and vice versa.
+
+**CRITICAL: NEVER run `configure.py` on the host to generate `build.ninja` for the container.** The host's Python path gets embedded in `build.ninja` rules, which breaks inside the container. If you need to regenerate `build.ninja`, run `configure.py` **inside the container** with explicit tool paths:
+```bash
+docker exec docker-worker-1 bash -c "cd /Users/dwilliams/proj/melee-fork/melee && python3 configure.py --map --dtk /usr/local/bin/dtk --compilers build/compilers --wrapper build/tools/wibo --sjiswrap build/tools/sjiswrap.exe"
+```
+The `--dtk`, `--compilers`, `--wrapper`, and `--sjiswrap` flags prevent download rules from being generated, so the container doesn't need network access. Without these flags, `build.ninja` will contain `download_tool` rules that fail because the container has no internet.
 
 The Docker container (`docker-worker-1`) has Linux build tools at:
 - `/usr/local/bin/dtk` — decomp-toolkit (must be provisioned separately from host dtk)
@@ -116,6 +124,12 @@ We are taking the `mn/` (Menus) module from partial to fully matched, file by fi
 **After closing near-done files**, push into untouched targets. Each completed file = a PR.
 
 **Do NOT scatter runs across random libraries.** Stay focused on mn/ until the module is done.
+
+## Container Delegation
+
+**Prefer running investigation/experiment work inside the Docker container** by delegating to a Claude Code agent inside `docker-worker-1` (which has `--dangerously-skip-permissions`). The container has NO NETWORK ACCESS — if the delegated agent needs something from the internet, it must stop and report back so the host can fetch it. Anything that needs host-side commands (Ghidra, git, web fetches) should run directly on the host.
+
+Pattern: host agent launches container agent for compile/test/binary-analysis tasks → container agent works autonomously → reports results back.
 
 ## Key Conventions
 
