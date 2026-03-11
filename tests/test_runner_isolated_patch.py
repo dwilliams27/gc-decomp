@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
+
+from sqlmodel import Session, select
+
+from decomp_agent.agent.loop import AgentResult
+from decomp_agent.models.db import Attempt, Function, get_engine, sync_from_report
+from decomp_agent.melee.functions import FunctionInfo
+from decomp_agent.melee.project import ObjectStatus
+from decomp_agent.orchestrator.runner import run_function
+from decomp_agent.tools.build import CompileResult, FunctionMatch
+from tests.fixtures.fake_repo import create_fake_repo
+from tests.test_worker_launcher import _init_git_repo
+
+
+def _seed_db(engine, config) -> list[Function]:
+    report_data = {
+        "units": [
+            {
+                "name": "main/melee/test/testfile",
+                "functions": [
+                    {
+                        "name": "simple_init",
+                        "size": 40,
+                        "fuzzy_match_percent": 55.0,
+                        "metadata": {"virtual_address": hex(0x800A0000)},
+                    },
+                    {
+                        "name": "simple_add",
+                        "size": 8,
+                        "fuzzy_match_percent": 60.0,
+                        "metadata": {"virtual_address": hex(0x800A0040)},
+                    },
+                    {
+                        "name": "simple_loop",
+                        "size": 48,
+                        "fuzzy_match_percent": 50.0,
+                        "metadata": {"virtual_address": hex(0x800A0080)},
+                    },
+                ],
+            }
+        ]
+    }
+    infos = []
+    for unit in report_data["units"]:
+        for func_data in unit["functions"]:
+            infos.append(
+                FunctionInfo(
+                    name=func_data["name"],
+                    address=int(func_data["metadata"]["virtual_address"], 0),
+                    size=func_data["size"],
+                    fuzzy_match_percent=func_data["fuzzy_match_percent"],
+                    unit_name=unit["name"].removeprefix("main/"),
+                    source_file="melee/test/testfile.c",
+                    object_status=ObjectStatus.NON_MATCHING,
+                    library="test (Library)",
+                )
+            )
+    with Session(engine) as session:
+        sync_from_report(session, infos)
+        return list(session.exec(select(Function)).all())
+
+
+def test_run_function_promotes_isolated_patch(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.codex_code.enabled = True
+    config.codex_code.isolated_worker_enabled = True
+
+    engine = get_engine(":memory:")
+    functions = _seed_db(engine, config)
+    target_func = next(f for f in functions if f.name == "simple_add")
+
+    src_path = repo_path / "src" / "melee" / "test" / "testfile.c"
+    original_source = src_path.read_text(encoding="utf-8")
+    updated_source = original_source.replace("return a + b;", "return a - b;")
+    src_path.write_text(updated_source, encoding="utf-8")
+    patch_text = subprocess.run(
+        ["git", "diff", "--binary", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    ).stdout
+    patch_path = tmp_path / "worker.patch"
+    patch_path.write_text(patch_text, encoding="utf-8")
+    src_path.write_text(original_source, encoding="utf-8")
+
+    baseline = CompileResult(
+        object_name="melee/test/testfile.c",
+        success=True,
+        functions=[
+            FunctionMatch(name="simple_init", fuzzy_match_percent=55.0, size=40),
+            FunctionMatch(name="simple_add", fuzzy_match_percent=60.0, size=8),
+            FunctionMatch(name="simple_loop", fuzzy_match_percent=50.0, size=48),
+        ],
+    )
+    matched = CompileResult(
+        object_name="melee/test/testfile.c",
+        success=True,
+        functions=[
+            FunctionMatch(name="simple_init", fuzzy_match_percent=55.0, size=40),
+            FunctionMatch(name="simple_add", fuzzy_match_percent=100.0, size=8),
+            FunctionMatch(name="simple_loop", fuzzy_match_percent=50.0, size=48),
+        ],
+    )
+    check_results = [baseline, matched, matched]
+
+    with (
+        patch(
+            "decomp_agent.orchestrator.codex_headless.run_codex_headless",
+            return_value=AgentResult(
+                best_match_percent=100.0,
+                termination_reason="isolated_patch_ready",
+                model="codex-code-headless",
+                patch_path=str(patch_path),
+                artifact_dir=str(tmp_path),
+            ),
+        ),
+        patch(
+            "decomp_agent.orchestrator.runner.check_match",
+            side_effect=lambda *args, **kwargs: check_results.pop(0),
+        ),
+        patch("decomp_agent.orchestrator.runner._auto_commit_match"),
+    ):
+        result = run_function(target_func, config, engine)
+
+    assert result.matched is True
+    assert result.termination_reason == "matched"
+    assert "return a - b;" in src_path.read_text(encoding="utf-8")
+
+    with Session(engine) as session:
+        loaded = session.exec(select(Function).where(Function.name == "simple_add")).one()
+        attempt = session.exec(select(Attempt).where(Attempt.function_id == loaded.id)).one()
+
+    assert loaded.status == "matched"
+    assert attempt.patch_path == str(patch_path)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import structlog
 from sqlalchemy import Engine
@@ -103,6 +104,120 @@ def _auto_commit_match(
             function=func_name,
             error=str(e),
         )
+
+
+def _promote_isolated_patch(
+    result: AgentResult,
+    func_name: str,
+    source_file: str,
+    config: Config,
+    baseline: dict[str, float] | None,
+    bound_log,
+) -> AgentResult:
+    """Apply and validate an isolated worker patch against the main repo."""
+    if result.termination_reason != "isolated_patch_ready" or not result.patch_path:
+        return result
+
+    patch_path = Path(result.patch_path)
+    if not patch_path.is_file():
+        result.termination_reason = "patch_missing"
+        result.error = f"Isolated worker patch not found: {patch_path}"
+        return result
+
+    repo_path = str(config.melee.repo_path)
+    check_apply = subprocess.run(
+        ["git", "apply", "--check", str(patch_path)],
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    )
+    if check_apply.returncode != 0:
+        result.termination_reason = "patch_apply_failed"
+        result.error = check_apply.stderr.strip() or check_apply.stdout.strip() or "git apply --check failed"
+        return result
+
+    applied = False
+    try:
+        subprocess.run(
+            ["git", "apply", str(patch_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=repo_path,
+        )
+        applied = True
+
+        final_result = check_match(source_file, config)
+        if not final_result.success:
+            result.termination_reason = "patch_compile_failed"
+            result.error = final_result.error or "compile failed after applying isolated patch"
+            return result
+
+        func_result = final_result.get_function(func_name)
+        if func_result is None:
+            result.termination_reason = "patch_validation_failed"
+            result.error = f"Function {func_name} missing after applying isolated patch"
+            return result
+
+        result.best_match_percent = max(
+            result.best_match_percent,
+            func_result.fuzzy_match_percent,
+        )
+        if not func_result.is_matched:
+            result.termination_reason = "patch_validation_failed"
+            result.error = (
+                f"Applied isolated patch but {func_name} only reached "
+                f"{func_result.fuzzy_match_percent:.1f}%"
+            )
+            return result
+
+        if baseline is not None:
+            damaged: list[tuple[str, float, float]] = []
+            for fn, before_pct in baseline.items():
+                if fn == func_name:
+                    continue
+                other = final_result.get_function(fn)
+                if other is None:
+                    continue
+                after_pct = other.fuzzy_match_percent
+                if after_pct < before_pct:
+                    damaged.append((fn, before_pct, after_pct))
+            if damaged:
+                for fn, before_pct, after_pct in damaged:
+                    bound_log.warning(
+                        "isolated_patch_collateral_damage",
+                        damaged_function=fn,
+                        before=before_pct,
+                        after=after_pct,
+                        delta=round(after_pct - before_pct, 2),
+                    )
+                result.termination_reason = "collateral_damage"
+                result.error = (
+                    f"Isolated patch regressed {len(damaged)} other function(s)"
+                )
+                return result
+
+        result.matched = True
+        result.termination_reason = "matched"
+        result.best_match_percent = 100.0
+        result.error = None
+        return result
+    finally:
+        if applied and not result.matched:
+            revert = subprocess.run(
+                ["git", "apply", "-R", str(patch_path)],
+                capture_output=True,
+                text=True,
+                cwd=repo_path,
+            )
+            if revert.returncode != 0:
+                bound_log.warning(
+                    "isolated_patch_revert_failed",
+                    function=func_name,
+                    patch_path=str(patch_path),
+                    stderr=(revert.stderr or "").strip()[:200],
+                    stdout=(revert.stdout or "").strip()[:200],
+                )
 
 
 def run_function(
@@ -236,6 +351,15 @@ def run_function(
                     error=str(e),
                     termination_reason="agent_crash",
                 )
+
+            result = _promote_isolated_patch(
+                result,
+                func_name,
+                source_file,
+                config,
+                baseline,
+                bound_log,
+            )
 
             # Collateral damage check: reject match if other functions got worse
             if result.matched and baseline is not None:
