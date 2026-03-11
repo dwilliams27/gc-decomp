@@ -4,13 +4,16 @@ FROM melee-build:local AS base
 RUN apt-get update && apt-get install -y ninja-build curl python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Node.js for Claude Code CLI
+# Node.js for headless coding CLIs
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 # Pin Claude Code CLI version for reproducibility
 RUN npm install -g @anthropic-ai/claude-code@1
+
+# Pin Codex CLI version for reproducibility
+RUN npm install -g @openai/codex@0.113.0
 
 # Wine/wibo symlink (build.ninja calls `wine` which should resolve to wibo)
 RUN ln -sf /usr/local/sbin/wibo /usr/local/bin/wine
@@ -30,6 +33,8 @@ RUN pip3 install --break-system-packages m2c
 COPY docker/config/container.toml /app/config/container.toml
 COPY docker/mcp.json /app/mcp.json
 COPY docker/system-prompt.md /app/system-prompt.md
+COPY docker/worker-entrypoint.sh /app/worker-entrypoint.sh
+RUN chmod +x /app/worker-entrypoint.sh
 
 # Non-root user so --dangerously-skip-permissions works
 RUN useradd -m -s /bin/bash decomp

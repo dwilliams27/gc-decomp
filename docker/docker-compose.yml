@@ -16,11 +16,14 @@ services:
       HTTPS_PROXY: http://proxy:3128
       HTTP_PROXY: http://proxy:3128
       DECOMP_CONFIG: /app/config/container.toml
+      CODEX_AUTH_SEED: /seed/codex/auth.json
       MAX_MCP_OUTPUT_TOKENS: "50000"
     volumes:
       - ${MELEE_REPO_PATH}:${MELEE_REPO_PATH}:rw
       - ${HOME}/.claude:/home/decomp/.claude:rw
-    entrypoint: ["sleep", "infinity"]
+      - ${HOME}/.codex/auth.json:/seed/codex/auth.json:ro
+    entrypoint: ["/app/worker-entrypoint.sh"]
+    command: ["sleep", "infinity"]
     mem_limit: 8g
     depends_on:
       - proxy

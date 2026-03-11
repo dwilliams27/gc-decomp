@@ -24,6 +24,9 @@ max_turns = 30
 enabled = false
 container_name = "docker-worker-1"
 timeout_seconds = 1800
+isolated_worker_enabled = false
+worker_root = "/tmp/decomp-codex-workers"
+image = "decomp-agent-worker:latest"
 
 [ghidra]
 enabled = false

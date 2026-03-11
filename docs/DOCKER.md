@@ -1,4 +1,4 @@
-# Docker Setup for Faster Compilation
+# Docker Setup for Faster Compilation and Headless Agents
 
 ## Why Docker?
 
@@ -64,6 +64,40 @@ enabled = true
 - **Permuter** (`tools/permuter.py`): The permuter bypasses `run_in_repo()` because it constructs its own compile.sh. When Docker is enabled, compile.sh wraps the MWCC invocation with `docker exec` and uses `wibo` directly, with the output directory inside the repo (so the container can access it via the bind mount).
 
 - **Wine resolution**: The `wine` -> `wibo` symlink in the container means `build.ninja` rules that call `wine` transparently use wibo instead.
+
+## Headless Agent Support
+
+The worker image now includes both headless CLIs:
+
+- Claude Code via `@anthropic-ai/claude-code`
+- Codex via `@openai/codex`
+
+The worker container boots through `/app/worker-entrypoint.sh`, which:
+
+- creates a worker-local `~/.codex`
+- copies a read-only auth seed from `/seed/codex/auth.json` when present
+- writes a minimal Codex `config.toml` pointing at this repo's MCP server
+
+This avoids sharing the full host `~/.codex` directory as a writable mount.
+
+### Codex auth seed
+
+`docker/docker-compose.yml` mounts only:
+
+```bash
+${HOME}/.codex/auth.json:/seed/codex/auth.json:ro
+```
+
+This is enough to bootstrap `codex login status` and `codex exec` based on current testing. Session/history/sqlite state remains container-local.
+
+### Proxy allowlist
+
+The Squid allowlist now includes Codex-related domains in addition to Claude:
+
+- `.chatgpt.com`
+- `.openai.com`
+
+This is required because Codex CLI attempts to reach ChatGPT/OpenAI endpoints for model listing and response streaming.
 
 ## Measured Performance
 

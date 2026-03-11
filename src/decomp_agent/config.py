@@ -108,6 +108,12 @@ class CodexCodeConfig(BaseModel):
     enabled: bool = False
     container_name: str = "docker-worker-1"
     timeout_seconds: int = 1800  # 30 min per function attempt
+    isolated_worker_enabled: bool = False
+    worker_root: Path = Path("/tmp/decomp-codex-workers")
+    auth_file: Path | None = None
+    image: str = "decomp-agent-worker:latest"
+    http_proxy: str | None = None
+    https_proxy: str | None = None
 
 
 class OrchestrationConfig(BaseModel):
