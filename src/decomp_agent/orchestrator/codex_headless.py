@@ -11,9 +11,12 @@ from pathlib import Path
 
 import structlog
 
-from decomp_agent.agent.m2c_seed import build_prefetched_m2c_block
 from decomp_agent.agent.loop import AgentResult
 from decomp_agent.config import Config
+from decomp_agent.orchestrator.headless_context import (
+    build_headless_task_prompt,
+    load_headless_system_prompt,
+)
 from decomp_agent.orchestrator.worker_launcher import (
     WorkerSpec,
     build_worker_container_run_args,
@@ -97,42 +100,6 @@ def _parse_codex_result(
 
     return "model_stopped", messages[-1] if messages else ""
 
-
-def _build_prompt(
-    function_name: str | None,
-    source_file: str,
-    config: Config,
-    *,
-    prior_best_code: str | None,
-) -> str:
-    file_mode = function_name is None
-    if file_mode:
-        return (
-            f"Match all unmatched functions in {source_file}.\n\n"
-            f"Use the decomp MCP tools directly. Work through unmatched functions, "
-            f"write code, compile, diff, and call mark_complete when a function "
-            f"hits 100%."
-        )
-    if prior_best_code is not None:
-        return (
-            f"Match function {function_name} in {source_file}.\n\n"
-            f"A previous attempt produced this code:\n\n"
-            f"```c\n{prior_best_code}\n```\n\n"
-            f"Start from that baseline, improve it with the MCP tools, and stop "
-            f"once the function matches."
-        )
-
-    m2c_seed = build_prefetched_m2c_block(
-        function_name, source_file, config, max_chars=6000
-    )
-    return (
-        f"Match function {function_name} in {source_file}.\n\n"
-        f"Use get_target_assembly, get_context, get_m2c_decompilation, "
-        f"write_function, and get_diff to iterate until it matches."
-        f"{m2c_seed}"
-    )
-
-
 def _config_for_repo_path(config: Config, repo_path: Path) -> Config:
     return config.model_copy(
         update={
@@ -211,6 +178,12 @@ def _run_shared_container(
     config: Config,
     bound_log,
 ) -> subprocess.CompletedProcess[str]:
+    system_prompt = load_headless_system_prompt()
+    combined_prompt = (
+        f"{system_prompt}\n\n"
+        f"## Your Assignment\n\n"
+        f"{prompt}"
+    )
     codex_args = [
         "codex",
         "exec",
@@ -221,7 +194,7 @@ def _run_shared_container(
         str(config.melee.repo_path),
         "--model",
         config.agent.model,
-        shlex.quote(prompt),
+        shlex.quote(combined_prompt),
     ]
     shell_cmd = " ".join(codex_args)
     cmd = ["docker", "exec", config.codex_code.container_name, "sh", "-lc", shell_cmd]
@@ -262,6 +235,12 @@ def _run_isolated_worker(
         text=True,
     )
     try:
+        system_prompt = load_headless_system_prompt()
+        combined_prompt = (
+            f"{system_prompt}\n\n"
+            f"## Your Assignment\n\n"
+            f"{prompt}"
+        )
         codex_args = [
             "codex",
             "exec",
@@ -272,7 +251,7 @@ def _run_isolated_worker(
             str(spec.melee_worktree.worktree_path),
             "--model",
             config.agent.model,
-            shlex.quote(prompt),
+            shlex.quote(combined_prompt),
         ]
         shell_cmd = " ".join(codex_args)
         cmd = ["docker", "exec", spec.container_name, "sh", "-lc", shell_cmd]
@@ -311,8 +290,6 @@ def run_codex_headless(
     prior_match_pct: float = 0,
 ) -> AgentResult:
     """Run Codex CLI headless inside the configured worker container."""
-    del prior_match_pct  # Warm-start prompt carries the key signal for now.
-
     file_mode = function_name is None
     start_time = time.monotonic()
     bound_log = log.bind(
@@ -322,11 +299,12 @@ def run_codex_headless(
         file_mode=file_mode,
     )
 
-    prompt = _build_prompt(
+    prompt = build_headless_task_prompt(
         function_name,
         source_file,
         config,
         prior_best_code=prior_best_code,
+        prior_match_pct=prior_match_pct,
     )
 
     timeout = config.codex_code.timeout_seconds
