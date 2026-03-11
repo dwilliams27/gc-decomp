@@ -53,8 +53,11 @@ def _enable_headless_provider(
     *,
     claude_headless: bool,
     codex_headless: bool,
+    isolated_worker: bool = False,
 ) -> None:
     """Enable exactly one headless provider, if requested."""
+    if isolated_worker:
+        codex_headless = True
     if claude_headless and codex_headless:
         raise click.ClickException(
             "Choose only one headless provider: --headless or --codex-headless"
@@ -65,6 +68,8 @@ def _enable_headless_provider(
     elif codex_headless:
         config.codex_code.enabled = True
         config.claude_code.enabled = False
+    if isolated_worker:
+        config.codex_code.isolated_worker_enabled = True
 
 
 @main.command()
@@ -95,6 +100,7 @@ def init(ctx: click.Context) -> None:
 @click.option("--warm-start", is_flag=True, default=False, help="Seed with best prior attempt code")
 @click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
 @click.option("--codex-headless", is_flag=True, default=False, help="Use Codex CLI headless mode (ChatGPT/Codex subscription)")
+@click.option("--isolated-worker", is_flag=True, default=False, help="Run Codex headless inside an isolated worker worktree/container")
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -104,6 +110,7 @@ def run(
     warm_start: bool,
     headless: bool,
     codex_headless: bool,
+    isolated_worker: bool,
 ) -> None:
     """Run agent on a single function by name."""
     config, engine = _load(ctx)
@@ -112,6 +119,7 @@ def run(
         config,
         claude_headless=headless,
         codex_headless=codex_headless,
+        isolated_worker=isolated_worker,
     )
     if max_tokens is not None:
         config.agent.max_tokens_per_attempt = max_tokens
@@ -148,12 +156,14 @@ def run(
 @click.argument("source_file")
 @click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
 @click.option("--codex-headless", is_flag=True, default=False, help="Use Codex CLI headless mode (ChatGPT/Codex subscription)")
+@click.option("--isolated-worker", is_flag=True, default=False, help="Run Codex headless inside an isolated worker worktree/container")
 @click.pass_context
 def run_file_cmd(
     ctx: click.Context,
     source_file: str,
     headless: bool,
     codex_headless: bool,
+    isolated_worker: bool,
 ) -> None:
     """Run agent on all unmatched functions in a source file."""
     config, engine = _load(ctx)
@@ -162,6 +172,7 @@ def run_file_cmd(
         config,
         claude_headless=headless,
         codex_headless=codex_headless,
+        isolated_worker=isolated_worker,
     )
 
     from decomp_agent.orchestrator.runner import run_file
@@ -202,6 +213,7 @@ def run_file_cmd(
 @click.option("--log-file", default=None, type=click.Path(path_type=Path), help="Path for JSON-lines log file")
 @click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
 @click.option("--codex-headless", is_flag=True, default=False, help="Use Codex CLI headless mode (ChatGPT/Codex subscription)")
+@click.option("--isolated-worker", is_flag=True, default=False, help="Run Codex headless inside an isolated worker worktree/container")
 @click.option("--warm-start", is_flag=True, default=False, help="Seed with best prior attempt code")
 @click.option("--file-mode", is_flag=True, default=False, help="Run in file-mode: one session per source file")
 @click.pass_context
@@ -219,6 +231,7 @@ def batch(
     log_file: Path | None,
     headless: bool,
     codex_headless: bool,
+    isolated_worker: bool,
     warm_start: bool,
     file_mode: bool,
 ) -> None:
@@ -234,6 +247,7 @@ def batch(
         config,
         claude_headless=headless,
         codex_headless=codex_headless,
+        isolated_worker=isolated_worker,
     )
 
     from decomp_agent.orchestrator.batch import run_batch
@@ -247,7 +261,7 @@ def batch(
     if file_mode:
         mode_label = "file-mode"
     elif config.codex_code.enabled:
-        mode_label = "codex-headless"
+        mode_label = "codex-isolated" if config.codex_code.isolated_worker_enabled else "codex-headless"
     elif config.claude_code.enabled:
         mode_label = "claude-headless"
     else:

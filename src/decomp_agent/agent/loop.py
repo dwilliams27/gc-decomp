@@ -49,6 +49,10 @@ class AgentResult:
     """Whether this attempt was seeded with prior code."""
     session_id: str = ""
     """Claude Code session ID (headless mode) or OpenAI response ID."""
+    artifact_dir: str = ""
+    """Directory containing worker artifacts for offline inspection/apply."""
+    patch_path: str = ""
+    """Patch file emitted by an isolated worker, if any."""
 
     # File-mode fields: populated when running on a whole file
     file_mode: bool = False

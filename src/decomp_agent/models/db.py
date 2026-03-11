@@ -89,6 +89,8 @@ class Attempt(SQLModel, table=True):
     cost: float = 0.0  # Dollar cost (legacy only; new records use Run.cost)
     warm_start: bool = False
     session_id: str = ""  # Legacy; new records use Run.session_id
+    artifact_dir: str = ""
+    patch_path: str = ""
 
 
 def get_engine(db_path: Path | str) -> Engine:
@@ -120,6 +122,8 @@ def _migrate(engine: Engine) -> None:
         ("attempt", "session_id", "TEXT NOT NULL DEFAULT ''"),
         ("attempt", "run_id", "INTEGER"),
         ("attempt", "before_match_pct", "REAL NOT NULL DEFAULT 0.0"),
+        ("attempt", "artifact_dir", "TEXT NOT NULL DEFAULT ''"),
+        ("attempt", "patch_path", "TEXT NOT NULL DEFAULT ''"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -232,6 +236,8 @@ def record_run(
             tool_counts=json.dumps(result.tool_counts) if result.tool_counts else None,
             warm_start=result.warm_start,
             session_id=result.session_id,
+            artifact_dir=result.artifact_dir,
+            patch_path=result.patch_path,
         )
         session.add(attempt)
 
@@ -260,6 +266,8 @@ def record_run(
                 model=result.model,
                 warm_start=result.warm_start,
                 session_id=result.session_id,
+                artifact_dir=result.artifact_dir,
+                patch_path=result.patch_path,
             )
             session.add(attempt)
 
