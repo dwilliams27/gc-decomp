@@ -32,6 +32,11 @@ _file_locks: dict[str, threading.Lock] = {}
 _file_locks_guard = threading.Lock()
 
 
+def _provider_enabled(section) -> bool:
+    enabled = getattr(section, "enabled", False)
+    return enabled is True
+
+
 def _get_file_lock(source_file: str) -> threading.Lock:
     """Get or create a lock for a source file path."""
     with _file_locks_guard:
@@ -192,10 +197,23 @@ def run_function(
 
             # Run the agent
             try:
-                if config.claude_code.enabled:
+                if _provider_enabled(config.claude_code):
                     from decomp_agent.orchestrator.headless import run_headless
 
                     result = run_headless(
+                        func_name,
+                        source_file,
+                        config,
+                        worker_label=worker_label,
+                        prior_best_code=prior_best_code,
+                        prior_match_pct=prior_match_pct,
+                    )
+                elif _provider_enabled(config.codex_code):
+                    from decomp_agent.orchestrator.codex_headless import (
+                        run_codex_headless,
+                    )
+
+                    result = run_codex_headless(
                         func_name,
                         source_file,
                         config,
@@ -411,14 +429,28 @@ def run_file(
 
             # Run headless in file mode
             try:
-                from decomp_agent.orchestrator.headless import run_headless
+                if _provider_enabled(config.claude_code):
+                    from decomp_agent.orchestrator.headless import run_headless
 
-                result = run_headless(
-                    None,  # file mode
-                    source_file,
-                    config,
-                    worker_label=worker_label,
-                )
+                    result = run_headless(
+                        None,  # file mode
+                        source_file,
+                        config,
+                        worker_label=worker_label,
+                    )
+                elif _provider_enabled(config.codex_code):
+                    from decomp_agent.orchestrator.codex_headless import (
+                        run_codex_headless,
+                    )
+
+                    result = run_codex_headless(
+                        None,  # file mode
+                        source_file,
+                        config,
+                        worker_label=worker_label,
+                    )
+                else:
+                    raise RuntimeError("file-mode requires a headless provider")
             except Exception as e:
                 bound_log.error("agent_crash", error=str(e))
                 result = AgentResult(

@@ -89,9 +89,9 @@ def _make_function(
 
 class TestCalculateCost:
     def test_known_token_counts(self, pricing):
-        """1M input + 1M cached + 1M output should cost a known amount."""
+        """2M input with 1M cached + 1M output should cost a known amount."""
         result = _make_result(
-            input_tokens=1_000_000,
+            input_tokens=2_000_000,
             cached_tokens=1_000_000,
             output_tokens=1_000_000,
         )
@@ -116,7 +116,7 @@ class TestCalculateCost:
         assert cost == pytest.approx(1.40)
 
     def test_cached_only(self, pricing):
-        result = _make_result(cached_tokens=2_000_000)
+        result = _make_result(input_tokens=2_000_000, cached_tokens=2_000_000)
         cost = calculate_cost(result, pricing)
         # 2M * 0.175 / 1M = 0.35
         assert cost == pytest.approx(0.35)
@@ -138,6 +138,10 @@ class TestCalculateCost:
     def test_no_model_returns_zero(self, pricing):
         """Agent crash with no model set should return 0 cost."""
         result = _make_result(input_tokens=1000, model="")
+        assert calculate_cost(result, pricing) == 0.0
+
+    def test_codex_headless_returns_zero(self, pricing):
+        result = _make_result(input_tokens=1000, output_tokens=1000, model="codex-code-headless")
         assert calculate_cost(result, pricing) == 0.0
 
     def test_unknown_model_raises(self, pricing):
@@ -250,6 +254,7 @@ class TestBudgetEnforcement:
         config = MagicMock()
         config.orchestration.default_workers = 1
         config.orchestration.default_budget = None
+        config.orchestration.max_attempts_per_function = 10
         config.agent.model = "gpt-5.2-codex"
         config.pricing = PricingConfig(models={
             "gpt-5.2-codex": ModelPricing(
@@ -258,6 +263,9 @@ class TestBudgetEnforcement:
                 output_per_million=14.00,
             ),
         })
+        config.claude_code.enabled = False
+        config.codex_code.enabled = False
+        config.docker.enabled = False
         # Prevent _save_source from reading files during test
         config.melee.resolve_source_path.return_value.exists.return_value = False
 

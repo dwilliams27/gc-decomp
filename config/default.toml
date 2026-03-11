@@ -20,6 +20,11 @@ container_name = "docker-worker-1"
 timeout_seconds = 1800
 max_turns = 30
 
+[codex_code]
+enabled = false
+container_name = "docker-worker-1"
+timeout_seconds = 1800
+
 [ghidra]
 enabled = false
 project_path = "/Users/dwilliams/proj/melee-fork/melee/.ghidra"

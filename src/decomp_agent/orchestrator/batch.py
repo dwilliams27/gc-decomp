@@ -23,6 +23,12 @@ log = structlog.get_logger()
 console = Console()
 
 
+def _using_flat_rate_headless(config: Config) -> bool:
+    claude_enabled = getattr(config.claude_code, "enabled", False)
+    codex_enabled = getattr(config.codex_code, "enabled", False)
+    return claude_enabled is True or codex_enabled is True
+
+
 @dataclass
 class FunctionResult:
     name: str
@@ -298,7 +304,7 @@ def run_batch(
                 console.print("[yellow]No candidate files match the given filters.[/yellow]")
                 batch.elapsed = time.monotonic() - start
                 return batch
-            estimated_cost = 0.0  # file-mode is always headless (flat rate)
+            estimated_cost = 0.0  # file-mode uses a subscription-backed CLI mode
         else:
             # Auto-dedup by source file when using multiple workers to avoid
             # per-file lock serialization that would waste worker slots.
@@ -319,8 +325,8 @@ def run_batch(
                 batch.elapsed = time.monotonic() - start
                 return batch
 
-            # 2. Estimate costs (skip for Claude Code headless — flat-rate subscription)
-            if config.claude_code.enabled:
+            # 2. Estimate costs (skip for flat-rate headless CLI modes)
+            if _using_flat_rate_headless(config):
                 estimated_cost = 0.0
             else:
                 estimated_cost = estimate_batch_cost(candidates, config.agent.model, session, config.pricing)
@@ -352,10 +358,11 @@ def run_batch(
             )
 
         console.print(table)
-        if config.claude_code.enabled:
+        if _using_flat_rate_headless(config):
+            provider_name = "Codex CLI" if config.codex_code.enabled else "Claude Code"
             console.print(
                 f"\n[bold]{len(candidates)}[/bold] functions "
-                f"(Claude Code headless — flat rate, no per-token cost)"
+                f"({provider_name} headless — flat rate, no per-token cost)"
             )
         else:
             console.print(

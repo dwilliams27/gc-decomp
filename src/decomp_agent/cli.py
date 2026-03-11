@@ -48,6 +48,25 @@ def _load(ctx: click.Context):
     return config, engine
 
 
+def _enable_headless_provider(
+    config,
+    *,
+    claude_headless: bool,
+    codex_headless: bool,
+) -> None:
+    """Enable exactly one headless provider, if requested."""
+    if claude_headless and codex_headless:
+        raise click.ClickException(
+            "Choose only one headless provider: --headless or --codex-headless"
+        )
+    if claude_headless:
+        config.claude_code.enabled = True
+        config.codex_code.enabled = False
+    elif codex_headless:
+        config.codex_code.enabled = True
+        config.claude_code.enabled = False
+
+
 @main.command()
 @click.pass_context
 def init(ctx: click.Context) -> None:
@@ -75,13 +94,25 @@ def init(ctx: click.Context) -> None:
 @click.option("--max-iterations", default=None, type=int, help="Max agent iterations")
 @click.option("--warm-start", is_flag=True, default=False, help="Seed with best prior attempt code")
 @click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
+@click.option("--codex-headless", is_flag=True, default=False, help="Use Codex CLI headless mode (ChatGPT/Codex subscription)")
 @click.pass_context
-def run(ctx: click.Context, name: str, max_tokens: int | None, max_iterations: int | None, warm_start: bool, headless: bool) -> None:
+def run(
+    ctx: click.Context,
+    name: str,
+    max_tokens: int | None,
+    max_iterations: int | None,
+    warm_start: bool,
+    headless: bool,
+    codex_headless: bool,
+) -> None:
     """Run agent on a single function by name."""
     config, engine = _load(ctx)
 
-    if headless:
-        config.claude_code.enabled = True
+    _enable_headless_provider(
+        config,
+        claude_headless=headless,
+        codex_headless=codex_headless,
+    )
     if max_tokens is not None:
         config.agent.max_tokens_per_attempt = max_tokens
     if max_iterations is not None:
@@ -116,13 +147,22 @@ def run(ctx: click.Context, name: str, max_tokens: int | None, max_iterations: i
 @main.command("run-file")
 @click.argument("source_file")
 @click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
+@click.option("--codex-headless", is_flag=True, default=False, help="Use Codex CLI headless mode (ChatGPT/Codex subscription)")
 @click.pass_context
-def run_file_cmd(ctx: click.Context, source_file: str, headless: bool) -> None:
+def run_file_cmd(
+    ctx: click.Context,
+    source_file: str,
+    headless: bool,
+    codex_headless: bool,
+) -> None:
     """Run agent on all unmatched functions in a source file."""
     config, engine = _load(ctx)
 
-    if headless:
-        config.claude_code.enabled = True
+    _enable_headless_provider(
+        config,
+        claude_headless=headless,
+        codex_headless=codex_headless,
+    )
 
     from decomp_agent.orchestrator.runner import run_file
 
@@ -161,6 +201,7 @@ def run_file_cmd(ctx: click.Context, source_file: str, headless: bool) -> None:
 @click.option("--yes", "auto_approve", is_flag=True, default=False, help="Skip confirmation prompt")
 @click.option("--log-file", default=None, type=click.Path(path_type=Path), help="Path for JSON-lines log file")
 @click.option("--headless", is_flag=True, default=False, help="Use Claude Code headless mode (Max subscription)")
+@click.option("--codex-headless", is_flag=True, default=False, help="Use Codex CLI headless mode (ChatGPT/Codex subscription)")
 @click.option("--warm-start", is_flag=True, default=False, help="Seed with best prior attempt code")
 @click.option("--file-mode", is_flag=True, default=False, help="Run in file-mode: one session per source file")
 @click.pass_context
@@ -177,6 +218,7 @@ def batch(
     auto_approve: bool,
     log_file: Path | None,
     headless: bool,
+    codex_headless: bool,
     warm_start: bool,
     file_mode: bool,
 ) -> None:
@@ -188,8 +230,11 @@ def batch(
 
     config, engine = _load(ctx)
 
-    if headless:
-        config.claude_code.enabled = True
+    _enable_headless_provider(
+        config,
+        claude_headless=headless,
+        codex_headless=codex_headless,
+    )
 
     from decomp_agent.orchestrator.batch import run_batch
 
@@ -199,7 +244,14 @@ def batch(
     effective_budget = budget if budget is not None else config.orchestration.default_budget
     effective_strategy = strategy or "smallest_first"
 
-    mode_label = "file-mode" if file_mode else ("headless" if headless else "function-mode")
+    if file_mode:
+        mode_label = "file-mode"
+    elif config.codex_code.enabled:
+        mode_label = "codex-headless"
+    elif config.claude_code.enabled:
+        mode_label = "claude-headless"
+    else:
+        mode_label = "function-mode"
     console.print(
         f"Starting batch run (limit={effective_limit}, max_size={effective_max_size}, "
         f"workers={effective_workers}, budget={effective_budget}, mode={mode_label})"

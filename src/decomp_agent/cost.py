@@ -36,15 +36,15 @@ def calculate_cost(result: AgentResult, pricing: PricingConfig) -> float:
     """Compute actual dollar cost from an AgentResult's token counts.
 
     Returns 0.0 if the result has no model set (e.g. agent crashed before
-    any API call), or if using Claude Code headless mode (flat-rate
-    subscription, no per-token billing). Raises KeyError if the model is
-    set but not in the pricing table.
+    any API call), or if using a flat-rate headless CLI mode
+    (subscription-backed, no per-token billing). Raises KeyError if the
+    model is set but not in the pricing table.
     """
     if not result.model:
         return 0.0
-    # Claude Code headless mode: flat rate subscription, no per-token cost.
+    # Subscription-backed headless CLI modes: flat rate, no per-token cost.
     # Token counts are still tracked in DB for analytics.
-    if result.model == "claude-code-headless":
+    if result.model in {"claude-code-headless", "codex-code-headless"}:
         return 0.0
     model_pricing = pricing.get_model_pricing(result.model)
     input_cost = (result.input_tokens - result.cached_tokens) * model_pricing.input_per_million / 1_000_000

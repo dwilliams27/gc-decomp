@@ -104,6 +104,12 @@ class ClaudeCodeConfig(BaseModel):
     max_turns: int = 50
 
 
+class CodexCodeConfig(BaseModel):
+    enabled: bool = False
+    container_name: str = "docker-worker-1"
+    timeout_seconds: int = 1800  # 30 min per function attempt
+
+
 class OrchestrationConfig(BaseModel):
     db_path: Path = Path("decomp.db")
     max_function_size: int | None = None
@@ -125,6 +131,7 @@ class Config(BaseModel):
     docker: DockerConfig = DockerConfig()
     ghidra: GhidraConfig = GhidraConfig()
     claude_code: ClaudeCodeConfig = ClaudeCodeConfig()
+    codex_code: CodexCodeConfig = CodexCodeConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
     logging: LoggingConfig = LoggingConfig()
     pricing: PricingConfig = PricingConfig()
