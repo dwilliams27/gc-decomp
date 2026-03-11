@@ -68,6 +68,23 @@ def _get_binutils(config: Config) -> Path | None:
     return binutils if binutils.is_dir() else None
 
 
+# CR bit name -> numeric mapping for GNU assembler compatibility.
+# DTK outputs names like cr1eq; GNU AS requires the numeric form.
+_CR_BIT_MAP = {
+    f"cr{cr}{bit}": str(cr * 4 + off)
+    for cr in range(8)
+    for bit, off in [("lt", 0), ("gt", 1), ("eq", 2), ("so", 3), ("un", 3)]
+}
+
+
+def _convert_cr_bits(insn: str) -> str:
+    """Replace CR bit names (cr0lt, cr1eq, etc.) with numeric equivalents."""
+    for name, num in _CR_BIT_MAP.items():
+        if name in insn:
+            insn = insn.replace(name, num)
+    return insn
+
+
 def _convert_dtk_asm(dtk_asm: str, func_name: str) -> str:
     """Convert DTK assembly output to GNU AS format.
 
@@ -99,6 +116,8 @@ def _convert_dtk_asm(dtk_asm: str, func_name: str) -> str:
         if m:
             insn = m.group(1).strip()
             if insn:
+                # Convert CR bit names to numeric (GNU AS doesn't accept cr1eq etc.)
+                insn = _convert_cr_bits(insn)
                 lines.append(f"    {insn}")
             continue
         # Keep other non-empty lines

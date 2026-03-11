@@ -149,6 +149,24 @@ We are taking the `mn/` (Menus) module from partial to fully matched, file by fi
 
 Pattern: host agent launches container agent for compile/test/binary-analysis tasks → container agent works autonomously → reports results back.
 
+**Container OAuth refresh:** Claude Code credentials expire periodically. When the container agent fails with `401 authentication_error / OAuth token has expired`:
+1. Ask the user to run `claude auth login` on the host (interactive browser flow)
+2. Copy fresh credentials into the container:
+   ```bash
+   security find-generic-password -s "Claude Code-credentials" -a "dwilliams" -w > /tmp/creds.json
+   docker cp /tmp/creds.json docker-worker-1:/home/decomp/.claude/.credentials.json
+   rm /tmp/creds.json
+   ```
+3. Re-launch the container agent — credentials are now valid
+
+**Container Claude Code update:** npm can't reach the registry from the container (no network). Update process:
+```bash
+# On host:
+npm pack @anthropic-ai/claude-code@latest
+docker cp anthropic-ai-claude-code-*.tgz docker-worker-1:/tmp/
+docker exec -u root docker-worker-1 npm install -g /tmp/anthropic-ai-claude-code-*.tgz
+```
+
 ## Source File Contention
 
 **NEVER have multiple agents modify the same source file simultaneously.** When running parallel experiments (permuter, declaration sweeps, expression tests), each agent must work in isolation:
