@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 from sqlalchemy import Engine
 from sqlmodel import Session, select
@@ -20,6 +21,7 @@ from decomp_agent.models.db import (
     create_campaign,
     complete_campaign_task,
     create_campaign_task,
+    defer_campaign_task,
     fail_campaign_task,
     get_campaign,
     get_campaign_task,
@@ -30,11 +32,21 @@ from decomp_agent.models.db import (
     mark_campaign_stopped,
     mark_campaign_task_running,
     requeue_running_campaign_tasks,
+    set_campaign_provider_cooldown,
     seed_campaign_function_tasks,
 )
 
 VALID_PROVIDERS = frozenset({"claude", "codex"})
 VALID_WORKER_POLICIES = frozenset({"claude", "codex", "mixed"})
+_HARD_RATE_LIMIT_PATTERNS = (
+    "usage limit",
+    "reset",
+    "try again later",
+    "quota",
+    "allowance",
+)
+_CLAUDE_RATE_LIMIT_ANCHOR_UTC = datetime(2026, 3, 13, 7, 4, tzinfo=timezone.utc)
+_CLAUDE_RATE_LIMIT_WINDOW = timedelta(hours=5)
 
 
 @dataclass(frozen=True)
@@ -254,7 +266,9 @@ def _config_for_provider(config: Config, provider: str) -> Config:
     if provider == "claude":
         return config.model_copy(
             update={
-                "claude_code": config.claude_code.model_copy(update={"enabled": True}),
+                "claude_code": config.claude_code.model_copy(
+                    update={"enabled": True, "isolated_worker_enabled": True}
+                ),
                 "codex_code": config.codex_code.model_copy(
                     update={"enabled": False, "isolated_worker_enabled": False}
                 ),
@@ -283,6 +297,37 @@ def _resolve_task_provider(campaign: Campaign, task: CampaignTask) -> str:
     if campaign.worker_provider_policy == "mixed":
         return campaign.orchestrator_provider
     return campaign.worker_provider_policy
+
+
+def _provider_cooldown_until(campaign: Campaign, provider: str) -> datetime | None:
+    if provider == "claude":
+        return campaign.claude_cooldown_until
+    if provider == "codex":
+        return campaign.codex_cooldown_until
+    return None
+
+
+def _compute_rate_limit_cooldown(
+    config: Config,
+    *,
+    provider: str,
+    error: str,
+    retry_count: int,
+    now: datetime,
+) -> timedelta:
+    if provider == "claude":
+        if now < _CLAUDE_RATE_LIMIT_ANCHOR_UTC:
+            return _CLAUDE_RATE_LIMIT_ANCHOR_UTC - now
+        elapsed = now - _CLAUDE_RATE_LIMIT_ANCHOR_UTC
+        windows = int(elapsed.total_seconds() // _CLAUDE_RATE_LIMIT_WINDOW.total_seconds()) + 1
+        next_reset = _CLAUDE_RATE_LIMIT_ANCHOR_UTC + (windows * _CLAUDE_RATE_LIMIT_WINDOW)
+        return next_reset - now
+    message = (error or "").lower()
+    if any(pattern in message for pattern in _HARD_RATE_LIMIT_PATTERNS):
+        return timedelta(hours=config.campaign.rate_limit_reset_hours)
+    base = max(config.campaign.rate_limit_backoff_seconds, 30)
+    seconds = min(base * (2 ** max(retry_count, 0)), config.campaign.rate_limit_reset_hours * 3600)
+    return timedelta(seconds=seconds)
 
 
 def run_campaign_task_once(
@@ -374,7 +419,31 @@ def _run_claimed_campaign_task(
         refreshed_campaign = session.get(Campaign, campaign_id)
         if refreshed_task is None or refreshed_campaign is None:
             raise ValueError("Campaign state disappeared during task execution")
-        complete_campaign_task(session, refreshed_task, result)
+        if result.termination_reason == "rate_limited":
+            now = datetime.now(timezone.utc)
+            cooldown = _compute_rate_limit_cooldown(
+                config,
+                provider=provider,
+                error=result.error or "",
+                retry_count=refreshed_task.rate_limit_count,
+                now=now,
+            )
+            until = now + cooldown
+            defer_campaign_task(
+                session,
+                refreshed_task,
+                until=until,
+                error=result.error or "rate limited",
+                termination_reason="rate_limited",
+            )
+            set_campaign_provider_cooldown(
+                session,
+                refreshed_campaign,
+                provider=provider,
+                until=until,
+            )
+        else:
+            complete_campaign_task(session, refreshed_task, result)
         session.refresh(refreshed_campaign)
         session.refresh(refreshed_task)
         return refreshed_campaign, refreshed_task, result
@@ -401,7 +470,13 @@ def _claim_campaign_tasks(
             if task.status != "pending":
                 continue
             provider = _resolve_task_provider(campaign, task)
-            isolated_safe = provider == "codex"
+            cooldown_until = _provider_cooldown_until(campaign, provider)
+            now = datetime.now(timezone.utc)
+            if cooldown_until is not None and _ensure_utc(cooldown_until) > now:
+                continue
+            if task.next_eligible_at is not None and _ensure_utc(task.next_eligible_at) > now:
+                continue
+            isolated_safe = provider in {"codex", "claude"}
             if claimed and not isolated_safe:
                 break
             mark_campaign_task_running(session, task)
@@ -502,6 +577,11 @@ def format_campaign_status(engine: Engine, campaign_id: int) -> str:
             f"{len(pending)} pending, {len(failed)} failed"
         ),
     ]
+
+    if campaign.claude_cooldown_until:
+        lines.append(f"Claude cooldown until: {_ensure_utc(campaign.claude_cooldown_until).isoformat()}")
+    if campaign.codex_cooldown_until:
+        lines.append(f"Codex cooldown until: {_ensure_utc(campaign.codex_cooldown_until).isoformat()}")
 
     if running:
         lines.append("Running tasks:")
@@ -715,15 +795,31 @@ def run_campaign_supervisor_loop(
             break
 
         with Session(engine) as session:
+            campaign = get_campaign(session, campaign_id)
+            if campaign is None:
+                raise ValueError(f"Campaign #{campaign_id} disappeared during supervisor loop")
             tasks = list_campaign_tasks(session, campaign_id)
         current_snapshot = _campaign_progress_snapshot(tasks)
+        now = datetime.now(timezone.utc)
         pending_tasks = sum(1 for task in tasks if task.status == "pending")
         running_tasks = sum(1 for task in tasks if task.status == "running")
+        eligible_pending_tasks = sum(
+            1
+            for task in tasks
+            if task.status == "pending"
+            and (task.next_eligible_at is None or _ensure_utc(task.next_eligible_at) <= now)
+        )
         if pending_tasks == 0 and running_tasks == 0:
             stop_reason = "queue_drained"
             break
 
-        if running_tasks == 0:
+        orchestrator_provider = campaign.orchestrator_provider
+        orchestrator_cooldown_until = _provider_cooldown_until(campaign, orchestrator_provider)
+        orchestrator_available = (
+            orchestrator_cooldown_until is None
+            or _ensure_utc(orchestrator_cooldown_until) <= now
+        )
+        if running_tasks == 0 and eligible_pending_tasks > 0 and orchestrator_available:
             _campaign, orchestrator_summary = run_campaign_orchestrator_loop(
                 engine,
                 config,
@@ -761,6 +857,32 @@ def run_campaign_supervisor_loop(
                     for future in futures:
                         future.result()
             tasks_run += len(claimed_task_ids)
+
+        if not claimed_task_ids and running_tasks == 0:
+            with Session(engine) as session:
+                campaign = get_campaign(session, campaign_id)
+                if campaign is None:
+                    raise ValueError(f"Campaign #{campaign_id} disappeared during cooldown check")
+                tasks = list_campaign_tasks(session, campaign_id)
+            now = datetime.now(timezone.utc)
+            candidate_times: list[datetime] = []
+            for provider in VALID_PROVIDERS:
+                cooldown_until = _provider_cooldown_until(campaign, provider)
+                if cooldown_until is not None and _ensure_utc(cooldown_until) > now:
+                    candidate_times.append(_ensure_utc(cooldown_until))
+            for task in tasks:
+                if task.status != "pending" or task.next_eligible_at is None:
+                    continue
+                eligible_at = _ensure_utc(task.next_eligible_at)
+                if eligible_at > now:
+                    candidate_times.append(eligible_at)
+            if candidate_times:
+                next_ready = min(candidate_times)
+                sleep_seconds = min(max((next_ready - now).total_seconds(), 1.0), 300.0)
+                stop_reason = "provider_cooldown"
+                time.sleep(sleep_seconds)
+                previous_snapshot = current_snapshot
+                continue
 
         cycles_run += 1
         with Session(engine) as session:

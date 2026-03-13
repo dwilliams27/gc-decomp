@@ -22,6 +22,11 @@ from decomp_agent.orchestrator.headless import (
     cleanup_shared_claude_processes,
     claude_shared_worker_lock,
 )
+from decomp_agent.orchestrator.campaign import (
+    _compute_rate_limit_cooldown,
+    _ensure_utc,
+    _provider_cooldown_until,
+)
 from decomp_agent.orchestrator.headless_context import (
     build_campaign_orchestrator_prompt,
     load_campaign_orchestrator_system_prompt,
@@ -86,6 +91,28 @@ def _store_orchestrator_session_id(
         if campaign is None:
             raise ValueError(f"Campaign #{campaign_id} not found")
         campaign.orchestrator_session_id = session_id
+        session.add(campaign)
+        session.commit()
+
+
+def _set_orchestrator_provider_cooldown(
+    engine: Engine,
+    *,
+    campaign_id: int,
+    provider: str,
+    until: datetime,
+) -> None:
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        if provider == "claude":
+            campaign.claude_cooldown_until = until
+        elif provider == "codex":
+            campaign.codex_cooldown_until = until
+        else:
+            raise ValueError(f"Unsupported provider '{provider}'")
+        campaign.updated_at = datetime.now(timezone.utc)
         session.add(campaign)
         session.commit()
 
@@ -297,17 +324,41 @@ def run_campaign_orchestrator_loop(
             tasks = session.exec(
                 select(CampaignTask).where(CampaignTask.campaign_id == campaign_id)
             ).all()
+            campaign = get_campaign(session, campaign_id)
+            if campaign is None:
+                raise ValueError(f"Campaign #{campaign_id} not found")
         pending_tasks = sum(1 for task in tasks if task.status == "pending")
         running_tasks = sum(1 for task in tasks if task.status == "running")
         if pending_tasks == 0 and running_tasks == 0:
             break
 
-        run_campaign_orchestrator_once(
+        cooldown_until = _provider_cooldown_until(campaign, campaign.orchestrator_provider)
+        now = datetime.now(timezone.utc)
+        if cooldown_until is not None and _ensure_utc(cooldown_until) > now:
+            break
+
+        refreshed_campaign, result = run_campaign_orchestrator_once(
             engine,
             config,
             campaign_id=campaign_id,
         )
         sessions_run += 1
+        if result.termination_reason == "rate_limited":
+            now = datetime.now(timezone.utc)
+            cooldown = _compute_rate_limit_cooldown(
+                config,
+                provider=refreshed_campaign.orchestrator_provider,
+                error=result.error or "",
+                retry_count=0,
+                now=now,
+            )
+            _set_orchestrator_provider_cooldown(
+                engine,
+                campaign_id=campaign_id,
+                provider=refreshed_campaign.orchestrator_provider,
+                until=now + cooldown,
+            )
+            break
 
         with Session(engine) as session:
             tasks = session.exec(

@@ -61,6 +61,7 @@ def test_create_worker_spec_creates_worktree_and_metadata(tmp_path):
 
     spec = create_worker_spec(
         config,
+        provider="codex",
         source_file="melee/test/testfile.c",
         function_name="simple_add",
     )
@@ -89,6 +90,7 @@ def test_build_worker_container_run_args_includes_mounts_and_env(tmp_path):
 
     spec = create_worker_spec(
         config,
+        provider="codex",
         source_file="melee/test/testfile.c",
         function_name="simple_add",
     )
@@ -114,6 +116,40 @@ def test_build_worker_container_run_args_includes_mounts_and_env(tmp_path):
     assert "decomp-agent-worker:test" in args
 
 
+def test_build_worker_container_run_args_reads_claude_token_from_repo_dotenv(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+    config.claude_code.image = "decomp-agent-worker:test"
+    repo_dotenv = Path(__file__).parents[1] / ".env"
+    original_dotenv = repo_dotenv.read_text(encoding="utf-8") if repo_dotenv.exists() else None
+    repo_dotenv.write_text(
+        "CLAUDE_CODE_OAUTH_TOKEN=dotenv-token\n",
+        encoding="utf-8",
+    )
+
+    spec = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    try:
+        import os
+        original = os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        args = build_worker_container_run_args(spec, config)
+    finally:
+        if original is not None:
+            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = original
+        cleanup_worker_spec(spec)
+        if original_dotenv is None:
+            repo_dotenv.unlink(missing_ok=True)
+        else:
+            repo_dotenv.write_text(original_dotenv, encoding="utf-8")
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN=dotenv-token" in " ".join(str(arg) for arg in args)
+
+
 def test_wait_for_worker_container_polls_until_running(tmp_path, monkeypatch):
     repo_path, config = create_fake_repo(tmp_path)
     _init_git_repo(repo_path)
@@ -121,6 +157,7 @@ def test_wait_for_worker_container_polls_until_running(tmp_path, monkeypatch):
 
     spec = create_worker_spec(
         config,
+        provider="codex",
         source_file="melee/test/testfile.c",
         function_name="simple_add",
     )
@@ -148,6 +185,7 @@ def test_create_worker_spec_reuses_existing_worker_root(tmp_path):
 
     first = create_worker_spec(
         config,
+        provider="codex",
         source_file="melee/test/testfile.c",
         function_name="simple_add",
     )
@@ -156,6 +194,7 @@ def test_create_worker_spec_reuses_existing_worker_root(tmp_path):
 
     second = create_worker_spec(
         config,
+        provider="codex",
         source_file="melee/test/testfile.c",
         function_name="simple_add",
     )
@@ -165,3 +204,27 @@ def test_create_worker_spec_reuses_existing_worker_root(tmp_path):
         assert not stale_marker.exists()
     finally:
         cleanup_worker_spec(second)
+
+
+def test_build_worker_container_run_args_mounts_private_claude_home(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+    config.claude_code.image = "decomp-agent-worker:test"
+
+    spec = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    try:
+        args = build_worker_container_run_args(spec, config)
+    finally:
+        cleanup_worker_spec(spec)
+
+    joined = " ".join(str(arg) for arg in args)
+    assert spec.provider == "claude"
+    assert spec.container_name.startswith("claude-worker-")
+    assert f"{spec.agent_home_dir}:/home/decomp/.claude:rw" in joined
+    assert "decomp-agent-worker:test" in joined

@@ -102,6 +102,9 @@ class ClaudeCodeConfig(BaseModel):
     container_name: str = "docker-worker-1"
     timeout_seconds: int = 1800  # 30 min per function attempt
     max_turns: int = 50
+    isolated_worker_enabled: bool = False
+    worker_root: Path = Path("/tmp/decomp-claude-workers")
+    image: str = "decomp-agent-worker:latest"
 
 
 class CodexCodeConfig(BaseModel):
@@ -132,6 +135,8 @@ class CampaignConfig(BaseModel):
     timeout_hours: int = 8
     max_no_progress_cycles: int = 6
     baseline_compile_retries: int = 1
+    rate_limit_backoff_seconds: int = 300
+    rate_limit_reset_hours: int = 5
     root_dir: Path = Path("/tmp/decomp-campaigns")
     allow_shared_fix_workers: bool = False
     allow_temporary_unmatched_regressions: bool = False

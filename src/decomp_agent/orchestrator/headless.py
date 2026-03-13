@@ -24,6 +24,16 @@ from decomp_agent.orchestrator.headless_context import (
     build_headless_task_prompt,
     load_headless_system_prompt,
 )
+from decomp_agent.orchestrator.worker_launcher import (
+    create_worker_spec,
+    build_worker_container_run_args,
+    wait_for_worker_container,
+)
+from decomp_agent.orchestrator.worker_results import (
+    export_worker_patch,
+    write_worker_artifact_manifest,
+    write_worker_result,
+)
 
 log = structlog.get_logger()
 
@@ -75,6 +85,35 @@ def cleanup_shared_claude_processes(config: Config, *, bound_log=None) -> None:
             container=config.claude_code.container_name,
             returncode=proc.returncode,
         )
+
+
+def _config_for_repo_path(config: Config, repo_path: Path) -> Config:
+    return config.model_copy(
+        update={
+            "melee": config.melee.model_copy(update={"repo_path": repo_path}),
+            "docker": config.docker.model_copy(update={"enabled": False}),
+        }
+    )
+
+
+def _read_final_code(
+    *,
+    result: AgentResult,
+    function_name: str | None,
+    source_file: str,
+    config: Config,
+) -> None:
+    if function_name is None:
+        return
+    try:
+        from decomp_agent.tools.source import get_function_source, read_source_file
+
+        src_path = config.melee.resolve_source_path(source_file)
+        if src_path.exists():
+            source = read_source_file(src_path)
+            result.final_code = get_function_source(source, function_name)
+    except Exception:
+        log.warning("final_code_read_failed", exc_info=True)
 
 def run_headless(
     function_name: str | None,
@@ -146,29 +185,43 @@ def run_headless(
         "--max-turns", str(max_turns),
     ]
 
-    # Use shell inside container so $(cat ...) expands
-    shell_cmd = " ".join(claude_args)
-    cmd = [
-        "docker", "exec", container,
-        "sh", "-c", shell_cmd,
-    ]
-
-    bound_log.info(
-        "headless_start",
-        container=container,
-        max_turns=max_turns,
-        timeout=timeout,
-        warm_start=prior_best_code is not None,
-    )
-
-    # Run the command
     result = AgentResult(
         model="claude-code-headless",
         warm_start=prior_best_code is not None,
     )
+    worker_config = config
+    isolated_spec = None
 
-    with claude_shared_worker_lock():
-        cleanup_shared_claude_processes(config, bound_log=bound_log)
+    # Use shell inside container so $(cat ...) expands
+    shell_cmd = " ".join(claude_args)
+
+    if config.claude_code.isolated_worker_enabled:
+        isolated_spec = create_worker_spec(
+            config,
+            provider="claude",
+            source_file=source_file,
+            function_name=function_name,
+        )
+        write_worker_artifact_manifest(isolated_spec)
+        worker_config = _config_for_repo_path(config, isolated_spec.melee_worktree.worktree_path)
+        start_args = build_worker_container_run_args(isolated_spec, config)
+        subprocess.run(
+            start_args,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        wait_for_worker_container(isolated_spec)
+        cmd = ["docker", "exec", isolated_spec.container_name, "sh", "-c", shell_cmd]
+        bound_log.info(
+            "headless_isolated_start",
+            container=isolated_spec.container_name,
+            worker_id=isolated_spec.worker_id,
+            artifact_dir=str(isolated_spec.output_dir),
+            max_turns=max_turns,
+            timeout=timeout,
+            warm_start=prior_best_code is not None,
+        )
         try:
             proc = subprocess.run(
                 cmd,
@@ -177,12 +230,54 @@ def run_headless(
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
-            cleanup_shared_claude_processes(config, bound_log=bound_log)
+            subprocess.run(
+                ["docker", "stop", isolated_spec.container_name],
+                capture_output=True,
+                text=True,
+            )
             result.elapsed_seconds = time.monotonic() - start_time
             result.termination_reason = "timeout"
             result.error = f"Claude Code timed out after {timeout}s"
             bound_log.warning("headless_timeout", timeout=timeout)
             return result
+        finally:
+            subprocess.run(
+                ["docker", "stop", isolated_spec.container_name],
+                capture_output=True,
+                text=True,
+            )
+        result.artifact_dir = str(isolated_spec.output_dir)
+        result.patch_path = str(export_worker_patch(isolated_spec))
+    else:
+        cmd = [
+            "docker", "exec", container,
+            "sh", "-c", shell_cmd,
+        ]
+
+        bound_log.info(
+            "headless_start",
+            container=container,
+            max_turns=max_turns,
+            timeout=timeout,
+            warm_start=prior_best_code is not None,
+        )
+
+        with claude_shared_worker_lock():
+            cleanup_shared_claude_processes(config, bound_log=bound_log)
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                cleanup_shared_claude_processes(config, bound_log=bound_log)
+                result.elapsed_seconds = time.monotonic() - start_time
+                result.termination_reason = "timeout"
+                result.error = f"Claude Code timed out after {timeout}s"
+                bound_log.warning("headless_timeout", timeout=timeout)
+                return result
 
     # Combine all output for error detection — Claude Code may write errors
     # to stdout or stderr depending on failure mode.
@@ -287,7 +382,7 @@ def run_headless(
     try:
         from decomp_agent.tools.build import check_match
 
-        check = check_match(source_file, config)
+        check = check_match(source_file, worker_config)
         if check.success:
             if file_mode:
                 # File mode: capture per-function results
@@ -320,15 +415,28 @@ def run_headless(
 
     # Read final function code from source file (bind-mounted, visible from host)
     if function_name is not None:
-        try:
-            from decomp_agent.tools.source import get_function_source, read_source_file
+        _read_final_code(
+            result=result,
+            function_name=function_name,
+            source_file=source_file,
+            config=worker_config,
+        )
 
-            src_path = config.melee.resolve_source_path(source_file)
-            if src_path.exists():
-                source = read_source_file(src_path)
-                result.final_code = get_function_source(source, function_name)
-        except Exception:
-            bound_log.warning("final_code_read_failed", exc_info=True)
+    if config.claude_code.isolated_worker_enabled and isolated_spec is not None:
+        if result.matched:
+            result.matched = False
+            result.termination_reason = "isolated_patch_ready"
+            result.error = (
+                f"Worker produced a matching patch in {result.patch_path}. "
+                f"Primary checkout was not modified."
+            )
+        elif result.patch_path:
+            result.error = result.error or f"Worker artifacts captured in {result.artifact_dir}"
+        write_worker_result(
+            isolated_spec,
+            result,
+            extra={"source_file": source_file, "function_name": function_name},
+        )
 
     result.elapsed_seconds = time.monotonic() - start_time
 

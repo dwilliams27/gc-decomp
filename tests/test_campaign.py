@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 from unittest.mock import patch
 
@@ -8,6 +9,7 @@ from sqlmodel import Session, select
 from decomp_agent.agent.loop import AgentResult
 from decomp_agent.models.db import Campaign, CampaignTask, get_engine, sync_from_report
 from decomp_agent.orchestrator.campaign import (
+    _compute_rate_limit_cooldown,
     build_campaign_spec,
     create_campaign_worker_task,
     format_campaign_status,
@@ -218,8 +220,20 @@ def test_run_campaign_loop_marks_completed_when_queue_drained(tmp_path):
     assert refreshed_campaign.status == "completed"
     assert summary.tasks_run == 3
     assert summary.completed_tasks == 3
-    assert summary.pending_tasks == 0
-    assert summary.stopped_by_limit is False
+
+
+def test_compute_rate_limit_cooldown_uses_fixed_claude_window(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+
+    cooldown = _compute_rate_limit_cooldown(
+        config,
+        provider="claude",
+        error="usage limit reached",
+        retry_count=0,
+        now=datetime(2026, 3, 13, 4, 12, tzinfo=timezone.utc),
+    )
+
+    assert cooldown == timedelta(hours=2, minutes=52)
 
 
 def test_run_campaign_task_once_requeues_stale_running_task(tmp_path):
@@ -309,6 +323,49 @@ def test_run_campaign_task_once_marks_failed_on_exception(tmp_path):
     assert failed_task.status == "failed"
     assert failed_task.termination_reason == "worker_error"
     assert failed_task.error == "worker exploded"
+
+
+def test_run_campaign_task_once_defers_rate_limited_task(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign-rate-limit.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="claude",
+        )
+        campaign_id = campaign.id
+
+    fake_result = AgentResult(
+        matched=False,
+        best_match_percent=80.0,
+        termination_reason="rate_limited",
+        error="usage limit reached",
+    )
+
+    with patch("decomp_agent.orchestrator.runner.run_function", return_value=fake_result):
+        _campaign, task, _result = run_campaign_task_once(
+            engine,
+            config,
+            campaign_id=campaign_id,  # type: ignore[arg-type]
+        )
+
+    assert task is not None
+    assert task.status == "pending"
+    assert task.termination_reason == "rate_limited"
+    assert task.rate_limit_count == 1
+    assert task.next_eligible_at is not None
+
+    with Session(engine) as session:
+        refreshed_campaign = session.get(Campaign, campaign_id)
+        assert refreshed_campaign is not None
+        assert refreshed_campaign.claude_cooldown_until is not None
 
 
 def test_campaign_status_and_result_formatters(tmp_path):

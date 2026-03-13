@@ -222,6 +222,7 @@ def _run_isolated_worker(
 ) -> tuple[subprocess.CompletedProcess[str], Config, AgentResult, WorkerSpec]:
     spec = create_worker_spec(
         config,
+        provider="codex",
         source_file=source_file,
         function_name=function_name,
     )

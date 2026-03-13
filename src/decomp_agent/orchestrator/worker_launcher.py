@@ -1,4 +1,4 @@
-"""Host-side preparation for isolated Codex worker containers."""
+"""Host-side preparation for isolated worker containers."""
 
 from __future__ import annotations
 
@@ -19,14 +19,31 @@ from decomp_agent.orchestrator.worktree import (
 )
 
 
+def _load_dotenv_value(repo_root: Path, key: str) -> str | None:
+    """Load a single key from the repo-root .env file if present."""
+    env_path = repo_root / ".env"
+    if not env_path.is_file():
+        return None
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name.strip() != key:
+            continue
+        return value.strip().strip("'").strip('"')
+    return None
+
+
 @dataclass
 class WorkerSpec:
+    provider: str
     worker_id: str
     function_name: str | None
     source_file: str
     root_dir: Path
     output_dir: Path
-    codex_home_dir: Path
+    agent_home_dir: Path
     container_name: str
     melee_worktree: WorktreeSpec
     decomp_config_path: Path
@@ -67,9 +84,10 @@ def build_worker_container_run_args(
     spec: WorkerSpec,
     config: Config,
 ) -> list[str]:
-    """Build the docker run command for a single isolated Codex worker."""
+    """Build the docker run command for a single isolated worker."""
     repo_root = Path(__file__).parents[3]
     workspace_repo_root = Path("/workspace/gc-decomp")
+    image = config.codex_code.image if spec.provider == "codex" else config.claude_code.image
     args = [
         "docker",
         "run",
@@ -93,7 +111,10 @@ def build_worker_container_run_args(
         args.extend(["-e", f"HTTP_PROXY={config.codex_code.http_proxy}"])
     if config.codex_code.https_proxy:
         args.extend(["-e", f"HTTPS_PROXY={config.codex_code.https_proxy}"])
-    claude_oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    claude_oauth_token = (
+        os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        or _load_dotenv_value(repo_root, "CLAUDE_CODE_OAUTH_TOKEN")
+    )
     if claude_oauth_token:
         args.extend(["-e", f"CLAUDE_CODE_OAUTH_TOKEN={claude_oauth_token}"])
     if spec.auth_seed_path is not None:
@@ -104,18 +125,20 @@ def build_worker_container_run_args(
             f"{spec.auth_seed_path}:/seed/codex/auth.json:ro",
         ])
 
+    agent_home_mount = "/home/decomp/.codex" if spec.provider == "codex" else "/home/decomp/.claude"
+
     args.extend([
         "-v",
         f"{spec.melee_worktree.worktree_path}:{spec.melee_worktree.worktree_path}:rw",
         "-v",
-        f"{spec.codex_home_dir}:/home/decomp/.codex:rw",
+        f"{spec.agent_home_dir}:{agent_home_mount}:rw",
         "-v",
         f"{spec.output_dir}:{spec.output_dir}:rw",
         "-v",
         f"{spec.decomp_config_path}:{spec.decomp_config_path}:ro",
         "-v",
         f"{repo_root}:{workspace_repo_root}:rw",
-        config.codex_code.image,
+        image,
         "sleep",
         "infinity",
     ])
@@ -176,6 +199,7 @@ def _reset_worker_root(
 def create_worker_spec(
     config: Config,
     *,
+    provider: str = "codex",
     source_file: str,
     function_name: str | None = None,
 ) -> WorkerSpec:
@@ -185,9 +209,16 @@ def create_worker_spec(
         token_parts.append(function_name)
     worker_id = slugify_worker_token("-".join(token_parts))
 
-    root_dir = config.codex_code.worker_root / worker_id
+    if provider == "codex":
+        worker_root = config.codex_code.worker_root
+    elif provider == "claude":
+        worker_root = config.claude_code.worker_root
+    else:
+        raise ValueError(f"Unsupported worker provider '{provider}'")
+
+    root_dir = worker_root / worker_id
     output_dir = root_dir / "output"
-    codex_home_dir = root_dir / "codex-home"
+    agent_home_dir = root_dir / "agent-home"
     worktree_path = root_dir / "repo"
     config_dir = root_dir / "config"
     decomp_config_path = config_dir / "container.toml"
@@ -195,7 +226,7 @@ def create_worker_spec(
     _reset_worker_root(config.melee.repo_path, root_dir, worktree_path)
     root_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-    codex_home_dir.mkdir(parents=True, exist_ok=True)
+    agent_home_dir.mkdir(parents=True, exist_ok=True)
     config_dir.mkdir(parents=True, exist_ok=True)
 
     worktree = create_git_worktree(config.melee.repo_path, worktree_path)
@@ -204,19 +235,22 @@ def create_worker_spec(
         encoding="utf-8",
     )
 
-    auth_seed = config.codex_code.auth_file
-    if auth_seed is None:
-        default_auth = Path.home() / ".codex" / "auth.json"
-        auth_seed = default_auth if default_auth.exists() else None
+    auth_seed: Path | None = None
+    if provider == "codex":
+        auth_seed = config.codex_code.auth_file
+        if auth_seed is None:
+            default_auth = Path.home() / ".codex" / "auth.json"
+            auth_seed = default_auth if default_auth.exists() else None
 
     spec = WorkerSpec(
+        provider=provider,
         worker_id=worker_id,
         function_name=function_name,
         source_file=source_file,
         root_dir=root_dir,
         output_dir=output_dir,
-        codex_home_dir=codex_home_dir,
-        container_name=f"codex-worker-{worker_id}",
+        agent_home_dir=agent_home_dir,
+        container_name=f"{provider}-worker-{worker_id}",
         melee_worktree=worktree,
         decomp_config_path=decomp_config_path,
         auth_seed_path=auth_seed,
@@ -224,12 +258,13 @@ def create_worker_spec(
     (output_dir / "worker-spec.json").write_text(
         json.dumps(
             {
+                "provider": provider,
                 "worker_id": worker_id,
                 "function_name": function_name,
                 "source_file": source_file,
                 "container_name": spec.container_name,
                 "repo_path": str(worktree_path),
-                "codex_home_dir": str(codex_home_dir),
+                "agent_home_dir": str(agent_home_dir),
                 "decomp_config_path": str(decomp_config_path),
                 "auth_seed_path": str(auth_seed) if auth_seed else None,
             },

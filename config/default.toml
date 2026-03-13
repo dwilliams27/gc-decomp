@@ -19,6 +19,9 @@ enabled = false
 container_name = "docker-worker-1"
 timeout_seconds = 1800
 max_turns = 30
+isolated_worker_enabled = false
+worker_root = "/tmp/decomp-claude-workers"
+image = "decomp-agent-worker:latest"
 
 [codex_code]
 enabled = false
@@ -48,6 +51,8 @@ max_active_workers = 4
 timeout_hours = 8
 max_no_progress_cycles = 6
 baseline_compile_retries = 1
+rate_limit_backoff_seconds = 300
+rate_limit_reset_hours = 5
 root_dir = "/tmp/decomp-campaigns"
 allow_shared_fix_workers = false
 allow_temporary_unmatched_regressions = false

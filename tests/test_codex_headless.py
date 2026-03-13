@@ -72,12 +72,13 @@ def test_isolated_codex_match_becomes_patch_ready(tmp_path):
     config.agent.model = "gpt-5.4"
 
     fake_spec = WorkerSpec(
+        provider="codex",
         worker_id="worker-1",
         function_name="target_fn",
         source_file="melee/test/testfile.c",
         root_dir=tmp_path / "worker-root",
         output_dir=tmp_path / "worker-root" / "output",
-        codex_home_dir=tmp_path / "worker-root" / "codex-home",
+        agent_home_dir=tmp_path / "worker-root" / "agent-home",
         container_name="codex-worker-1",
         melee_worktree=WorktreeSpec(repo_root=repo, worktree_path=tmp_path / "worker-root" / "repo"),
         decomp_config_path=tmp_path / "worker-root" / "config" / "container.toml",

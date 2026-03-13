@@ -104,6 +104,8 @@ class Campaign(SQLModel, table=True):
     allow_shared_fix_workers: bool = False
     allow_temporary_unmatched_regressions: bool = False
     orchestrator_session_id: str = ""
+    claude_cooldown_until: datetime | None = None
+    codex_cooldown_until: datetime | None = None
     staging_worktree_path: str = ""
     artifact_dir: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -130,6 +132,8 @@ class CampaignTask(SQLModel, table=True):
     error: str = ""
     artifact_dir: str = ""
     patch_path: str = ""
+    next_eligible_at: datetime | None = None
+    rate_limit_count: int = 0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -170,6 +174,10 @@ def _migrate(engine: Engine) -> None:
         ("campaigntask", "best_match_pct", "REAL NOT NULL DEFAULT 0.0"),
         ("campaigntask", "termination_reason", "TEXT NOT NULL DEFAULT ''"),
         ("campaigntask", "error", "TEXT NOT NULL DEFAULT ''"),
+        ("campaigntask", "next_eligible_at", "TIMESTAMP"),
+        ("campaigntask", "rate_limit_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("campaign", "claude_cooldown_until", "TIMESTAMP"),
+        ("campaign", "codex_cooldown_until", "TIMESTAMP"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -313,11 +321,13 @@ def get_next_campaign_task(
     campaign_id: int,
 ) -> CampaignTask | None:
     """Return the highest-priority pending task for a campaign."""
+    now = datetime.now(timezone.utc)
     stmt = (
         select(CampaignTask)
         .where(
             CampaignTask.campaign_id == campaign_id,
             CampaignTask.status == "pending",
+            sa_func.coalesce(CampaignTask.next_eligible_at, now) <= now,
         )
         .order_by(CampaignTask.priority.desc(), CampaignTask.id.asc())  # type: ignore[arg-type]
     )
@@ -372,6 +382,7 @@ def mark_campaign_task_running(
     task.status = "running"
     task.started_at = now
     task.updated_at = now
+    task.next_eligible_at = None
     session.add(task)
     session.commit()
 
@@ -400,6 +411,47 @@ def requeue_running_campaign_tasks(
         session.add(task)
     session.commit()
     return len(tasks)
+
+
+def defer_campaign_task(
+    session: Session,
+    task: CampaignTask,
+    *,
+    until: datetime,
+    error: str,
+    termination_reason: str = "rate_limited",
+) -> None:
+    """Requeue a task for later execution after a provider cooldown."""
+    now = datetime.now(timezone.utc)
+    task.status = "pending"
+    task.completed_at = now
+    task.updated_at = now
+    task.next_eligible_at = until
+    task.error = error
+    task.termination_reason = termination_reason
+    task.rate_limit_count += 1
+    session.add(task)
+    session.commit()
+
+
+def set_campaign_provider_cooldown(
+    session: Session,
+    campaign: Campaign,
+    *,
+    provider: str,
+    until: datetime,
+) -> None:
+    """Record a provider-specific cooldown window on the campaign."""
+    now = datetime.now(timezone.utc)
+    if provider == "claude":
+        campaign.claude_cooldown_until = until
+    elif provider == "codex":
+        campaign.codex_cooldown_until = until
+    else:
+        raise ValueError(f"Unsupported provider '{provider}'")
+    campaign.updated_at = now
+    session.add(campaign)
+    session.commit()
 
 
 def fail_campaign_task(

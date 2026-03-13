@@ -25,6 +25,7 @@ def test_write_and_load_worker_result(tmp_path):
 
     spec = create_worker_spec(
         config,
+        provider="codex",
         source_file="melee/test/testfile.c",
         function_name="simple_add",
     )
@@ -61,6 +62,7 @@ def test_export_worker_patch_writes_diff(tmp_path):
 
     spec = create_worker_spec(
         config,
+        provider="codex",
         source_file="melee/test/testfile.c",
         function_name="simple_add",
     )
@@ -86,6 +88,7 @@ def test_write_worker_artifact_manifest(tmp_path):
 
     spec = create_worker_spec(
         config,
+        provider="codex",
         source_file="melee/test/testfile.c",
         function_name=None,
     )

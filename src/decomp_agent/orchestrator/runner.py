@@ -50,8 +50,14 @@ def _get_file_lock(source_file: str) -> threading.Lock:
 def _uses_isolated_worker(config: Config) -> bool:
     """Return whether the active provider edits an isolated checkout instead of the main repo."""
     return (
-        _provider_enabled(config.codex_code)
-        and getattr(config.codex_code, "isolated_worker_enabled", False) is True
+        (
+            _provider_enabled(config.codex_code)
+            and getattr(config.codex_code, "isolated_worker_enabled", False) is True
+        )
+        or (
+            _provider_enabled(config.claude_code)
+            and getattr(config.claude_code, "isolated_worker_enabled", False) is True
+        )
     )
 
 
