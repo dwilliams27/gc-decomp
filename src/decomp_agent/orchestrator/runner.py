@@ -55,6 +55,66 @@ def _uses_isolated_worker(config: Config) -> bool:
     )
 
 
+def _capture_baseline_with_retry(
+    source_file: str,
+    config: Config,
+    bound_log,
+    *,
+    function_name: str,
+) -> dict[str, float] | None:
+    """Capture per-function baseline match data with a small retry budget.
+
+    The build pipeline can occasionally fail transiently under concurrent load.
+    Retry baseline capture a small number of times before giving up.
+    """
+    attempts = max(config.campaign.baseline_compile_retries + 1, 1)
+    last_error: str | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            baseline_result = check_match(source_file, config)
+        except Exception as exc:
+            last_error = str(exc)
+            bound_log.warning(
+                "baseline_capture_error",
+                function=function_name,
+                attempt=attempt,
+                max_attempts=attempts,
+                error=last_error,
+            )
+            continue
+
+        if baseline_result.success:
+            baseline = {
+                f.name: f.fuzzy_match_percent
+                for f in baseline_result.functions
+            }
+            bound_log.info(
+                "baseline_captured",
+                function=function_name,
+                attempt=attempt,
+                num_functions=len(baseline),
+            )
+            return baseline
+
+        last_error = baseline_result.error
+        log_method = bound_log.warning if attempt == attempts else bound_log.info
+        log_method(
+            "baseline_compile_failed",
+            function=function_name,
+            attempt=attempt,
+            max_attempts=attempts,
+            error=baseline_result.error,
+        )
+
+    if last_error:
+        bound_log.warning(
+            "baseline_unavailable",
+            function=function_name,
+            error=last_error,
+        )
+    return None
+
+
 def _auto_commit_match(
     func_name: str,
     source_file: str,
@@ -284,32 +344,13 @@ def run_function(
                 else None
             )
 
-            # Capture baseline match percentages for collateral damage guard
-            baseline: dict[str, float] | None = None
-            try:
-                baseline_result = check_match(source_file, config)
-                if baseline_result.success:
-                    baseline = {
-                        f.name: f.fuzzy_match_percent
-                        for f in baseline_result.functions
-                    }
-                    bound_log.info(
-                        "baseline_captured",
-                        function=func_name,
-                        num_functions=len(baseline),
-                    )
-                else:
-                    bound_log.warning(
-                        "baseline_compile_failed",
-                        function=func_name,
-                        error=baseline_result.error,
-                    )
-            except Exception as e:
-                bound_log.warning(
-                    "baseline_capture_error",
-                    function=func_name,
-                    error=str(e),
-                )
+            # Capture baseline match percentages for collateral damage guard.
+            baseline = _capture_baseline_with_retry(
+                source_file,
+                config,
+                bound_log,
+                function_name=func_name,
+            )
 
             # Look up best prior attempt for warm start
             prior_best_code: str | None = None

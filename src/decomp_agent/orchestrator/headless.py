@@ -7,7 +7,10 @@ Invokes Claude Code CLI inside the Docker worker container via
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -23,6 +26,55 @@ from decomp_agent.orchestrator.headless_context import (
 )
 
 log = structlog.get_logger()
+
+
+def _claude_shared_lock_path() -> Path:
+    """Return the host-side lock path for the shared Claude worker container."""
+    return Path("/tmp/decomp-claude-shared-worker.lock")
+
+
+@contextmanager
+def claude_shared_worker_lock():
+    """Serialize shared-container Claude CLI usage across processes."""
+    lock_path = _claude_shared_lock_path()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            time.sleep(1)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def cleanup_shared_claude_processes(config: Config, *, bound_log=None) -> None:
+    """Kill stale Claude CLI processes in the shared worker container."""
+    proc = subprocess.run(
+        [
+            "docker",
+            "exec",
+            config.claude_code.container_name,
+            "sh",
+            "-lc",
+            "pkill -f '/usr/bin/claude' || true",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if bound_log is not None:
+        bound_log.info(
+            "claude_worker_cleanup",
+            container=config.claude_code.container_name,
+            returncode=proc.returncode,
+        )
 
 def run_headless(
     function_name: str | None,
@@ -115,19 +167,22 @@ def run_headless(
         warm_start=prior_best_code is not None,
     )
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        result.elapsed_seconds = time.monotonic() - start_time
-        result.termination_reason = "timeout"
-        result.error = f"Claude Code timed out after {timeout}s"
-        bound_log.warning("headless_timeout", timeout=timeout)
-        return result
+    with claude_shared_worker_lock():
+        cleanup_shared_claude_processes(config, bound_log=bound_log)
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            cleanup_shared_claude_processes(config, bound_log=bound_log)
+            result.elapsed_seconds = time.monotonic() - start_time
+            result.termination_reason = "timeout"
+            result.error = f"Claude Code timed out after {timeout}s"
+            bound_log.warning("headless_timeout", timeout=timeout)
+            return result
 
     # Combine all output for error detection — Claude Code may write errors
     # to stdout or stderr depending on failure mode.

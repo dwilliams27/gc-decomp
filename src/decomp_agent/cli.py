@@ -604,8 +604,10 @@ def campaign_supervise(
     console.print(f"  Running:         {summary.running_tasks}")
     console.print(f"  Pending:         {summary.pending_tasks}")
     console.print(f"  Timed out:       {'yes' if summary.timed_out else 'no'}")
-    if summary.stopped_by_limit:
-        console.print("  Stop reason:     max cycle limit reached")
+    console.print(f"  Stop reason:     {summary.stop_reason}")
+    console.print(f"  No progress:     {summary.no_progress_cycles}")
+    if summary.summary_path:
+        console.print(f"  Summary file:    {summary.summary_path}")
 
 
 @campaign_group.command("list")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -78,6 +79,49 @@ class CampaignSupervisorSummary:
     running_tasks: int
     timed_out: bool
     stopped_by_limit: bool
+    stop_reason: str
+    no_progress_cycles: int
+    summary_path: str = ""
+
+
+def _campaign_progress_snapshot(tasks: list[CampaignTask]) -> tuple[int, int, int, int, int]:
+    """Return a coarse progress snapshot for no-progress detection."""
+    completed = sum(1 for task in tasks if task.status == "completed")
+    failed = sum(1 for task in tasks if task.status == "failed")
+    pending = sum(1 for task in tasks if task.status == "pending")
+    running = sum(1 for task in tasks if task.status == "running")
+    total_best_match = int(round(sum(task.best_match_pct for task in tasks)))
+    return completed, failed, pending, running, total_best_match
+
+
+def _write_supervisor_summary_artifact(
+    campaign: Campaign,
+    summary: CampaignSupervisorSummary,
+) -> str:
+    """Persist the last supervisor summary for morning-after inspection."""
+    if not campaign.artifact_dir:
+        return ""
+    artifact_dir = Path(campaign.artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = artifact_dir / "supervisor-summary.json"
+    payload = {
+        "campaign_id": summary.campaign_id,
+        "campaign_status": campaign.status,
+        "cycles_run": summary.cycles_run,
+        "orchestrator_sessions": summary.orchestrator_sessions,
+        "tasks_run": summary.tasks_run,
+        "completed_tasks": summary.completed_tasks,
+        "failed_tasks": summary.failed_tasks,
+        "pending_tasks": summary.pending_tasks,
+        "running_tasks": summary.running_tasks,
+        "timed_out": summary.timed_out,
+        "stopped_by_limit": summary.stopped_by_limit,
+        "stop_reason": summary.stop_reason,
+        "no_progress_cycles": summary.no_progress_cycles,
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }
+    summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return str(summary_path)
 
 
 def _task_label(task: CampaignTask) -> str:
@@ -597,28 +641,33 @@ def run_campaign_next_task_summary(
     *,
     campaign_id: int,
 ) -> str:
-    """Run one queued campaign task and return a concise summary string."""
-    campaign, task, result = run_campaign_task_once(
-        engine,
-        config,
-        campaign_id=campaign_id,
-    )
-    if task is None:
-        return f"Campaign #{campaign.id} has no pending tasks."
+    """Return a concise summary of the next queued task for host-side dispatch.
+
+    This tool is exposed to orchestrator agents running inside containers.
+    They cannot safely execute worker launches directly because the real worker
+    dispatch path is host-controlled. The host supervisor will dispatch pending
+    tasks after the orchestrator session ends.
+    """
+    del config
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        task = get_next_campaign_task(session, campaign_id)
+        if task is None:
+            return f"Campaign #{campaign.id} has no pending tasks."
 
     lines = [
-        f"Ran campaign task #{task.id} ({_task_label(task)})",
+        f"Queued campaign task #{task.id} ({_task_label(task)})",
+        "Execution: host supervisor will dispatch this task after the current orchestrator pass",
         f"Status: {task.status}",
         f"Provider: {task.provider or campaign.worker_provider_policy}",
-        f"Best match: {task.best_match_pct:.1f}%",
-        f"Termination: {task.termination_reason or '(none)'}",
+        f"Priority: {task.priority}",
     ]
-    if result and result.session_id:
-        lines.append(f"Session: {result.session_id}")
-    if task.artifact_dir:
-        lines.append(f"Artifacts: {task.artifact_dir}")
+    if task.instructions:
+        lines.append(f"Instructions: {task.instructions}")
     if task.error:
-        lines.append(f"Error: {task.error}")
+        lines.append(f"Previous error: {task.error}")
     return "\n".join(lines)
 
 
@@ -652,19 +701,26 @@ def run_campaign_supervisor_loop(
     orchestrator_sessions = 0
     tasks_run = 0
     timed_out = False
+    stop_reason = "queue_drained"
+    no_progress_cycles = 0
+    previous_snapshot: tuple[int, int, int, int, int] | None = None
 
     while True:
         if max_cycles is not None and cycles_run >= max_cycles:
+            stop_reason = "max_cycle_limit"
             break
         if datetime.now(timezone.utc) >= timeout_deadline:
             timed_out = True
+            stop_reason = "timeout"
             break
 
         with Session(engine) as session:
             tasks = list_campaign_tasks(session, campaign_id)
+        current_snapshot = _campaign_progress_snapshot(tasks)
         pending_tasks = sum(1 for task in tasks if task.status == "pending")
         running_tasks = sum(1 for task in tasks if task.status == "running")
         if pending_tasks == 0 and running_tasks == 0:
+            stop_reason = "queue_drained"
             break
 
         if running_tasks == 0:
@@ -707,7 +763,20 @@ def run_campaign_supervisor_loop(
             tasks_run += len(claimed_task_ids)
 
         cycles_run += 1
-        if timed_out:
+        with Session(engine) as session:
+            refreshed_tasks = list_campaign_tasks(session, campaign_id)
+        next_snapshot = _campaign_progress_snapshot(refreshed_tasks)
+        if next_snapshot == previous_snapshot == current_snapshot:
+            no_progress_cycles += 1
+        else:
+            no_progress_cycles = 0
+        previous_snapshot = next_snapshot
+
+        if (
+            config.campaign.max_no_progress_cycles > 0
+            and no_progress_cycles >= config.campaign.max_no_progress_cycles
+        ):
+            stop_reason = "no_progress_limit"
             break
 
     with Session(engine) as session:
@@ -722,11 +791,16 @@ def run_campaign_supervisor_loop(
 
         if pending_tasks == 0 and running_tasks == 0:
             mark_campaign_completed(session, campaign)
-        elif timed_out or (max_cycles is not None and cycles_run >= max_cycles):
+            stop_reason = "queue_drained"
+        elif (
+            timed_out
+            or (max_cycles is not None and cycles_run >= max_cycles)
+            or stop_reason == "no_progress_limit"
+        ):
             mark_campaign_stopped(session, campaign)
         session.refresh(campaign)
 
-    return campaign, CampaignSupervisorSummary(
+    summary = CampaignSupervisorSummary(
         campaign_id=campaign_id,
         cycles_run=cycles_run,
         orchestrator_sessions=orchestrator_sessions,
@@ -737,4 +811,24 @@ def run_campaign_supervisor_loop(
         running_tasks=running_tasks,
         timed_out=timed_out,
         stopped_by_limit=max_cycles is not None and cycles_run >= max_cycles,
+        stop_reason=stop_reason,
+        no_progress_cycles=no_progress_cycles,
     )
+    summary_path = _write_supervisor_summary_artifact(campaign, summary)
+    if summary_path:
+        summary = CampaignSupervisorSummary(
+            campaign_id=summary.campaign_id,
+            cycles_run=summary.cycles_run,
+            orchestrator_sessions=summary.orchestrator_sessions,
+            tasks_run=summary.tasks_run,
+            completed_tasks=summary.completed_tasks,
+            failed_tasks=summary.failed_tasks,
+            pending_tasks=summary.pending_tasks,
+            running_tasks=summary.running_tasks,
+            timed_out=summary.timed_out,
+            stopped_by_limit=summary.stopped_by_limit,
+            stop_reason=summary.stop_reason,
+            no_progress_cycles=summary.no_progress_cycles,
+            summary_path=summary_path,
+        )
+    return campaign, summary

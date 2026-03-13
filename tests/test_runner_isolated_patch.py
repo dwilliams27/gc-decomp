@@ -190,3 +190,48 @@ def test_run_function_does_not_revert_main_source_for_unmatched_isolated_worker(
 
     assert result.matched is False
     assert "return a + b + 1;" in src_path.read_text(encoding="utf-8")
+
+
+def test_run_function_retries_transient_baseline_failure(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    config.claude_code.enabled = True
+    config.campaign.baseline_compile_retries = 1
+
+    engine = get_engine(":memory:")
+    functions = _seed_db(engine, config)
+    target_func = next(f for f in functions if f.name == "simple_add")
+
+    failed_baseline = CompileResult(
+        object_name="melee/test/testfile.c",
+        success=False,
+        error="transient depfile race",
+    )
+    recovered_baseline = CompileResult(
+        object_name="melee/test/testfile.c",
+        success=True,
+        functions=[
+            FunctionMatch(name="simple_init", fuzzy_match_percent=55.0, size=40),
+            FunctionMatch(name="simple_add", fuzzy_match_percent=60.0, size=8),
+            FunctionMatch(name="simple_loop", fuzzy_match_percent=50.0, size=48),
+        ],
+    )
+
+    with (
+        patch(
+            "decomp_agent.orchestrator.headless.run_headless",
+            return_value=AgentResult(
+                matched=False,
+                best_match_percent=77.0,
+                termination_reason="model_stopped",
+            ),
+        ),
+        patch(
+            "decomp_agent.orchestrator.runner.check_match",
+            side_effect=[failed_baseline, recovered_baseline],
+        ) as mocked_check_match,
+        patch("decomp_agent.orchestrator.runner._auto_commit_match"),
+    ):
+        result = run_function(target_func, config, engine)
+
+    assert result.best_match_percent == 77.0
+    assert mocked_check_match.call_count == 2

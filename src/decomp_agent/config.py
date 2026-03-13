@@ -130,6 +130,8 @@ class CampaignConfig(BaseModel):
     worker_provider_policy: str = "claude"
     max_active_workers: int = 4
     timeout_hours: int = 8
+    max_no_progress_cycles: int = 6
+    baseline_compile_retries: int = 1
     root_dir: Path = Path("/tmp/decomp-campaigns")
     allow_shared_fix_workers: bool = False
     allow_temporary_unmatched_regressions: bool = False

@@ -18,6 +18,10 @@ from sqlmodel import Session, select
 from decomp_agent.agent.loop import AgentResult
 from decomp_agent.config import Config
 from decomp_agent.models.db import Campaign, CampaignTask, get_campaign
+from decomp_agent.orchestrator.headless import (
+    cleanup_shared_claude_processes,
+    claude_shared_worker_lock,
+)
 from decomp_agent.orchestrator.headless_context import (
     build_campaign_orchestrator_prompt,
     load_campaign_orchestrator_system_prompt,
@@ -115,18 +119,21 @@ def _run_claude_orchestrator(
         "-c",
         " ".join(claude_args),
     ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        result.elapsed_seconds = time.monotonic() - start_time
-        result.termination_reason = "timeout"
-        result.error = f"Claude orchestrator timed out after {timeout}s"
-        return result
+    with claude_shared_worker_lock():
+        cleanup_shared_claude_processes(config)
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            cleanup_shared_claude_processes(config)
+            result.elapsed_seconds = time.monotonic() - start_time
+            result.termination_reason = "timeout"
+            result.error = f"Claude orchestrator timed out after {timeout}s"
+            return result
 
     if proc.returncode != 0:
         result.elapsed_seconds = time.monotonic() - start_time

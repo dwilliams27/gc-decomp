@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 from sqlmodel import Session, select
@@ -498,25 +499,93 @@ def test_run_campaign_next_task_summary_reports_result(tmp_path):
             worker_provider_policy="codex",
         )
 
-    fake_result = AgentResult(
-        matched=False,
-        best_match_percent=89.0,
-        termination_reason="model_stopped",
-        session_id="summary-session",
-        artifact_dir="/tmp/worker-artifacts/task-1",
+    summary = run_campaign_next_task_summary(
+        engine,
+        config,
+        campaign_id=campaign.id,  # type: ignore[arg-type]
     )
 
-    with patch("decomp_agent.orchestrator.runner.run_function", return_value=fake_result):
-        summary = run_campaign_next_task_summary(
+    assert "Queued campaign task #" in summary
+    assert "host supervisor will dispatch" in summary
+    assert "Provider: codex" in summary
+
+
+def test_run_campaign_supervisor_loop_stops_after_no_progress(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.max_no_progress_cycles = 2
+    engine = get_engine(tmp_path / "campaign-no-progress.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="codex",
+            worker_provider_policy="codex",
+        )
+        campaign_id = campaign.id
+
+    with (
+        patch(
+            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_loop",
+            return_value=(campaign, type("Summary", (), {"sessions_run": 1})()),
+        ),
+        patch(
+            "decomp_agent.orchestrator.campaign._claim_campaign_tasks",
+            return_value=(campaign, []),
+        ),
+    ):
+        refreshed_campaign, summary = run_campaign_supervisor_loop(
             engine,
             config,
-            campaign_id=campaign.id,  # type: ignore[arg-type]
+            campaign_id=campaign_id,  # type: ignore[arg-type]
         )
 
-    assert "Ran campaign task #" in summary
-    assert "Best match: 89.0%" in summary
-    assert "summary-session" in summary
-    assert "/tmp/worker-artifacts/task-1" in summary
+    assert refreshed_campaign.status == "stopped"
+    assert summary.stop_reason == "no_progress_limit"
+    assert summary.no_progress_cycles == 2
+    assert summary.summary_path.endswith("supervisor-summary.json")
+
+    payload = json.loads(open(summary.summary_path, encoding="utf-8").read())
+    assert payload["stop_reason"] == "no_progress_limit"
+    assert payload["campaign_status"] == "stopped"
+
+
+def test_run_campaign_supervisor_loop_writes_summary_on_completion(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign-summary.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="codex",
+            worker_provider_policy="codex",
+        )
+        campaign_id = campaign.id
+        for task in session.exec(
+            select(CampaignTask).where(CampaignTask.campaign_id == campaign.id)
+        ).all():
+            task.status = "completed"
+            session.add(task)
+        session.commit()
+
+    refreshed_campaign, summary = run_campaign_supervisor_loop(
+        engine,
+        config,
+        campaign_id=campaign_id,  # type: ignore[arg-type]
+    )
+
+    assert refreshed_campaign.status == "completed"
+    assert summary.stop_reason == "queue_drained"
+    assert summary.summary_path.endswith("supervisor-summary.json")
 
 
 def test_run_campaign_supervisor_loop_runs_orchestrator_and_tasks(tmp_path):
