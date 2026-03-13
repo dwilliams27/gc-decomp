@@ -322,8 +322,8 @@ def test_campaign_status_and_result_formatters(tmp_path):
             session,
             config,
             source_file="melee/test/testfile.c",
-            orchestrator_provider="claude",
-            worker_provider_policy="mixed",
+            orchestrator_provider="codex",
+            worker_provider_policy="codex",
         )
         task = session.exec(
             select(CampaignTask)
@@ -531,8 +531,8 @@ def test_run_campaign_supervisor_loop_runs_orchestrator_and_tasks(tmp_path):
             session,
             config,
             source_file="melee/test/testfile.c",
-            orchestrator_provider="claude",
-            worker_provider_policy="mixed",
+            orchestrator_provider="codex",
+            worker_provider_policy="codex",
         )
 
     with (

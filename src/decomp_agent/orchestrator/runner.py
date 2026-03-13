@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -44,6 +45,14 @@ def _get_file_lock(source_file: str) -> threading.Lock:
         if source_file not in _file_locks:
             _file_locks[source_file] = threading.Lock()
         return _file_locks[source_file]
+
+
+def _uses_isolated_worker(config: Config) -> bool:
+    """Return whether the active provider edits an isolated checkout instead of the main repo."""
+    return (
+        _provider_enabled(config.codex_code)
+        and getattr(config.codex_code, "isolated_worker_enabled", False) is True
+    )
 
 
 def _auto_commit_match(
@@ -262,12 +271,18 @@ def run_function(
     # write_function corruption and save/restore race conditions.
     result: AgentResult | None = None
     saved_source: bytes | None = None
+    isolated_worker = _uses_isolated_worker(config)
+    src_path = config.melee.resolve_source_path(source_file)
     file_lock = _get_file_lock(source_file)
     try:
-        with file_lock:
+        lock_context = file_lock if not isolated_worker else nullcontext()
+        with lock_context:
             # Save source file before agent runs for rollback on failure
-            src_path = config.melee.resolve_source_path(source_file)
-            saved_source = src_path.read_bytes() if src_path.exists() else None
+            saved_source = (
+                src_path.read_bytes()
+                if not isolated_worker and src_path.exists()
+                else None
+            )
 
             # Capture baseline match percentages for collateral damage guard
             baseline: dict[str, float] | None = None
@@ -352,17 +367,28 @@ def run_function(
                     termination_reason="agent_crash",
                 )
 
-            result = _promote_isolated_patch(
-                result,
-                func_name,
-                source_file,
-                config,
-                baseline,
-                bound_log,
-            )
+            if isolated_worker and result.termination_reason == "isolated_patch_ready":
+                with file_lock:
+                    result = _promote_isolated_patch(
+                        result,
+                        func_name,
+                        source_file,
+                        config,
+                        baseline,
+                        bound_log,
+                    )
+            else:
+                result = _promote_isolated_patch(
+                    result,
+                    func_name,
+                    source_file,
+                    config,
+                    baseline,
+                    bound_log,
+                )
 
             # Collateral damage check: reject match if other functions got worse
-            if result.matched and baseline is not None:
+            if result.matched and baseline is not None and not isolated_worker:
                 try:
                     final_result = check_match(source_file, config)
                     if final_result.success:

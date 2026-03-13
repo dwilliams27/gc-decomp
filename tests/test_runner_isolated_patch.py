@@ -138,3 +138,55 @@ def test_run_function_promotes_isolated_patch(tmp_path):
 
     assert loaded.status == "matched"
     assert attempt.patch_path == str(patch_path)
+
+
+def test_run_function_does_not_revert_main_source_for_unmatched_isolated_worker(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.codex_code.enabled = True
+    config.codex_code.isolated_worker_enabled = True
+
+    engine = get_engine(":memory:")
+    functions = _seed_db(engine, config)
+    target_func = next(f for f in functions if f.name == "simple_add")
+
+    src_path = repo_path / "src" / "melee" / "test" / "testfile.c"
+
+    baseline = CompileResult(
+        object_name="melee/test/testfile.c",
+        success=True,
+        functions=[
+            FunctionMatch(name="simple_init", fuzzy_match_percent=55.0, size=40),
+            FunctionMatch(name="simple_add", fuzzy_match_percent=60.0, size=8),
+            FunctionMatch(name="simple_loop", fuzzy_match_percent=50.0, size=48),
+        ],
+    )
+
+    def fake_isolated_run(*args, **kwargs):
+        current = src_path.read_text(encoding="utf-8")
+        src_path.write_text(
+            current.replace("return a + b;", "return a + b + 1;"),
+            encoding="utf-8",
+        )
+        return AgentResult(
+            matched=False,
+            best_match_percent=88.0,
+            termination_reason="model_stopped",
+            model="codex-code-headless",
+        )
+
+    with (
+        patch(
+            "decomp_agent.orchestrator.codex_headless.run_codex_headless",
+            side_effect=fake_isolated_run,
+        ),
+        patch(
+            "decomp_agent.orchestrator.runner.check_match",
+            return_value=baseline,
+        ),
+        patch("decomp_agent.orchestrator.runner._auto_commit_match"),
+    ):
+        result = run_function(target_func, config, engine)
+
+    assert result.matched is False
+    assert "return a + b + 1;" in src_path.read_text(encoding="utf-8")

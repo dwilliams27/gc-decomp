@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import Engine
 from sqlmodel import Session, select
@@ -261,11 +262,34 @@ def run_campaign_task_once(
         if task is None:
             return campaign, None, None
         mark_campaign_task_running(session, task)
-        function_id = task.function_id
-        campaign_worker_provider_policy = campaign.worker_provider_policy
-        campaign_orchestrator_provider = campaign.orchestrator_provider
-        task_provider = task.provider
         task_id = task.id
+
+    return _run_claimed_campaign_task(
+        engine,
+        config,
+        campaign_id=campaign_id,
+        task_id=task_id,
+    )
+
+
+def _run_claimed_campaign_task(
+    engine: Engine,
+    config: Config,
+    *,
+    campaign_id: int,
+    task_id: int,
+) -> tuple[Campaign, CampaignTask, AgentResult]:
+    """Execute a specific campaign task that is already marked running."""
+    from decomp_agent.models.db import Function
+    from decomp_agent.orchestrator.runner import run_function
+
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        task = get_campaign_task(session, task_id)
+        if campaign is None or task is None or task.campaign_id != campaign_id:
+            raise ValueError(f"Campaign task #{task_id} not found in campaign #{campaign_id}")
+        function_id = task.function_id
+        provider = _resolve_task_provider(campaign, task)
 
     if function_id is None:
         raise ValueError(
@@ -273,18 +297,7 @@ def run_campaign_task_once(
             "is not implemented yet"
         )
 
-    provider = (
-        task_provider
-        or (
-            campaign_orchestrator_provider
-            if campaign_worker_provider_policy == "mixed"
-            else campaign_worker_provider_policy
-        )
-    )
     provider_config = _config_for_provider(config, provider)
-
-    from decomp_agent.models.db import Function
-    from decomp_agent.orchestrator.runner import run_function
 
     with Session(engine) as session:
         function = session.get(Function, function_id)
@@ -321,6 +334,40 @@ def run_campaign_task_once(
         session.refresh(refreshed_campaign)
         session.refresh(refreshed_task)
         return refreshed_campaign, refreshed_task, result
+
+
+def _claim_campaign_tasks(
+    engine: Engine,
+    *,
+    campaign_id: int,
+    dispatch_budget: int,
+) -> tuple[Campaign, list[int]]:
+    """Claim the next batch of pending tasks for dispatch.
+
+    Only isolated Codex workers are dispatched in parallel today. Any task that
+    resolves to a shared provider is claimed alone to preserve correctness.
+    """
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        pending_tasks = list_campaign_tasks(session, campaign_id)
+        claimed: list[int] = []
+        for task in pending_tasks:
+            if task.status != "pending":
+                continue
+            provider = _resolve_task_provider(campaign, task)
+            isolated_safe = provider == "codex"
+            if claimed and not isolated_safe:
+                break
+            mark_campaign_task_running(session, task)
+            claimed.append(task.id)
+            if not isolated_safe:
+                break
+            if len(claimed) >= dispatch_budget:
+                break
+        session.refresh(campaign)
+        return campaign, claimed
 
 
 def run_campaign_loop(
@@ -630,20 +677,34 @@ def run_campaign_supervisor_loop(
             orchestrator_sessions += orchestrator_summary.sessions_run
 
         dispatch_budget = max_tasks_per_cycle or max(config.campaign.max_active_workers, 1)
-        dispatched_this_cycle = 0
-        while dispatched_this_cycle < dispatch_budget:
-            if datetime.now(timezone.utc) >= timeout_deadline:
-                timed_out = True
-                break
-            _campaign, task, _result = run_campaign_task_once(
-                engine,
-                config,
-                campaign_id=campaign_id,
-            )
-            if task is None:
-                break
-            tasks_run += 1
-            dispatched_this_cycle += 1
+        _campaign, claimed_task_ids = _claim_campaign_tasks(
+            engine,
+            campaign_id=campaign_id,
+            dispatch_budget=dispatch_budget,
+        )
+        if claimed_task_ids:
+            if len(claimed_task_ids) == 1:
+                _run_claimed_campaign_task(
+                    engine,
+                    config,
+                    campaign_id=campaign_id,
+                    task_id=claimed_task_ids[0],
+                )
+            else:
+                with ThreadPoolExecutor(max_workers=len(claimed_task_ids)) as executor:
+                    futures = [
+                        executor.submit(
+                            _run_claimed_campaign_task,
+                            engine,
+                            config,
+                            campaign_id=campaign_id,
+                            task_id=task_id,
+                        )
+                        for task_id in claimed_task_ids
+                    ]
+                    for future in futures:
+                        future.result()
+            tasks_run += len(claimed_task_ids)
 
         cycles_run += 1
         if timed_out:
