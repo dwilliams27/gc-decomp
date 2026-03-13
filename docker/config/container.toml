@@ -8,5 +8,8 @@ max_iterations = 30
 [docker]
 enabled = false  # We're already inside the build container
 
+[orchestration]
+db_path = "/workspace/gc-decomp/decomp.db"
+
 [ghidra]
 enabled = false

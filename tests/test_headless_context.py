@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 from decomp_agent.config import Config, MeleeConfig
 from decomp_agent.orchestrator.headless_context import (
+    build_campaign_orchestrator_prompt,
     build_headless_task_prompt,
+    load_campaign_orchestrator_system_prompt,
     load_headless_system_prompt,
 )
 from decomp_agent.tools.build import CompileResult, FunctionMatch
@@ -22,6 +24,13 @@ def test_load_headless_system_prompt_contains_tool_guidance():
     prompt = load_headless_system_prompt()
     assert "write_function" in prompt
     assert "mark_complete" in prompt
+
+
+def test_load_campaign_orchestrator_system_prompt_is_manager_focused():
+    prompt = load_campaign_orchestrator_system_prompt()
+    assert "manage worker agents" in prompt
+    assert "campaign MCP tools" in prompt
+    assert "Do not use write_function" in prompt
 
 
 def test_build_headless_task_prompt_file_mode_includes_status(tmp_path):
@@ -94,3 +103,27 @@ def test_build_headless_task_prompt_cold_start_includes_relentless_guidance(tmp_
     assert "Be relentless" in prompt
     assert "many turns" in prompt
     assert "Do not stop after a first draft" in prompt
+
+
+def test_build_campaign_orchestrator_prompt_mentions_campaign_tools(tmp_path):
+    config = _make_config(tmp_path)
+
+    with patch(
+        "decomp_agent.tools.build.check_match",
+        return_value=CompileResult(
+            object_name="melee/test/testfile.c",
+            success=True,
+            functions=[],
+        ),
+    ):
+        prompt = build_campaign_orchestrator_prompt(
+            7,
+            "melee/test/testfile.c",
+            config,
+        )
+
+    assert "campaign #7" in prompt
+    assert "no true internet browsing access" in prompt
+    assert "campaign_get_status" in prompt
+    assert "campaign_run_next_task" in prompt
+    assert "campaign_launch_worker" in prompt

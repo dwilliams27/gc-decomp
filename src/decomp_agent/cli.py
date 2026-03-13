@@ -505,6 +505,109 @@ def campaign_run(ctx: click.Context, campaign_id: int, max_tasks: int | None) ->
         console.print("  Stop reason:    max task limit reached")
 
 
+@campaign_group.command("orchestrate-once")
+@click.argument("campaign_id", type=int)
+@click.pass_context
+def campaign_orchestrate_once(ctx: click.Context, campaign_id: int) -> None:
+    """Run one orchestrator session for a campaign using its configured provider."""
+    config, engine = _load(ctx)
+
+    from decomp_agent.orchestrator.campaign_orchestrator import (
+        run_campaign_orchestrator_once,
+    )
+
+    campaign, result = run_campaign_orchestrator_once(
+        engine,
+        config,
+        campaign_id=campaign_id,
+    )
+
+    console.print(
+        f"Ran orchestrator for campaign [bold]#{campaign.id}[/bold] "
+        f"via {campaign.orchestrator_provider}"
+    )
+    console.print(f"  Session:       {result.session_id or '(none)'}")
+    console.print(f"  Reason:        {result.termination_reason or '(none)'}")
+    console.print(f"  Iterations:    {result.iterations}")
+    console.print(f"  Tokens:        {result.total_tokens:,}")
+    console.print(f"  Elapsed:       {result.elapsed_seconds:.1f}s")
+    if result.error:
+        console.print(f"  Error:         {result.error}")
+
+
+@campaign_group.command("orchestrate")
+@click.argument("campaign_id", type=int)
+@click.option("--max-sessions", type=int, default=None, help="Stop after this many orchestrator sessions")
+@click.pass_context
+def campaign_orchestrate(
+    ctx: click.Context,
+    campaign_id: int,
+    max_sessions: int | None,
+) -> None:
+    """Run orchestrator sessions until work is dispatched, timeout hits, or a limit is reached."""
+    config, engine = _load(ctx)
+
+    from decomp_agent.orchestrator.campaign_orchestrator import (
+        run_campaign_orchestrator_loop,
+    )
+
+    campaign, summary = run_campaign_orchestrator_loop(
+        engine,
+        config,
+        campaign_id=campaign_id,
+        max_sessions=max_sessions,
+    )
+
+    console.print(f"Campaign [bold]#{campaign.id}[/bold] orchestrator summary")
+    console.print(f"  Provider:      {campaign.orchestrator_provider}")
+    console.print(f"  Sessions:      {summary.sessions_run}")
+    console.print(f"  Completed:     {summary.completed_tasks}")
+    console.print(f"  Failed:        {summary.failed_tasks}")
+    console.print(f"  Running:       {summary.running_tasks}")
+    console.print(f"  Pending:       {summary.pending_tasks}")
+    console.print(f"  Timed out:     {'yes' if summary.timed_out else 'no'}")
+    if summary.stopped_by_limit:
+        console.print("  Stop reason:   max session limit reached")
+
+
+@campaign_group.command("supervise")
+@click.argument("campaign_id", type=int)
+@click.option("--max-cycles", type=int, default=None, help="Stop after this many supervisor cycles")
+@click.option("--max-tasks-per-cycle", type=int, default=None, help="Max worker tasks to dispatch per supervisor cycle")
+@click.pass_context
+def campaign_supervise(
+    ctx: click.Context,
+    campaign_id: int,
+    max_cycles: int | None,
+    max_tasks_per_cycle: int | None,
+) -> None:
+    """Alternate orchestrator planning and worker execution for a campaign."""
+    config, engine = _load(ctx)
+
+    from decomp_agent.orchestrator.campaign import run_campaign_supervisor_loop
+
+    campaign, summary = run_campaign_supervisor_loop(
+        engine,
+        config,
+        campaign_id=campaign_id,
+        max_cycles=max_cycles,
+        max_tasks_per_cycle=max_tasks_per_cycle,
+    )
+
+    console.print(f"Campaign [bold]#{campaign.id}[/bold] supervisor summary")
+    console.print(f"  Status:          {campaign.status}")
+    console.print(f"  Cycles:          {summary.cycles_run}")
+    console.print(f"  Orchestrator:    {summary.orchestrator_sessions}")
+    console.print(f"  Tasks run:       {summary.tasks_run}")
+    console.print(f"  Completed:       {summary.completed_tasks}")
+    console.print(f"  Failed:          {summary.failed_tasks}")
+    console.print(f"  Running:         {summary.running_tasks}")
+    console.print(f"  Pending:         {summary.pending_tasks}")
+    console.print(f"  Timed out:       {'yes' if summary.timed_out else 'no'}")
+    if summary.stopped_by_limit:
+        console.print("  Stop reason:     max cycle limit reached")
+
+
 @campaign_group.command("list")
 @click.pass_context
 def campaign_list(ctx: click.Context) -> None:

@@ -68,6 +68,8 @@ def build_worker_container_run_args(
     config: Config,
 ) -> list[str]:
     """Build the docker run command for a single isolated Codex worker."""
+    repo_root = Path(__file__).parents[3]
+    workspace_repo_root = Path("/workspace/gc-decomp")
     args = [
         "docker",
         "run",
@@ -83,6 +85,8 @@ def build_worker_container_run_args(
         f"DECOMP_CONFIG={spec.decomp_config_path}",
         "-e",
         f"CODEX_MODEL={config.agent.model}",
+        "-e",
+        f"PYTHONPATH={workspace_repo_root / 'src'}",
     ]
 
     if config.codex_code.http_proxy:
@@ -109,6 +113,8 @@ def build_worker_container_run_args(
         f"{spec.output_dir}:{spec.output_dir}:rw",
         "-v",
         f"{spec.decomp_config_path}:{spec.decomp_config_path}:ro",
+        "-v",
+        f"{repo_root}:{workspace_repo_root}:rw",
         config.codex_code.image,
         "sleep",
         "infinity",

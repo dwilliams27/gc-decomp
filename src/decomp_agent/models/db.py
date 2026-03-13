@@ -246,6 +246,11 @@ def get_campaign(session: Session, campaign_id: int) -> Campaign | None:
     return session.get(Campaign, campaign_id)
 
 
+def get_campaign_task(session: Session, task_id: int) -> CampaignTask | None:
+    """Return one campaign task by id."""
+    return session.get(CampaignTask, task_id)
+
+
 def create_campaign_task(
     session: Session,
     *,
@@ -260,6 +265,18 @@ def create_campaign_task(
 ) -> CampaignTask:
     """Create and persist one campaign task."""
     now = datetime.now(timezone.utc)
+    existing_stmt = select(CampaignTask).where(
+        CampaignTask.campaign_id == campaign_id,
+        CampaignTask.source_file == source_file,
+        CampaignTask.function_name == function_name,
+        CampaignTask.provider == provider,
+        CampaignTask.scope == scope,
+        CampaignTask.status.in_(["pending", "running"]),  # type: ignore[attr-defined]
+    )
+    existing = session.exec(existing_stmt).first()
+    if existing is not None:
+        return existing
+
     task = CampaignTask(
         campaign_id=campaign_id,
         function_id=function_id,

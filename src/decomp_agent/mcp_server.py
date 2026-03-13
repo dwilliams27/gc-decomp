@@ -9,12 +9,22 @@ Run standalone:  python -m decomp_agent.mcp_server
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
 from decomp_agent.config import Config, load_config
+from decomp_agent.models.db import get_engine
+from decomp_agent.orchestrator.campaign import (
+    create_campaign_worker_task,
+    format_campaign_status,
+    format_campaign_task_result,
+    run_campaign_next_task_summary,
+    retry_campaign_task,
+)
 from decomp_agent.tools.registry import (
     _check_inline_asm,
     _handle_compile_and_check,
@@ -30,6 +40,11 @@ from decomp_agent.tools.registry import (
 )
 from decomp_agent.tools.schemas import (
     CompileAndCheckParams,
+    CampaignGetStatusParams,
+    CampaignGetTaskResultParams,
+    CampaignLaunchWorkerParams,
+    CampaignRunNextTaskParams,
+    CampaignRetryTaskParams,
     GetContextParams,
     GetDiffParams,
     GetGhidraDecompilationParams,
@@ -43,6 +58,8 @@ from decomp_agent.tools.schemas import (
 mcp = FastMCP("decomp-tools")
 
 _config: Config | None = None
+_engine = None
+_campaign_log_path = Path("/tmp/decomp-campaign-mcp.log")
 
 
 def _get_config() -> Config:
@@ -52,6 +69,26 @@ def _get_config() -> Config:
         config_path = os.environ.get("DECOMP_CONFIG")
         _config = load_config(Path(config_path) if config_path else None)
     return _config
+
+
+def _get_engine():
+    global _engine
+    if _engine is None:
+        _engine = get_engine(_get_config().orchestration.db_path)
+    return _engine
+
+
+def _log_campaign_tool(tool_name: str, payload: dict[str, object]) -> None:
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool_name,
+        "payload": payload,
+    }
+    try:
+        with _campaign_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +209,126 @@ def mark_complete(function_name: str, source_file: str) -> str:
         function_name=function_name, source_file=source_file
     )
     return _handle_mark_complete(params, _get_config())
+
+
+@mcp.tool()
+def campaign_get_status(campaign_id: int) -> str:
+    """Get the current status of a file campaign, including queued, running,
+    completed, and failed worker tasks."""
+    params = CampaignGetStatusParams(campaign_id=campaign_id)
+    _log_campaign_tool("campaign_get_status", {"campaign_id": params.campaign_id})
+    return format_campaign_status(_get_engine(), params.campaign_id)
+
+
+@mcp.tool()
+def campaign_get_task_result(campaign_id: int, task_id: int) -> str:
+    """Get the detailed result of one campaign task, including match percent,
+    artifacts, and any recorded error."""
+    params = CampaignGetTaskResultParams(campaign_id=campaign_id, task_id=task_id)
+    _log_campaign_tool(
+        "campaign_get_task_result",
+        {"campaign_id": params.campaign_id, "task_id": params.task_id},
+    )
+    return format_campaign_task_result(_get_engine(), params.campaign_id, params.task_id)
+
+
+@mcp.tool()
+def campaign_launch_worker(
+    campaign_id: int,
+    function_name: str,
+    provider: str | None = None,
+    instructions: str | None = None,
+    priority: int | None = None,
+    scope: str | None = None,
+) -> str:
+    """Queue a new worker task for a function within a campaign. Use this to
+    dispatch a fresh attempt with optional provider and guidance."""
+    params = CampaignLaunchWorkerParams(
+        campaign_id=campaign_id,
+        function_name=function_name,
+        provider=provider,
+        instructions=instructions,
+        priority=priority,
+        scope=scope,
+    )
+    _log_campaign_tool(
+        "campaign_launch_worker",
+        {
+            "campaign_id": params.campaign_id,
+            "function_name": params.function_name,
+            "provider": params.provider or "",
+            "priority": params.priority,
+            "scope": params.scope or "function",
+            "instructions": params.instructions or "",
+        },
+    )
+    task = create_campaign_worker_task(
+        _get_engine(),
+        campaign_id=params.campaign_id,
+        function_name=params.function_name,
+        provider=params.provider or "",
+        instructions=params.instructions or "",
+        priority=params.priority,
+        scope=params.scope or "function",
+    )
+    return (
+        f"Queued campaign task #{task.id} for {task.function_name} "
+        f"(provider={task.provider or 'default'}, priority={task.priority}, scope={task.scope})"
+    )
+
+
+@mcp.tool()
+def campaign_retry_task(
+    campaign_id: int,
+    task_id: int,
+    provider: str | None = None,
+    instructions: str | None = None,
+    priority: int | None = None,
+) -> str:
+    """Queue a follow-up attempt for a previous campaign task, preserving the
+    target function and optionally adding explicit new guidance."""
+    params = CampaignRetryTaskParams(
+        campaign_id=campaign_id,
+        task_id=task_id,
+        provider=provider,
+        instructions=instructions,
+        priority=priority,
+    )
+    _log_campaign_tool(
+        "campaign_retry_task",
+        {
+            "campaign_id": params.campaign_id,
+            "task_id": params.task_id,
+            "provider": params.provider or "",
+            "priority": params.priority,
+            "instructions": params.instructions or "",
+        },
+    )
+    task = retry_campaign_task(
+        _get_engine(),
+        campaign_id=params.campaign_id,
+        task_id=params.task_id,
+        provider=params.provider or "",
+        instructions=params.instructions or "",
+        priority=params.priority,
+    )
+    return (
+        f"Queued retry task #{task.id} for {task.function_name or task.scope} "
+        f"(provider={task.provider or 'default'}, priority={task.priority})"
+    )
+
+
+@mcp.tool()
+def campaign_run_next_task(campaign_id: int) -> str:
+    """Run the highest-priority pending campaign task through the normal worker
+    pipeline and return the result summary."""
+    params = CampaignRunNextTaskParams(campaign_id=campaign_id)
+    _log_campaign_tool("campaign_run_next_task", {"campaign_id": params.campaign_id})
+    return run_campaign_next_task_summary(
+        _get_engine(),
+        _get_config(),
+        campaign_id=params.campaign_id,
+    )
 
 
 if __name__ == "__main__":

@@ -148,3 +148,69 @@ class MarkCompleteParams(BaseModel):
     source_file: str = Field(
         description='Object name from configure.py, e.g. "melee/lb/lbcommand.c"'
     )
+
+
+class CampaignGetStatusParams(BaseModel):
+    """Get the current status of a file campaign, including queued, running,
+    completed, and failed worker tasks."""
+
+    campaign_id: int = Field(description="Campaign id to inspect")
+
+
+class CampaignGetTaskResultParams(BaseModel):
+    """Get the detailed result of one campaign task, including match percent,
+    artifacts, and any recorded error."""
+
+    campaign_id: int = Field(description="Campaign id containing the task")
+    task_id: int = Field(description="Campaign task id to inspect")
+
+
+class CampaignLaunchWorkerParams(BaseModel):
+    """Queue a new worker task for a function within a campaign. Use this to
+    dispatch a fresh attempt with optional provider and guidance."""
+
+    campaign_id: int = Field(description="Campaign id to add the worker to")
+    function_name: str = Field(description="Function name to target")
+    provider: str | None = Field(
+        default=None,
+        description='Optional provider override: "claude" or "codex"',
+    )
+    instructions: str | None = Field(
+        default=None,
+        description="Optional extra guidance for this worker",
+    )
+    priority: int | None = Field(
+        default=None,
+        description="Optional integer priority override; higher runs first",
+    )
+    scope: str | None = Field(
+        default=None,
+        description='Optional task scope: "function", "file_repair", or "shared_fix"',
+    )
+
+
+class CampaignRetryTaskParams(BaseModel):
+    """Queue a follow-up attempt for a previous campaign task, preserving the
+    target function and optionally adding explicit new guidance."""
+
+    campaign_id: int = Field(description="Campaign id containing the task")
+    task_id: int = Field(description="Previous campaign task id to retry")
+    provider: str | None = Field(
+        default=None,
+        description='Optional provider override: "claude" or "codex"',
+    )
+    instructions: str | None = Field(
+        default=None,
+        description="Optional follow-up guidance for the retry",
+    )
+    priority: int | None = Field(
+        default=None,
+        description="Optional integer priority override; higher runs first",
+    )
+
+
+class CampaignRunNextTaskParams(BaseModel):
+    """Run the highest-priority pending campaign task through the normal worker
+    pipeline and return the result summary."""
+
+    campaign_id: int = Field(description="Campaign id to advance")

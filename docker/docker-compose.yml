@@ -20,10 +20,15 @@ services:
       DECOMP_CONFIG: /app/config/container.toml
       CODEX_AUTH_SEED: /seed/codex/auth.json
       MAX_MCP_OUTPUT_TOKENS: "50000"
+      PYTHONPATH: /workspace/gc-decomp/src
     volumes:
       - ${MELEE_REPO_PATH}:${MELEE_REPO_PATH}:rw
       - ${HOME}/.claude:/home/decomp/.claude:rw
       - ${HOME}/.codex/auth.json:/seed/codex/auth.json:ro
+      - ..:/workspace/gc-decomp:rw
+      - ../docker/mcp.json:/app/mcp.json:ro
+      - ../docker/system-prompt.md:/app/system-prompt.md:ro
+      - ../docker/config/container.toml:/app/config/container.toml:ro
     entrypoint: ["/app/worker-entrypoint.sh"]
     command: ["sleep", "infinity"]
     mem_limit: 8g

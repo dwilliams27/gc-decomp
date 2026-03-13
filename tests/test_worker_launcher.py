@@ -107,8 +107,10 @@ def test_build_worker_container_run_args_includes_mounts_and_env(tmp_path):
     assert "CLAUDE_CODE_OAUTH_TOKEN=test-token" in joined
     assert "HTTP_PROXY=http://proxy:3128" in joined
     assert "HTTPS_PROXY=http://proxy:3128" in joined
+    assert "PYTHONPATH=/workspace/gc-decomp/src" in joined
     assert str(spec.melee_worktree.worktree_path) in joined
     assert str(spec.decomp_config_path) in joined
+    assert "/workspace/gc-decomp" in joined
     assert "decomp-agent-worker:test" in args
 
 

@@ -18,10 +18,43 @@ RELENTLESSNESS_BLOCK = (
     "external blocker, or have exhausted every realistic avenue you can find."
 )
 
+CAMPAIGN_ORCHESTRATOR_SYSTEM_PROMPT = """You are a decompilation campaign orchestrator.
+
+Your job is to manage worker agents, not to directly write code yourself.
+
+Use the campaign MCP tools to:
+- inspect campaign status
+- inspect prior worker outcomes
+- queue new workers with targeted instructions
+- queue follow-up retries with new guidance
+- run queued tasks through the normal worker pipeline
+
+Important constraints:
+- No true internet or web browsing is available.
+- Do not rely on external documentation or online search.
+- Work only from local repo context, build results, worker results, artifacts, and campaign tools.
+- Assume the run may continue unattended for a long time.
+
+Behavior rules:
+- Be relentless and persistent.
+- Keep the queue moving.
+- If a function is close, inspect the prior attempt and retry with sharper guidance.
+- If several functions are promising, queue multiple targeted attempts.
+- If a header or shared type issue seems likely, say so explicitly in worker instructions.
+- Do not stop after a weak first pass.
+- Prefer concrete worker instructions over vague advice.
+- Do not use write_function, get_diff, or source editing tools yourself unless the campaign explicitly requires direct orchestrator coding in a future mode.
+"""
+
 
 def load_headless_system_prompt() -> str:
     """Load the shared decomp system prompt used by headless agents."""
     return SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def load_campaign_orchestrator_system_prompt() -> str:
+    """Return the dedicated system prompt for campaign manager agents."""
+    return CAMPAIGN_ORCHESTRATOR_SYSTEM_PROMPT
 
 
 def build_file_status(source_file: str, config: Config) -> str:
@@ -150,4 +183,43 @@ def build_headless_task_prompt(
         f"extern references section below — it tells you which headers "
         f"to include or what extern declarations to add."
         f"{m2c_seed}"
+    )
+
+
+def build_campaign_orchestrator_prompt(
+    campaign_id: int,
+    source_file: str,
+    config: Config,
+) -> str:
+    """Build the shared prompt for a file-campaign orchestrator agent."""
+    file_status = build_file_status(source_file, config)
+    return (
+        f"You are the orchestrator for campaign #{campaign_id} targeting "
+        f"{source_file}.\n\n"
+        "Your role is to manage a fleet of worker agents to match as many "
+        "functions in this file as possible. You are not here to directly "
+        "edit code yourself. Use the campaign tools to inspect status, inspect "
+        "worker results, queue new workers with explicit instructions, queue "
+        "retries with new angles of attack, and run queued tasks.\n\n"
+        "Important constraints:\n"
+        "- This environment has no true internet browsing access.\n"
+        "- Do not rely on web search, docs sites, or any external service.\n"
+        "- Use only local repo context, compile results, diffs, worker artifacts, "
+        "and the campaign tools.\n"
+        "- Assume this may run unattended overnight.\n\n"
+        f"{RELENTLESSNESS_BLOCK}\n\n"
+        "Campaign strategy:\n"
+        "- Your first action must be calling campaign_get_status.\n"
+        "- After reading status, if there are pending tasks and no running tasks, your next action must be campaign_run_next_task.\n"
+        "- If a worker got close but stalled, inspect it with campaign_get_task_result.\n"
+        "- Queue retries with targeted follow-up instructions.\n"
+        "- Use campaign_launch_worker for fresh experiments on specific functions.\n"
+        "- Use campaign_run_next_task repeatedly to keep the worker queue moving.\n"
+        "- Prefer parallel exploration across promising functions, but keep the "
+        "queue coherent and focused.\n"
+        "- If you suspect headers or shared types are the blocker, explicitly "
+        "say so in worker instructions.\n"
+        "- Do not give up after one weak attempt. Keep redirecting workers until "
+        "the queue is exhausted or there is a real blocker.\n\n"
+        f"Current file status:\n{file_status}\n"
     )
