@@ -75,3 +75,22 @@ def test_build_headless_task_prompt_warm_start_includes_diff(tmp_path):
     assert "Current diff (target vs compiled)" in prompt
     assert "diff body" in prompt
     assert "VERY close" in prompt
+    assert "Be relentless" in prompt
+
+
+def test_build_headless_task_prompt_cold_start_includes_relentless_guidance(tmp_path):
+    config = _make_config(tmp_path)
+
+    with patch(
+        "decomp_agent.orchestrator.headless_context.build_prefetched_m2c_block",
+        return_value="\n\nm2c seed",
+    ):
+        prompt = build_headless_task_prompt(
+            "target_fn",
+            "melee/test/testfile.c",
+            config,
+        )
+
+    assert "Be relentless" in prompt
+    assert "many turns" in prompt
+    assert "Do not stop after a first draft" in prompt

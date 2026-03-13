@@ -84,14 +84,20 @@ docker exec docker-worker-1 bash -c "cd /Users/dwilliams/proj/melee-fork/melee &
 The `--dtk`, `--compilers`, `--wrapper`, and `--sjiswrap` flags prevent download rules from being generated, so the container doesn't need network access. Without these flags, `build.ninja` will contain `download_tool` rules that fail because the container has no internet.
 
 The Docker container (`docker-worker-1`) has Linux build tools at:
-- `/usr/local/bin/dtk` — decomp-toolkit (must be provisioned separately from host dtk)
+- `/usr/local/bin/dtk` — decomp-toolkit (baked into the worker image)
 - `build/tools/wibo` — Windows emulator (runs mwcceppc.exe)
 - `build/tools/sjiswrap.exe` — shift-JIS wrapper (runs under wibo)
 - `build/compilers/` — Metrowerks CodeWarrior compilers
 
 When `build.ninja` needs regeneration, `build.py` auto-passes `--dtk /usr/local/bin/dtk --compilers build/compilers --sjiswrap build/tools/sjiswrap.exe --wrapper build/tools/wibo` to `configure.py` inside Docker.
 
-If the container's dtk is missing or broken, provision it:
+If the container's dtk is missing or broken, rebuild the worker image first:
+```bash
+docker compose -f docker/docker-compose.yml build worker
+docker compose -f docker/docker-compose.yml up -d worker
+```
+
+If you need to hot-fix a currently running container without rebuilding, provision it manually:
 ```bash
 curl -L https://github.com/encounter/decomp-toolkit/releases/download/v1.8.3/dtk-linux-x86_64 -o /tmp/dtk-linux
 chmod +x /tmp/dtk-linux

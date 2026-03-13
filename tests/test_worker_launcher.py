@@ -8,6 +8,7 @@ from decomp_agent.orchestrator.worker_launcher import (
     cleanup_worker_spec,
     create_worker_spec,
     render_worker_container_config,
+    wait_for_worker_container,
 )
 from tests.fixtures.fake_repo import create_fake_repo
 
@@ -92,14 +93,73 @@ def test_build_worker_container_run_args_includes_mounts_and_env(tmp_path):
         function_name="simple_add",
     )
     try:
+        import os
+        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = "test-token"
         args = build_worker_container_run_args(spec, config)
     finally:
+        import os
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         cleanup_worker_spec(spec)
 
     joined = " ".join(str(arg) for arg in args)
     assert args[:4] == ["docker", "run", "-d", "--rm"]
+    assert "/app/worker-entrypoint.sh" in args
+    assert "CLAUDE_CODE_OAUTH_TOKEN=test-token" in joined
     assert "HTTP_PROXY=http://proxy:3128" in joined
     assert "HTTPS_PROXY=http://proxy:3128" in joined
     assert str(spec.melee_worktree.worktree_path) in joined
     assert str(spec.decomp_config_path) in joined
     assert "decomp-agent-worker:test" in args
+
+
+def test_wait_for_worker_container_polls_until_running(tmp_path, monkeypatch):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.codex_code.worker_root = tmp_path / "workers"
+
+    spec = create_worker_spec(
+        config,
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+
+    calls = {"count": 0}
+
+    def fake_run(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            return subprocess.CompletedProcess(args[0], 0, stdout="false\n", stderr="")
+        return subprocess.CompletedProcess(args[0], 0, stdout="true\n", stderr="")
+
+    try:
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        wait_for_worker_container(spec, timeout_seconds=1.0)
+        assert calls["count"] == 3
+    finally:
+        cleanup_worker_spec(spec)
+
+
+def test_create_worker_spec_reuses_existing_worker_root(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.codex_code.worker_root = tmp_path / "workers"
+
+    first = create_worker_spec(
+        config,
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    stale_marker = first.root_dir / "stale.txt"
+    stale_marker.write_text("stale", encoding="utf-8")
+
+    second = create_worker_spec(
+        config,
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    try:
+        assert second.root_dir == first.root_dir
+        assert second.melee_worktree.worktree_path.exists()
+        assert not stale_marker.exists()
+    finally:
+        cleanup_worker_spec(second)

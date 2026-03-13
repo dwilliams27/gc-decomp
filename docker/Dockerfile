@@ -1,16 +1,25 @@
 FROM melee-build:local AS base
 
+ARG DTK_VERSION=1.8.3
+
 # System deps + ninja + pip
 RUN apt-get update && apt-get install -y ninja-build curl python3-pip && \
     rm -rf /var/lib/apt/lists/*
+
+# Install pinned Linux dtk in the image so rebuilt workers remain compile-ready.
+RUN curl -fsSL \
+    "https://github.com/encounter/decomp-toolkit/releases/download/v${DTK_VERSION}/dtk-linux-x86_64" \
+    -o /usr/local/bin/dtk && \
+    chmod +x /usr/local/bin/dtk
 
 # Node.js for headless coding CLIs
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Pin Claude Code CLI version for reproducibility
-RUN npm install -g @anthropic-ai/claude-code@1
+# Pin Claude Code CLI version for reproducibility.
+# Keep this aligned with the authenticated host CLI when using first-party auth.
+RUN npm install -g @anthropic-ai/claude-code@2.1.72
 
 # Pin Codex CLI version for reproducibility
 RUN npm install -g @openai/codex@0.113.0

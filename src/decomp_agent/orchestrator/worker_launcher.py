@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +77,8 @@ def build_worker_container_run_args(
         spec.container_name,
         "--platform",
         "linux/amd64",
+        "--entrypoint",
+        "/app/worker-entrypoint.sh",
         "-e",
         f"DECOMP_CONFIG={spec.decomp_config_path}",
         "-e",
@@ -84,6 +89,9 @@ def build_worker_container_run_args(
         args.extend(["-e", f"HTTP_PROXY={config.codex_code.http_proxy}"])
     if config.codex_code.https_proxy:
         args.extend(["-e", f"HTTPS_PROXY={config.codex_code.https_proxy}"])
+    claude_oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if claude_oauth_token:
+        args.extend(["-e", f"CLAUDE_CODE_OAUTH_TOKEN={claude_oauth_token}"])
     if spec.auth_seed_path is not None:
         args.extend([
             "-e",
@@ -108,6 +116,57 @@ def build_worker_container_run_args(
     return args
 
 
+def wait_for_worker_container(
+    spec: WorkerSpec,
+    *,
+    timeout_seconds: float = 15.0,
+) -> None:
+    """Wait for a launched worker container to reach the running state."""
+    deadline = time.monotonic() + timeout_seconds
+    last_error = ""
+    while time.monotonic() < deadline:
+        proc = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "-f",
+                "{{.State.Running}}",
+                spec.container_name,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip() == "true":
+            return
+        stderr = proc.stderr.strip()
+        stdout = proc.stdout.strip()
+        if stderr or stdout:
+            last_error = stderr or stdout
+        time.sleep(0.25)
+    detail = f": {last_error}" if last_error else ""
+    raise RuntimeError(
+        f"Timed out waiting for worker container {spec.container_name} to start{detail}"
+    )
+
+
+def _reset_worker_root(
+    repo_root: Path,
+    root_dir: Path,
+    worktree_path: Path,
+) -> None:
+    """Remove stale worker state so a worker id can be reused safely."""
+    if worktree_path.exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if root_dir.exists():
+        shutil.rmtree(root_dir, ignore_errors=True)
+
+
 def create_worker_spec(
     config: Config,
     *,
@@ -127,6 +186,7 @@ def create_worker_spec(
     config_dir = root_dir / "config"
     decomp_config_path = config_dir / "container.toml"
 
+    _reset_worker_root(config.melee.repo_path, root_dir, worktree_path)
     root_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     codex_home_dir.mkdir(parents=True, exist_ok=True)

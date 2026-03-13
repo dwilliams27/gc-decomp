@@ -93,6 +93,49 @@ class Attempt(SQLModel, table=True):
     patch_path: str = ""
 
 
+class Campaign(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    source_file: str = Field(index=True)
+    status: str = "pending"  # pending | running | completed | failed | stopped
+    orchestrator_provider: str
+    worker_provider_policy: str
+    max_active_workers: int = 1
+    timeout_hours: int = 8
+    allow_shared_fix_workers: bool = False
+    allow_temporary_unmatched_regressions: bool = False
+    orchestrator_session_id: str = ""
+    staging_worktree_path: str = ""
+    artifact_dir: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CampaignTask(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    campaign_id: int = Field(foreign_key="campaign.id", index=True)
+    function_id: int | None = Field(default=None, foreign_key="function.id")
+    source_file: str
+    function_name: str | None = None
+    provider: str = ""
+    scope: str = "function"  # function | file_repair | shared_fix
+    status: str = "pending"  # pending | running | completed | failed | stopped
+    priority: int = 0
+    instructions: str = ""
+    worker_session_id: str = ""
+    worker_id: str = ""
+    best_match_pct: float = 0.0
+    termination_reason: str = ""
+    error: str = ""
+    artifact_dir: str = ""
+    patch_path: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 def get_engine(db_path: Path | str) -> Engine:
     """Create a SQLite engine and ensure all tables exist."""
     url = f"sqlite:///{db_path}" if str(db_path) != ":memory:" else "sqlite://"
@@ -124,6 +167,9 @@ def _migrate(engine: Engine) -> None:
         ("attempt", "before_match_pct", "REAL NOT NULL DEFAULT 0.0"),
         ("attempt", "artifact_dir", "TEXT NOT NULL DEFAULT ''"),
         ("attempt", "patch_path", "TEXT NOT NULL DEFAULT ''"),
+        ("campaigntask", "best_match_pct", "REAL NOT NULL DEFAULT 0.0"),
+        ("campaigntask", "termination_reason", "TEXT NOT NULL DEFAULT ''"),
+        ("campaigntask", "error", "TEXT NOT NULL DEFAULT ''"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -162,6 +208,278 @@ def get_next_candidate(
         stmt = stmt.order_by(Function.size, Function.address)  # type: ignore[arg-type]
 
     return session.exec(stmt).first()
+
+
+def create_campaign(
+    session: Session,
+    *,
+    source_file: str,
+    orchestrator_provider: str,
+    worker_provider_policy: str,
+    max_active_workers: int,
+    timeout_hours: int,
+    allow_shared_fix_workers: bool,
+    allow_temporary_unmatched_regressions: bool,
+) -> Campaign:
+    """Create and persist a new file campaign."""
+    now = datetime.now(timezone.utc)
+    campaign = Campaign(
+        source_file=source_file,
+        status="pending",
+        orchestrator_provider=orchestrator_provider,
+        worker_provider_policy=worker_provider_policy,
+        max_active_workers=max_active_workers,
+        timeout_hours=timeout_hours,
+        allow_shared_fix_workers=allow_shared_fix_workers,
+        allow_temporary_unmatched_regressions=allow_temporary_unmatched_regressions,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(campaign)
+    session.commit()
+    session.refresh(campaign)
+    return campaign
+
+
+def get_campaign(session: Session, campaign_id: int) -> Campaign | None:
+    """Return one campaign by id."""
+    return session.get(Campaign, campaign_id)
+
+
+def create_campaign_task(
+    session: Session,
+    *,
+    campaign_id: int,
+    source_file: str,
+    function_id: int | None = None,
+    function_name: str | None = None,
+    provider: str = "",
+    scope: str = "function",
+    priority: int = 0,
+    instructions: str = "",
+) -> CampaignTask:
+    """Create and persist one campaign task."""
+    now = datetime.now(timezone.utc)
+    task = CampaignTask(
+        campaign_id=campaign_id,
+        function_id=function_id,
+        source_file=source_file,
+        function_name=function_name,
+        provider=provider,
+        scope=scope,
+        priority=priority,
+        instructions=instructions,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+
+
+def list_campaign_tasks(
+    session: Session,
+    campaign_id: int,
+) -> list[CampaignTask]:
+    """List tasks for one campaign, highest priority first."""
+    stmt = (
+        select(CampaignTask)
+        .where(CampaignTask.campaign_id == campaign_id)
+        .order_by(CampaignTask.priority.desc(), CampaignTask.id.asc())  # type: ignore[arg-type]
+    )
+    return list(session.exec(stmt).all())
+
+
+def get_next_campaign_task(
+    session: Session,
+    campaign_id: int,
+) -> CampaignTask | None:
+    """Return the highest-priority pending task for a campaign."""
+    stmt = (
+        select(CampaignTask)
+        .where(
+            CampaignTask.campaign_id == campaign_id,
+            CampaignTask.status == "pending",
+        )
+        .order_by(CampaignTask.priority.desc(), CampaignTask.id.asc())  # type: ignore[arg-type]
+    )
+    return session.exec(stmt).first()
+
+
+def mark_campaign_running(
+    session: Session,
+    campaign: Campaign,
+) -> None:
+    """Mark a campaign as running and set started_at if needed."""
+    now = datetime.now(timezone.utc)
+    if campaign.started_at is None:
+        campaign.started_at = now
+    campaign.status = "running"
+    campaign.updated_at = now
+    session.add(campaign)
+    session.commit()
+
+
+def mark_campaign_completed(
+    session: Session,
+    campaign: Campaign,
+) -> None:
+    """Mark a campaign as completed."""
+    now = datetime.now(timezone.utc)
+    campaign.status = "completed"
+    campaign.completed_at = now
+    campaign.updated_at = now
+    session.add(campaign)
+    session.commit()
+
+
+def mark_campaign_stopped(
+    session: Session,
+    campaign: Campaign,
+) -> None:
+    """Mark a campaign as stopped without treating it as a failure."""
+    now = datetime.now(timezone.utc)
+    campaign.status = "stopped"
+    campaign.updated_at = now
+    session.add(campaign)
+    session.commit()
+
+
+def mark_campaign_task_running(
+    session: Session,
+    task: CampaignTask,
+) -> None:
+    """Mark a campaign task as running."""
+    now = datetime.now(timezone.utc)
+    task.status = "running"
+    task.started_at = now
+    task.updated_at = now
+    session.add(task)
+    session.commit()
+
+
+def requeue_running_campaign_tasks(
+    session: Session,
+    campaign_id: int,
+) -> int:
+    """Reset stuck running tasks back to pending.
+
+    Current campaign execution is single-threaded, so any leftover running task
+    is stale state from an interrupted process and can be safely re-queued.
+    """
+    now = datetime.now(timezone.utc)
+    tasks = list(
+        session.exec(
+            select(CampaignTask).where(
+                CampaignTask.campaign_id == campaign_id,
+                CampaignTask.status == "running",
+            )
+        ).all()
+    )
+    for task in tasks:
+        task.status = "pending"
+        task.updated_at = now
+        session.add(task)
+    session.commit()
+    return len(tasks)
+
+
+def fail_campaign_task(
+    session: Session,
+    task: CampaignTask,
+    *,
+    error: str,
+    termination_reason: str = "worker_error",
+) -> None:
+    """Persist an execution failure for a campaign task."""
+    now = datetime.now(timezone.utc)
+    task.status = "failed"
+    task.completed_at = now
+    task.updated_at = now
+    task.error = error
+    task.termination_reason = termination_reason
+    session.add(task)
+    session.commit()
+
+
+def complete_campaign_task(
+    session: Session,
+    task: CampaignTask,
+    result: AgentResult,
+) -> None:
+    """Persist the result of one campaign task."""
+    now = datetime.now(timezone.utc)
+    task.completed_at = now
+    task.updated_at = now
+    task.best_match_pct = result.best_match_percent
+    task.termination_reason = result.termination_reason
+    task.error = result.error or ""
+    task.worker_session_id = result.session_id
+    task.artifact_dir = result.artifact_dir
+    task.patch_path = result.patch_path
+    if result.matched:
+        task.status = "completed"
+    elif result.termination_reason in {"agent_crash", "api_error", "timeout"}:
+        task.status = "failed"
+    else:
+        task.status = "completed"
+    session.add(task)
+    session.commit()
+
+
+def seed_campaign_function_tasks(
+    session: Session,
+    *,
+    campaign_id: int,
+    source_file: str,
+    provider: str = "",
+) -> int:
+    """Seed one pending function task per unmatched function in a file.
+
+    Returns the number of new tasks created.
+    """
+    functions = session.exec(
+        select(Function)
+        .where(
+            Function.source_file == source_file,
+            Function.status.in_(["pending"]),  # type: ignore[attr-defined]
+            Function.current_match_pct < 100.0,
+        )
+        .order_by(Function.current_match_pct.desc(), Function.size.asc())  # type: ignore[arg-type, attr-defined]
+    ).all()
+
+    existing_function_ids = {
+        row[0]
+        for row in session.exec(
+            select(CampaignTask.function_id).where(
+                CampaignTask.campaign_id == campaign_id,
+                CampaignTask.function_id.is_not(None),  # type: ignore[union-attr]
+            )
+        ).all()
+    }
+
+    now = datetime.now(timezone.utc)
+    created = 0
+    for index, function in enumerate(functions):
+        if function.id in existing_function_ids:
+            continue
+        session.add(
+            CampaignTask(
+                campaign_id=campaign_id,
+                function_id=function.id,
+                source_file=source_file,
+                function_name=function.name,
+                provider=provider,
+                scope="function",
+                priority=max(len(functions) - index, 1),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        created += 1
+    session.commit()
+    return created
 
 
 def record_run(

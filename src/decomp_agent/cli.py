@@ -10,7 +10,13 @@ from rich.table import Table
 from sqlmodel import Session, func, select
 
 from decomp_agent.config import load_config
-from decomp_agent.models.db import Function, get_engine, sync_from_report
+from decomp_agent.models.db import (
+    Campaign,
+    CampaignTask,
+    Function,
+    get_engine,
+    sync_from_report,
+)
 
 console = Console()
 
@@ -70,6 +76,20 @@ def _enable_headless_provider(
         config.claude_code.enabled = False
     if isolated_worker:
         config.codex_code.isolated_worker_enabled = True
+
+
+def _provider_choice(value: str | None, *, allow_mixed: bool = False) -> str | None:
+    """Normalize campaign provider selections."""
+    if value is None:
+        return None
+    normalized = value.lower()
+    choices = {"claude", "codex"}
+    if allow_mixed:
+        choices.add("mixed")
+    if normalized not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise click.ClickException(f"Invalid provider '{value}'. Choose from: {allowed}")
+    return normalized
 
 
 @main.command()
@@ -294,6 +314,230 @@ def batch(
     console.print(f"  Tokens:    {result.total_tokens:,}")
     console.print(f"  Cost:      ${result.total_cost:.4f}")
     console.print(f"  Elapsed:   {result.elapsed:.1f}s")
+
+
+@main.group("campaign")
+def campaign_group() -> None:
+    """Manage long-running file campaigns."""
+
+
+@campaign_group.command("start")
+@click.argument("source_file")
+@click.option(
+    "--orchestrator-provider",
+    type=click.Choice(["claude", "codex"], case_sensitive=False),
+    default=None,
+    help="Provider for the orchestrator agent",
+)
+@click.option(
+    "--worker-provider-policy",
+    type=click.Choice(["claude", "codex", "mixed"], case_sensitive=False),
+    default=None,
+    help="Provider policy for worker agents",
+)
+@click.option("--max-active-workers", type=int, default=None, help="Max concurrent workers")
+@click.option("--timeout-hours", type=int, default=None, help="Campaign wall-clock timeout")
+@click.option("--allow-shared-fix-workers", is_flag=True, default=False, help="Allow workers to make broader shared-file fixes")
+@click.option("--allow-temporary-unmatched-regressions", is_flag=True, default=False, help="Allow temporary regressions in unmatched functions when net file progress improves")
+@click.pass_context
+def campaign_start(
+    ctx: click.Context,
+    source_file: str,
+    orchestrator_provider: str | None,
+    worker_provider_policy: str | None,
+    max_active_workers: int | None,
+    timeout_hours: int | None,
+    allow_shared_fix_workers: bool,
+    allow_temporary_unmatched_regressions: bool,
+) -> None:
+    """Create a new campaign record for one source file."""
+    config, engine = _load(ctx)
+    src_path = config.melee.resolve_source_path(source_file)
+    if not src_path.exists():
+        console.print(
+            f"[red]Source file '{source_file}' not found at {src_path}.[/red]"
+        )
+        raise SystemExit(1)
+
+    from decomp_agent.orchestrator.campaign import start_campaign
+
+    with Session(engine) as session:
+        campaign = start_campaign(
+            session,
+            config,
+            source_file=source_file,
+            orchestrator_provider=_provider_choice(orchestrator_provider),
+            worker_provider_policy=_provider_choice(
+                worker_provider_policy,
+                allow_mixed=True,
+            ),
+            max_active_workers=max_active_workers,
+            timeout_hours=timeout_hours,
+            allow_shared_fix_workers=allow_shared_fix_workers or None,
+            allow_temporary_unmatched_regressions=(
+                allow_temporary_unmatched_regressions or None
+            ),
+        )
+        task_count = len(
+            session.exec(
+                select(CampaignTask).where(CampaignTask.campaign_id == campaign.id)
+            ).all()
+        )
+
+    console.print(
+        f"Started campaign [bold]#{campaign.id}[/bold] for {campaign.source_file}"
+    )
+    console.print(f"  Orchestrator: {campaign.orchestrator_provider}")
+    console.print(f"  Workers:      {campaign.worker_provider_policy}")
+    console.print(f"  Max workers:  {campaign.max_active_workers}")
+    console.print(f"  Timeout:      {campaign.timeout_hours}h")
+    console.print(f"  Status:       {campaign.status}")
+    console.print(f"  Tasks:        {task_count}")
+    console.print(f"  Artifacts:    {campaign.artifact_dir}")
+
+
+@campaign_group.command("show")
+@click.argument("campaign_id", type=int)
+@click.pass_context
+def campaign_show(ctx: click.Context, campaign_id: int) -> None:
+    """Show one campaign and its queued tasks."""
+    _config, engine = _load(ctx)
+
+    with Session(engine) as session:
+        campaign = session.get(Campaign, campaign_id)
+        if campaign is None:
+            console.print(f"[red]Campaign #{campaign_id} not found.[/red]")
+            raise SystemExit(1)
+        tasks = session.exec(
+            select(CampaignTask)
+            .where(CampaignTask.campaign_id == campaign_id)
+            .order_by(CampaignTask.priority.desc(), CampaignTask.id.asc())  # type: ignore[arg-type]
+        ).all()
+
+    console.print(f"Campaign [bold]#{campaign.id}[/bold]")
+    console.print(f"  Source file:   {campaign.source_file}")
+    console.print(f"  Status:        {campaign.status}")
+    console.print(f"  Orchestrator:  {campaign.orchestrator_provider}")
+    console.print(f"  Workers:       {campaign.worker_provider_policy}")
+    console.print(f"  Max workers:   {campaign.max_active_workers}")
+    console.print(f"  Timeout:       {campaign.timeout_hours}h")
+    console.print(f"  Artifact dir:  {campaign.artifact_dir}")
+    console.print(f"  Staging repo:  {campaign.staging_worktree_path}")
+
+    table = Table(title="Campaign Tasks")
+    table.add_column("ID", justify="right")
+    table.add_column("Status")
+    table.add_column("Scope")
+    table.add_column("Provider")
+    table.add_column("Priority", justify="right")
+    table.add_column("Function")
+
+    for task in tasks[:25]:
+        table.add_row(
+            str(task.id),
+            task.status,
+            task.scope,
+            task.provider or "unassigned",
+            str(task.priority),
+            task.function_name or "(file task)",
+        )
+    console.print(table)
+
+
+@campaign_group.command("run-once")
+@click.argument("campaign_id", type=int)
+@click.pass_context
+def campaign_run_once(ctx: click.Context, campaign_id: int) -> None:
+    """Run one queued campaign task through the existing provider pipeline."""
+    config, engine = _load(ctx)
+
+    from decomp_agent.orchestrator.campaign import run_campaign_task_once
+
+    campaign, task, result = run_campaign_task_once(
+        engine,
+        config,
+        campaign_id=campaign_id,
+    )
+
+    if task is None:
+        console.print(f"[yellow]Campaign #{campaign.id} has no pending tasks.[/yellow]")
+        return
+
+    console.print(
+        f"Ran campaign task [bold]#{task.id}[/bold] "
+        f"({task.function_name or task.scope}) via "
+        f"{task.provider or campaign.worker_provider_policy}"
+    )
+    console.print(f"  Status:       {task.status}")
+    console.print(f"  Reason:       {task.termination_reason or '(none)'}")
+    console.print(f"  Best match:   {task.best_match_pct:.1f}%")
+    if result and result.session_id:
+        console.print(f"  Session:      {result.session_id}")
+    if task.artifact_dir:
+        console.print(f"  Artifacts:    {task.artifact_dir}")
+
+
+@campaign_group.command("run")
+@click.argument("campaign_id", type=int)
+@click.option("--max-tasks", type=int, default=None, help="Stop after running this many tasks")
+@click.pass_context
+def campaign_run(ctx: click.Context, campaign_id: int, max_tasks: int | None) -> None:
+    """Run campaign tasks until the queue is empty, timeout hits, or a limit is reached."""
+    config, engine = _load(ctx)
+
+    from decomp_agent.orchestrator.campaign import run_campaign_loop
+
+    campaign, summary = run_campaign_loop(
+        engine,
+        config,
+        campaign_id=campaign_id,
+        max_tasks=max_tasks,
+    )
+
+    console.print(f"Campaign [bold]#{campaign.id}[/bold] run summary")
+    console.print(f"  Status:         {campaign.status}")
+    console.print(f"  Tasks run:      {summary.tasks_run}")
+    console.print(f"  Completed:      {summary.completed_tasks}")
+    console.print(f"  Failed:         {summary.failed_tasks}")
+    console.print(f"  Pending:        {summary.pending_tasks}")
+    console.print(f"  Timed out:      {'yes' if summary.timed_out else 'no'}")
+    if summary.stopped_by_limit:
+        console.print("  Stop reason:    max task limit reached")
+
+
+@campaign_group.command("list")
+@click.pass_context
+def campaign_list(ctx: click.Context) -> None:
+    """List existing campaigns."""
+    _config, engine = _load(ctx)
+
+    with Session(engine) as session:
+        campaigns = session.exec(
+            select(Campaign).order_by(Campaign.id.desc())  # type: ignore[arg-type]
+        ).all()
+
+    if not campaigns:
+        console.print("[yellow]No campaigns found.[/yellow]")
+        return
+
+    table = Table(title="Campaigns")
+    table.add_column("ID", justify="right")
+    table.add_column("Source File")
+    table.add_column("Status")
+    table.add_column("Orchestrator")
+    table.add_column("Workers")
+    table.add_column("Max Workers", justify="right")
+
+    for campaign in campaigns:
+        table.add_row(
+            str(campaign.id),
+            campaign.source_file,
+            campaign.status,
+            campaign.orchestrator_provider,
+            campaign.worker_provider_policy,
+            str(campaign.max_active_workers),
+        )
+    console.print(table)
 
 
 @main.command()

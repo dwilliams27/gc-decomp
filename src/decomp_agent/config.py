@@ -125,6 +125,16 @@ class OrchestrationConfig(BaseModel):
     max_attempts_per_function: int = 10
 
 
+class CampaignConfig(BaseModel):
+    orchestrator_provider: str = "claude"
+    worker_provider_policy: str = "claude"
+    max_active_workers: int = 4
+    timeout_hours: int = 8
+    root_dir: Path = Path("/tmp/decomp-campaigns")
+    allow_shared_fix_workers: bool = False
+    allow_temporary_unmatched_regressions: bool = False
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     log_file: Path | None = None
@@ -139,6 +149,7 @@ class Config(BaseModel):
     claude_code: ClaudeCodeConfig = ClaudeCodeConfig()
     codex_code: CodexCodeConfig = CodexCodeConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
+    campaign: CampaignConfig = CampaignConfig()
     logging: LoggingConfig = LoggingConfig()
     pricing: PricingConfig = PricingConfig()
 

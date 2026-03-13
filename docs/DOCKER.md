@@ -71,6 +71,7 @@ The worker image now includes both headless CLIs:
 
 - Claude Code via `@anthropic-ai/claude-code`
 - Codex via `@openai/codex`
+- Linux `dtk` at `/usr/local/bin/dtk`
 
 The worker container boots through `/app/worker-entrypoint.sh`, which:
 
@@ -79,6 +80,9 @@ The worker container boots through `/app/worker-entrypoint.sh`, which:
 - writes a minimal Codex `config.toml` pointing at this repo's MCP server
 
 This avoids sharing the full host `~/.codex` directory as a writable mount.
+
+The worker image bakes in the pinned Linux `dtk` binary during `docker build`, so
+rebuilt containers remain compile-ready without any post-start `docker cp` step.
 
 ### Codex auth seed
 

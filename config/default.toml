@@ -41,6 +41,15 @@ default_workers = 1
 max_attempts_per_function = 10
 # default_budget — omit to leave unlimited
 
+[campaign]
+orchestrator_provider = "claude"
+worker_provider_policy = "claude"
+max_active_workers = 4
+timeout_hours = 8
+root_dir = "/tmp/decomp-campaigns"
+allow_shared_fix_workers = false
+allow_temporary_unmatched_regressions = false
+
 # TODO: Look up actual gpt-5.4 pricing — these are estimates
 [pricing.models."gpt-5.4"]
 input_per_million = 2.00

@@ -9,6 +9,15 @@ from decomp_agent.config import Config
 
 SYSTEM_PROMPT_PATH = Path(__file__).parents[3] / "docker" / "system-prompt.md"
 
+RELENTLESSNESS_BLOCK = (
+    "This may be a long, difficult decompilation task that takes many turns, "
+    "many tool calls, and multiple fundamentally different approaches. "
+    "Be relentless. Do not stop after a first draft or first non-matching "
+    "attempt. Keep iterating with write_function, get_diff, get_context, "
+    "header fixes, and type fixes until you either reach 100%, hit a concrete "
+    "external blocker, or have exhausted every realistic avenue you can find."
+)
+
 
 def load_headless_system_prompt() -> str:
     """Load the shared decomp system prompt used by headless agents."""
@@ -65,6 +74,7 @@ def build_headless_task_prompt(
         return (
             f"Match all unmatched functions in {source_file}.\n\n"
             f"Current status:\n{file_status}\n\n"
+            f"{RELENTLESSNESS_BLOCK}\n\n"
             f"Work through the unmatched functions, starting with the smallest "
             f"or easiest ones. For each function:\n"
             f"- Use get_target_assembly and get_context to understand it\n"
@@ -117,6 +127,7 @@ def build_headless_task_prompt(
         )
         return (
             f"Match function {function_name} in {source_file}.\n\n"
+            f"{RELENTLESSNESS_BLOCK}\n\n"
             f"A previous attempt reached {prior_match_pct:.1f}% match with this code:\n\n"
             f"```c\n{prior_best_code}\n```\n\n"
             f"{strategy}"
@@ -129,6 +140,7 @@ def build_headless_task_prompt(
     )
     return (
         f"Match function {function_name} in {source_file}.\n\n"
+        f"{RELENTLESSNESS_BLOCK}\n\n"
         f"You have tools to read assembly, get context/headers, "
         f"write code, check diffs, and iterate. The m2c output below "
         f"is a starting scaffold. Use get_context and get_target_assembly "
