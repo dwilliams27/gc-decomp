@@ -23,15 +23,23 @@
 - `src/decomp_agent/tools/` — Tool implementations (build, source, context, m2c, ghidra, permuter)
   - `registry.py` — Tool dispatch + write guardrails (inline asm, placeholder, field access, C89, var names, match comments)
 - `src/decomp_agent/melee/` — Melee repo integration (project parsing, report, functions)
-- `src/decomp_agent/orchestrator/` — Batch execution and headless mode
-  - `runner.py` — Per-function lifecycle (lock, backup, run agent, collateral damage check, auto-commit)
+- `src/decomp_agent/orchestrator/` — Batch execution, isolated workers, and campaign mode
+  - `runner.py` — Per-function lifecycle, isolated patch promotion, collateral damage checks
   - `batch.py` — Thread pool executor with budget/cost tracking
-  - `headless.py` — Claude Code Docker-based agent backend (uses docker/system-prompt.md)
+  - `headless.py` — Claude Code headless backend (shared-worker and isolated-worker modes)
+  - `codex_headless.py` — Codex CLI headless backend
+  - `headless_context.py` — Shared prompt/context provider for Claude and Codex headless runs
+  - `campaign.py` — Campaign queueing, worker dispatch, cooldowns, supervisor loop
+  - `campaign_orchestrator.py` — Campaign orchestrator session runner
+  - `worker_launcher.py` — Per-worker worktree/container creation
+  - `worktree.py` — Detached git worktree helpers
+  - `worker_results.py` — Patch/artifact export and result capture
+  - `codex_bootstrap.py` — Worker-local Codex auth/config seeding
 - `src/decomp_agent/models/` — Database models (SQLite tracking of attempts, matches, status)
 - `src/decomp_agent/web/` — Web UI backend (FastAPI + WebSocket)
-- `docker/system-prompt.md` — System prompt for headless Docker agent (must stay in sync with prompts.py)
+- `docker/system-prompt.md` — Shared headless system prompt for Claude and Codex workers
 - `docs/` — Documentation (PERMUTER.md, DOCKER.md, MN_MODULE_GUIDE.md, architecture ref)
-- `tests/` — Test suite (test_phase1-5.py, test_cost.py, test_disasm.py, test_ctx_filter.py, test_e2e.py)
+- `tests/` — Test suite, including campaign/isolation coverage
 - `config/default.toml` — Default configuration
 - Melee repo (fork): `/Users/dwilliams/proj/melee-fork/melee`
 
@@ -106,15 +114,18 @@ docker cp /tmp/dtk-linux docker-worker-1:/usr/local/bin/dtk
 
 ## Agent Pipeline
 
-Two agent backends exist, both using the same tools and guardrails:
+Three agent backends exist, all sharing the same tool surface and write guardrails:
 
 1. **API agent** (`agent/loop.py`) — Uses OpenAI Responses API with `previous_response_id` for multi-turn. Supports permuter tool.
-2. **Headless agent** (`orchestrator/headless.py`) — Runs Claude Code in Docker via MCP server. No permuter yet.
+2. **Claude headless agent** (`orchestrator/headless.py`) — Runs Claude Code in Docker, either in the shared worker container or in an isolated per-task worker.
+3. **Codex headless agent** (`orchestrator/codex_headless.py`) — Runs Codex CLI in Docker, typically in isolated per-task workers.
 
 Both backends:
 - Prefetch m2c output into the first prompt (`agent/m2c_seed.py`) so the agent always starts from m2c scaffold
 - Include warm-start support (inject prior best code + match % for retry attempts)
 - Route writes through `registry.py` guardrails before compilation
+
+Claude and Codex headless runs now share the same assignment/system prompt shape through `headless_context.py`.
 
 **Write guardrails** (hard rejects in `registry.py`):
 - Multi-instruction inline asm blocks
@@ -130,58 +141,64 @@ Both backends:
 
 - **Always validate new features by running them the way the agent would.** Don't just run unit tests — call the actual tool functions through `registry.dispatch()` (or the underlying function directly) with real data and verify the output is what you'd want the LLM to see. Unit tests with synthetic fixtures are not sufficient; real data from the melee build catches issues that synthetic data misses.
 
-## Current Goal: mn/ Module Ownership
+## Current Goal
 
-We are taking the `mn/` (Menus) module from partial to fully matched, file by file. The goal is whole-file completion — every function in a file at 100% — so we can submit clean PRs ("Complete mn/mngallery.c" etc). See `docs/UNTOUCHED_FILES_PLAN.md` for the full strategy.
+The current focus is provider-agnostic, overnight-capable file campaigns:
 
-**Why mn/:** Untouched files with no active contributors = no merge conflict risk. Same module as already-matched files (mndeflicker, mnhyaku, mnlanguage) we can study for patterns.
+- launch long-running campaigns against one source file
+- use Claude or Codex for the orchestrator and workers
+- run workers inside isolated containers/worktrees
+- preserve partial progress as patches/artifacts
+- only promote validated isolated patches back to the main checkout
 
-**Current targets (in priority order):**
-1. `melee/mn/mngallery.c` — 4/11 matched, 7 remaining. **Finish this first.**
-2. `melee/mn/mnstagesel.c` — 1 function at 99.2%. Near-done.
-3. `melee/mn/mnmain.c` — 6 functions all at ~98%. Near-done.
-4. `melee/mn/mnsound.c` — 3 functions at ~93%. Close.
-5. `melee/mn/mnsnap.c` — 11 functions at ~93%. Close.
-6. `melee/mn/mnevent.c` — 14 functions, untouched (0%). Original plan target.
-7. `melee/mn/mnitemsw.c` — 10 functions, untouched (0.6%). Original plan target.
+Practical target-selection guidance:
 
-**After closing near-done files**, push into untouched targets. Each completed file = a PR.
+- prefer files with substantial unmatched work remaining
+- avoid files currently being edited upstream
+- avoid files already modified locally in the melee checkout
+- bias toward one-file campaigns with low merge-conflict risk
 
-**Do NOT scatter runs across random libraries.** Stay focused on mn/ until the module is done.
+The current recommended overnight path is the `campaign` CLI, not ad hoc batch runs.
 
 ## Container Delegation
 
-**Prefer running investigation/experiment work inside the Docker container** by delegating to a Claude Code agent inside `docker-worker-1` (which has `--dangerously-skip-permissions`). The container has NO NETWORK ACCESS — if the delegated agent needs something from the internet, it must stop and report back so the host can fetch it. Anything that needs host-side commands (Ghidra, git, web fetches) should run directly on the host.
+There are now two distinct container patterns:
 
-Pattern: host agent launches container agent for compile/test/binary-analysis tasks → container agent works autonomously → reports results back.
+1. **Shared worker container**
+   - `docker-worker-1`
+   - used for MCP server and some shared Claude orchestration flows
 
-**Container OAuth refresh:** Claude Code credentials expire periodically. When the container agent fails with `401 authentication_error / OAuth token has expired`:
-1. Ask the user to run `claude auth login` on the host (interactive browser flow)
-2. Copy fresh credentials into the container:
-   ```bash
-   security find-generic-password -s "Claude Code-credentials" -a "dwilliams" -w > /tmp/creds.json
-   docker cp /tmp/creds.json docker-worker-1:/home/decomp/.claude/.credentials.json
-   rm /tmp/creds.json
-   ```
-3. Re-launch the container agent — credentials are now valid
+2. **Isolated worker containers**
+   - one container per Claude/Codex task
+   - one detached git worktree per task
+   - one private agent home per task (`.claude` or `.codex`)
+   - used for safe autonomous execution and same-file parallelism
 
-**Container Claude Code update:** npm can't reach the registry from the container (no network). Update process:
+The worker containers do not have general web access. They only have the connectivity needed for provider inference/auth plus local repo/build/MCP access. Prompts should assume there is no true internet research capability.
+
+**Claude auth:** isolated Claude workers are bootstrapped from `CLAUDE_CODE_OAUTH_TOKEN`, typically via repo-root `.env`.
+
+**Codex auth:** isolated Codex workers seed worker-local state from host `~/.codex/auth.json`, not a shared writable `~/.codex` mount.
+
+**Container Claude/Codex update:** if the worker image tools drift, rebuild the worker image instead of hot-patching long-lived containers:
 ```bash
-# On host:
-npm pack @anthropic-ai/claude-code@latest
-docker cp anthropic-ai-claude-code-*.tgz docker-worker-1:/tmp/
-docker exec -u root docker-worker-1 npm install -g /tmp/anthropic-ai-claude-code-*.tgz
+docker compose -f docker/docker-compose.yml build worker
+docker compose -f docker/docker-compose.yml up -d worker
 ```
 
 ## Source File Contention
 
-**NEVER have multiple agents modify the same source file simultaneously.** When running parallel experiments (permuter, declaration sweeps, expression tests), each agent must work in isolation:
+Never let multiple agents edit the main melee checkout directly.
 
-- **Permuter**: Use the decomp-permuter tool which works on preprocessed copies — it never modifies the real source file.
-- **Sub-agents doing source experiments**: Launch with `isolation: "worktree"` to give each agent its own git worktree copy of the repo. This prevents agents from fighting over the same file.
-- **Sweep scripts**: Use a backup/restore pattern — copy source to `/tmp/` backup before sweeping, restore after each iteration. But this still blocks other agents from using the file.
+Parallel same-file work is only acceptable when:
 
-If you need to run experiments in parallel, use worktree isolation or the permuter tool — never have two agents directly editing the melee source tree at the same time.
+- each worker uses its own isolated git worktree
+- each worker uses its own isolated container/home
+- patch promotion back to the main checkout is serialized and validated
+
+That is now the standard pattern for campaign workers. Shared-checkout editing should be treated as legacy/special-case behavior, not the default.
+
+Permuter remains safe because it operates on generated/preprocessed copies rather than the real source tree.
 
 ## Key Conventions
 

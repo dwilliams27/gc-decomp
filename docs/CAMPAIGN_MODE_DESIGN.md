@@ -1,5 +1,33 @@
 # Campaign Mode Design
 
+## Implementation Status
+
+This design is no longer purely speculative. A substantial subset is implemented.
+
+Implemented:
+
+- campaign DB model and CLI (`start`, `show`, `list`, `run`, `run-once`, `orchestrate`, `orchestrate-once`, `supervise`)
+- provider-selectable campaign configuration
+- isolated Claude workers
+- isolated Codex workers
+- per-worker git worktrees and dedicated containers
+- campaign MCP tools for status, task inspection, worker launch, retry, and run-next-task
+- orchestrator session runner
+- host-side campaign queueing and bounded parallel dispatch
+- provider cooldowns and rate-limit deferral
+
+Partially implemented:
+
+- orchestrator-driven overnight autonomy
+- mixed-provider scheduling policy
+- broader file/header/shared-fix patch promotion
+- long-run recovery/resume hardening
+
+Current recommendation:
+
+- use this document as the architectural reference
+- use [`docs/OVERNIGHT_CAMPAIGNS.md`](/Users/dwilliams/proj/gc-decomp/docs/OVERNIGHT_CAMPAIGNS.md) for the current operational status and recommended overnight workflow
+
 ## Goal
 
 Add a long-running autonomous `campaign` mode for matching an entire source file overnight.
