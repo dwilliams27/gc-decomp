@@ -25,8 +25,9 @@ from decomp_agent.orchestrator.headless_context import (
     load_headless_system_prompt,
 )
 from decomp_agent.orchestrator.worker_launcher import (
-    create_worker_spec,
     build_worker_container_run_args,
+    create_worker_spec,
+    prepare_worker_repo_in_container,
     wait_for_worker_container,
 )
 from decomp_agent.orchestrator.worker_results import (
@@ -285,6 +286,7 @@ def run_headless(
             text=True,
         )
         wait_for_worker_container(isolated_spec)
+        prepare_worker_repo_in_container(isolated_spec)
         cmd = ["docker", "exec", isolated_spec.container_name, "sh", "-c", shell_cmd]
         bound_log.info(
             "headless_isolated_start",

@@ -14,7 +14,10 @@ from decomp_agent.models.db import (
     Campaign,
     CampaignTask,
     Function,
+    backup_database_files,
+    check_database_integrity,
     get_engine,
+    reset_database_files,
     sync_from_report,
 )
 
@@ -111,6 +114,62 @@ def init(ctx: click.Context) -> None:
 
     console.print(f"Synced to DB: {inserted:,} new functions inserted")
     console.print(f"Database: {config.orchestration.db_path}")
+
+
+@main.group("db")
+def db_group() -> None:
+    """Inspect and reset the local SQLite database."""
+
+
+@db_group.command("check")
+@click.pass_context
+def db_check(ctx: click.Context) -> None:
+    """Run SQLite integrity_check on the configured database."""
+    config = load_config(ctx.obj.get("config_path"))
+    status = check_database_integrity(config.orchestration.db_path)
+    console.print(f"Database: {config.orchestration.db_path}")
+    if status == "ok":
+        console.print("[green]integrity_check: ok[/green]")
+    elif status == "missing":
+        console.print("[yellow]integrity_check: missing[/yellow]")
+    else:
+        console.print(f"[red]integrity_check: {status}[/red]")
+        raise SystemExit(1)
+
+
+@db_group.command("reset")
+@click.option(
+    "--backup-dir",
+    type=click.Path(path_type=Path),
+    default=Path("db-backups"),
+    show_default=True,
+    help="Directory to store a backup of the old database before resetting",
+)
+@click.pass_context
+def db_reset(ctx: click.Context, backup_dir: Path) -> None:
+    """Back up the current DB, recreate it, and re-seed functions from report.json."""
+    config = load_config(ctx.obj.get("config_path"))
+    db_path = config.orchestration.db_path
+    backup = backup_database_files(db_path, backup_root=backup_dir)
+    reset_database_files(db_path)
+    engine = get_engine(db_path)
+
+    console.print(f"Reset database: {db_path}")
+    if backup is not None:
+        console.print(f"  Backup: {backup}")
+    else:
+        console.print("  Backup: (no existing DB files)")
+
+    console.print("Reloading functions from melee repo...")
+    from decomp_agent.melee.functions import get_candidates, get_functions
+
+    functions = get_functions(config)
+    candidates = get_candidates(functions)
+    with Session(engine) as session:
+        inserted = sync_from_report(session, candidates)
+
+    console.print(f"  Inserted: {inserted:,} functions")
+    console.print(f"  Integrity: {check_database_integrity(db_path)}")
 
 
 @main.command()

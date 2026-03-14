@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import shutil
 import time
 
 from sqlalchemy import Engine
@@ -240,6 +241,8 @@ def build_campaign_workspace(spec: CampaignSpec, campaign_id: int) -> CampaignWo
 
 def prepare_campaign_workspace(workspace: CampaignWorkspace) -> None:
     """Create the on-disk directory skeleton for a campaign."""
+    if workspace.root_dir.exists():
+        shutil.rmtree(workspace.root_dir, ignore_errors=True)
     workspace.root_dir.mkdir(parents=True, exist_ok=True)
     workspace.artifact_dir.mkdir(parents=True, exist_ok=True)
 

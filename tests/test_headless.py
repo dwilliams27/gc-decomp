@@ -73,6 +73,7 @@ def test_isolated_claude_match_becomes_patch_ready(tmp_path):
         patch("decomp_agent.orchestrator.headless.write_worker_artifact_manifest"),
         patch("decomp_agent.orchestrator.headless.build_worker_container_run_args", return_value=["docker", "run"]),
         patch("decomp_agent.orchestrator.headless.wait_for_worker_container"),
+        patch("decomp_agent.orchestrator.headless.prepare_worker_repo_in_container") as prepare_repo,
         patch("decomp_agent.orchestrator.headless.export_worker_patch", return_value=tmp_path / "worker.patch"),
         patch("decomp_agent.orchestrator.headless.write_worker_result"),
         patch("decomp_agent.tools.build.check_match", return_value=matched),
@@ -87,6 +88,7 @@ def test_isolated_claude_match_becomes_patch_ready(tmp_path):
     assert result.patch_path.endswith("worker.patch")
     assert result.artifact_dir == str(fake_spec.output_dir)
     assert str(fake_spec.mcp_config_path) in exec_commands[0][-1]
+    prepare_repo.assert_called_once_with(fake_spec)
 
 
 def test_reap_stale_claude_shared_lock_removes_dead_pid(tmp_path):

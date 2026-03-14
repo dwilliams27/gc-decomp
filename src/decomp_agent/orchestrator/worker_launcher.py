@@ -159,6 +159,12 @@ def build_worker_container_run_args(
         "sleep",
         "infinity",
     ])
+    shared_orig = config.melee.repo_path / "orig"
+    if shared_orig.exists():
+        args[args.index(image):args.index(image)] = [
+            "-v",
+            f"{shared_orig}:{spec.melee_worktree.worktree_path / 'orig'}:ro",
+        ]
     if spec.mcp_config_path is not None:
         args[args.index(image):args.index(image)] = [
             "-v",
@@ -198,6 +204,31 @@ def wait_for_worker_container(
     raise RuntimeError(
         f"Timed out waiting for worker container {spec.container_name} to start{detail}"
     )
+
+
+def prepare_worker_repo_in_container(spec: WorkerSpec) -> None:
+    """Regenerate build artifacts inside the worker container context.
+
+    Isolated worktrees can inherit host-generated build files that embed
+    absolute host paths (for example a host-only Python interpreter). Scrub
+    those artifacts and re-run configure.py inside the container so MCP build
+    tools work reliably for Claude/Codex.
+    """
+    prep_cmd = (
+        f"cd {spec.melee_worktree.worktree_path} && "
+        "rm -f build.ninja objdiff.json .ninja_log .ninja_deps && "
+        "python configure.py"
+    )
+    proc = subprocess.run(
+        ["docker", "exec", spec.container_name, "sh", "-lc", prep_cmd],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise RuntimeError(
+            f"Failed to prepare worker repo in {spec.container_name}: {detail}"
+        )
 
 
 def _reset_worker_root(

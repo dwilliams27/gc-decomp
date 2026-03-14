@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -155,6 +157,53 @@ def get_engine(db_path: Path | str) -> Engine:
     SQLModel.metadata.create_all(engine)
     _migrate(engine)
     return engine
+
+
+def _db_sidecar_paths(db_path: Path) -> list[Path]:
+    return [
+        db_path,
+        Path(f"{db_path}-wal"),
+        Path(f"{db_path}-shm"),
+    ]
+
+
+def check_database_integrity(db_path: Path | str) -> str:
+    """Run PRAGMA integrity_check and return SQLite's result string."""
+    db_file = Path(db_path)
+    if not db_file.exists():
+        return "missing"
+    conn = sqlite3.connect(db_file)
+    try:
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        return str(row[0]) if row and row[0] is not None else "unknown"
+    finally:
+        conn.close()
+
+
+def backup_database_files(
+    db_path: Path | str,
+    *,
+    backup_root: Path,
+) -> Path | None:
+    """Copy the DB and sidecar files to a timestamped backup directory."""
+    db_file = Path(db_path)
+    existing = [path for path in _db_sidecar_paths(db_file) if path.exists()]
+    if not existing:
+        return None
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest_dir = backup_root / f"{db_file.stem}-{timestamp}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for path in existing:
+        shutil.copy2(path, dest_dir / path.name)
+    return dest_dir
+
+
+def reset_database_files(db_path: Path | str) -> None:
+    """Remove the DB and SQLite sidecar files."""
+    db_file = Path(db_path)
+    for path in _db_sidecar_paths(db_file):
+        path.unlink(missing_ok=True)
 
 
 def _migrate(engine: Engine) -> None:

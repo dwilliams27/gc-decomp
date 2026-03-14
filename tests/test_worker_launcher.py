@@ -7,6 +7,7 @@ from decomp_agent.orchestrator.worker_launcher import (
     build_worker_container_run_args,
     cleanup_worker_spec,
     create_worker_spec,
+    prepare_worker_repo_in_container,
     render_worker_container_config,
     render_worker_mcp_config,
     wait_for_worker_container,
@@ -91,6 +92,8 @@ def test_create_worker_spec_creates_worktree_and_metadata(tmp_path):
 def test_build_worker_container_run_args_includes_mounts_and_env(tmp_path):
     repo_path, config = create_fake_repo(tmp_path)
     _init_git_repo(repo_path)
+    (repo_path / "orig" / "GALE01" / "sys").mkdir(parents=True, exist_ok=True)
+    (repo_path / "orig" / "GALE01" / "sys" / "main.dol").write_bytes(b"dol")
     config.codex_code.worker_root = tmp_path / "workers"
     config.codex_code.auth_file = tmp_path / "auth.json"
     config.codex_code.auth_file.write_text("{}", encoding="utf-8")
@@ -121,6 +124,7 @@ def test_build_worker_container_run_args_includes_mounts_and_env(tmp_path):
     assert "HTTPS_PROXY=http://proxy:3128" in joined
     assert "PYTHONPATH=/workspace/gc-decomp/src" in joined
     assert str(spec.melee_worktree.worktree_path) in joined
+    assert f"{repo_path / 'orig'}:{spec.melee_worktree.worktree_path / 'orig'}:ro" in joined
     assert str(spec.decomp_config_path) in joined
     assert "/workspace/gc-decomp" in joined
     assert "decomp-agent-worker:test" in args
@@ -241,3 +245,34 @@ def test_build_worker_container_run_args_mounts_private_claude_home(tmp_path):
     assert f"{spec.agent_home_dir}:/home/decomp/.claude:rw" in joined
     assert f"{spec.mcp_config_path}:{spec.mcp_config_path}:ro" in joined
     assert "decomp-agent-worker:test" in joined
+
+
+def test_prepare_worker_repo_in_container_regenerates_build_files(tmp_path, monkeypatch):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+
+    spec = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    try:
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        prepare_worker_repo_in_container(spec)
+    finally:
+        cleanup_worker_spec(spec)
+
+    assert calls
+    assert calls[0][:3] == ["docker", "exec", spec.container_name]
+    joined = " ".join(calls[0])
+    assert "rm -f build.ninja objdiff.json .ninja_log .ninja_deps" in joined
+    assert "python configure.py" in joined

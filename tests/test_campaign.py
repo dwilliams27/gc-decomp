@@ -106,6 +106,27 @@ def test_start_campaign_creates_db_record(tmp_path):
     }
 
 
+def test_start_campaign_clears_stale_artifacts_for_reused_id(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign.db")
+    stale_note = config.campaign.root_dir / "campaign-1" / "artifacts" / "manager-notes.md"
+    stale_note.parent.mkdir(parents=True, exist_ok=True)
+    stale_note.write_text("stale\n", encoding="utf-8")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+        )
+
+    assert campaign.id == 1
+    assert not stale_note.exists()
+
+
 def test_run_campaign_task_once_completes_one_task(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
     engine = get_engine(tmp_path / "campaign-runner.db")

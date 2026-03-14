@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +58,16 @@ def _source_to_obj_path(source_file: str, config: Config) -> Path:
 def _ctx_file_path(config: Config) -> Path:
     """Path to the m2c context file."""
     return config.melee.repo_path / "build" / "ctx.c"
+
+
+def _split_config_path(config: Config) -> Path:
+    """Path to the dtk split completion target."""
+    return (
+        config.melee.repo_path
+        / config.melee.build_dir
+        / config.melee.version
+        / "config.json"
+    )
 
 
 # Pattern to match function labels in dtk-generated assembly.
@@ -122,29 +133,77 @@ def extract_function_asm(asm_content: str, function_name: str) -> str | None:
     return "\n".join(func_lines) + "\n"
 
 
-def _ensure_asm_exists(source_file: str, config: Config) -> Path:
-    """Ensure the dtk-generated .s file exists, building it if needed.
+def _ensure_target_split_outputs(source_file: str, config: Config) -> None:
+    """Ensure target split outputs exist for a translation unit.
 
-    Raises RuntimeError if the assembly file cannot be obtained.
+    Modern melee builds materialize the per-TU asm/object outputs as side
+    effects of the split/config target rather than as first-class Ninja targets.
+    Build the split target once if neither the asm nor object output exists yet.
     """
     asm_path = _source_to_asm_path(source_file, config)
+    obj_path = _source_to_obj_path(source_file, config)
 
-    if asm_path.exists():
-        return asm_path
+    if asm_path.exists() or obj_path.exists():
+        return
 
-    # Build it via ninja
-    asm_rel = str(asm_path.relative_to(config.melee.repo_path))
-    result = run_in_repo(["ninja", asm_rel], config=config, timeout=120)
+    split_target = _split_config_path(config)
+    split_rel = str(split_target.relative_to(config.melee.repo_path))
+    result = run_in_repo(["ninja", split_rel], config=config, timeout=120)
     if result.returncode != 0:
         raise RuntimeError(
-            f"Failed to build assembly for {source_file}: "
+            f"Failed to prepare target outputs for {source_file}: "
             f"{result.stderr or result.stdout}"
         )
-    if not asm_path.exists():
+    if not asm_path.exists() and not obj_path.exists():
         raise RuntimeError(
-            f"ninja succeeded but assembly file not found at {asm_path}"
+            f"ninja succeeded but target outputs were not found for {source_file}"
         )
-    return asm_path
+
+
+def _load_target_asm_text(source_file: str, config: Config) -> str:
+    """Load target assembly for a translation unit.
+
+    Prefer dtk's split .s file when present. If the TU does not have a materialized
+    asm file, fall back to disassembling the target object.
+    """
+    _ensure_target_split_outputs(source_file, config)
+    asm_path = _source_to_asm_path(source_file, config)
+    if asm_path.exists():
+        return asm_path.read_text(encoding="utf-8", errors="replace")
+
+    obj_path = _source_to_obj_path(source_file, config)
+    if not obj_path.exists():
+        raise RuntimeError(f"Target object not found for {source_file}: {obj_path}")
+
+    from decomp_agent.tools.disasm import disassemble_object
+
+    return disassemble_object(obj_path, config)
+
+
+def _materialize_target_asm_file(source_file: str, config: Config) -> tuple[Path, bool]:
+    """Return a filesystem path to target asm for m2c.
+
+    If the TU split asm file exists, use it directly. Otherwise disassemble the
+    target object and spill it to a temporary file for m2c consumption.
+    """
+    _ensure_target_split_outputs(source_file, config)
+    asm_path = _source_to_asm_path(source_file, config)
+    if asm_path.exists():
+        return asm_path, False
+
+    asm_text = _load_target_asm_text(source_file, config)
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=f"_{Path(source_file).stem}.s",
+        delete=False,
+        mode="w",
+        encoding="utf-8",
+    )
+    try:
+        tmp.write(asm_text)
+        tmp.flush()
+    finally:
+        tmp.close()
+    return Path(tmp.name), True
 
 
 def get_target_assembly(
@@ -169,8 +228,7 @@ def get_target_assembly(
     Raises:
         RuntimeError: If the assembly file cannot be built.
     """
-    asm_path = _ensure_asm_exists(source_file, config)
-    asm_content = asm_path.read_text(encoding="utf-8", errors="replace")
+    asm_content = _load_target_asm_text(source_file, config)
     return extract_function_asm(asm_content, function_name)
 
 
@@ -182,8 +240,7 @@ def get_full_asm(source_file: str, config: Config) -> str:
     Raises:
         RuntimeError: If the assembly file cannot be built.
     """
-    asm_path = _ensure_asm_exists(source_file, config)
-    return asm_path.read_text(encoding="utf-8", errors="replace")
+    return _load_target_asm_text(source_file, config)
 
 
 def generate_m2c_context(config: Config) -> None:
@@ -287,8 +344,8 @@ def run_m2c(
         flags: Optional list of flag names (e.g. ["no_casts", "stack_structs"])
         union_fields: Optional list of "StructName:field_name" for --union-field
     """
-    # Ensure asm file exists (raises RuntimeError on failure)
-    asm_path = _ensure_asm_exists(source_file, config)
+    # Ensure target asm is available (raises RuntimeError on failure)
+    asm_path, cleanup_asm = _materialize_target_asm_file(source_file, config)
 
     # Optionally regenerate m2c context (raises on failure)
     if regenerate_ctx:
@@ -335,6 +392,9 @@ def run_m2c(
             function_name=function_name,
             error="python3 not found",
         )
+    finally:
+        if cleanup_asm:
+            asm_path.unlink(missing_ok=True)
 
     if result.returncode != 0:
         return M2CResult(

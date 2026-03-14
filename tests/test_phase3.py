@@ -1,6 +1,7 @@
 """Tests for Phase 3: Decompilation Tools."""
 
 from pathlib import Path
+import subprocess
 
 from decomp_agent.config import Config, MeleeConfig
 from decomp_agent.tools.m2c_tool import (
@@ -8,7 +9,11 @@ from decomp_agent.tools.m2c_tool import (
     _source_to_asm_path,
     _source_to_obj_path,
     _ctx_file_path,
+    _split_config_path,
     extract_function_asm,
+    get_full_asm,
+    get_target_assembly,
+    run_m2c,
 )
 from decomp_agent.tools.ghidra import (
     GhidraResult,
@@ -50,6 +55,12 @@ def test_ctx_file_path():
     config = _make_config()
     path = _ctx_file_path(config)
     assert path == MELEE_REPO / "build/ctx.c"
+
+
+def test_split_config_path():
+    config = _make_config()
+    path = _split_config_path(config)
+    assert path == MELEE_REPO / "build/GALE01/config.json"
 
 
 def test_extract_function_asm_basic():
@@ -208,6 +219,100 @@ def test_m2c_result_properties():
     failure = M2CResult(function_name="test", error="m2c not found")
     assert not failure.success
     assert failure.error == "m2c not found"
+
+
+def test_get_target_assembly_falls_back_to_object_disasm(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "configure.py").write_text("print('stub')", encoding="utf-8")
+    obj_path = repo / "build" / "GALE01" / "obj" / "melee" / "test"
+    obj_path.mkdir(parents=True, exist_ok=True)
+    (obj_path / "testfile.o").write_bytes(b"obj")
+
+    config = Config(melee=MeleeConfig(repo_path=repo))
+
+    disasm = """.fn simple_add, global
+/* 80000000 00000000  7C 63 22 14 */\tadd r3, r3, r4
+/* 80000004 00000004  4E 80 00 20 */\tblr
+.endfn simple_add
+"""
+
+    monkeypatch.setattr(
+        "decomp_agent.tools.m2c_tool.run_in_repo",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+    monkeypatch.setattr(
+        "decomp_agent.tools.disasm.disassemble_object",
+        lambda obj, cfg: disasm,
+    )
+
+    result = get_target_assembly("simple_add", "melee/test/testfile.c", config)
+    assert result is not None
+    assert ".fn simple_add" in result
+    assert "add r3, r3, r4" in result
+
+
+def test_get_full_asm_falls_back_to_object_disasm(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "configure.py").write_text("print('stub')", encoding="utf-8")
+    obj_path = repo / "build" / "GALE01" / "obj" / "melee" / "test"
+    obj_path.mkdir(parents=True, exist_ok=True)
+    (obj_path / "testfile.o").write_bytes(b"obj")
+
+    config = Config(melee=MeleeConfig(repo_path=repo))
+    disasm = ".fn simple_add, global\n.endfn simple_add\n"
+
+    monkeypatch.setattr(
+        "decomp_agent.tools.m2c_tool.run_in_repo",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+    monkeypatch.setattr(
+        "decomp_agent.tools.disasm.disassemble_object",
+        lambda obj, cfg: disasm,
+    )
+
+    assert get_full_asm("melee/test/testfile.c", config) == disasm
+
+
+def test_run_m2c_materializes_disassembled_target(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "configure.py").write_text("print('stub')", encoding="utf-8")
+    obj_path = repo / "build" / "GALE01" / "obj" / "melee" / "test"
+    obj_path.mkdir(parents=True, exist_ok=True)
+    (obj_path / "testfile.o").write_bytes(b"obj")
+
+    config = Config(melee=MeleeConfig(repo_path=repo))
+    disasm = """.fn simple_add, global
+/* 80000000 00000000  7C 63 22 14 */\tadd r3, r3, r4
+/* 80000004 00000004  4E 80 00 20 */\tblr
+.endfn simple_add
+"""
+
+    seen_args: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "decomp_agent.tools.m2c_tool.run_in_repo",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+    monkeypatch.setattr(
+        "decomp_agent.tools.disasm.disassemble_object",
+        lambda obj, cfg: disasm,
+    )
+
+    def fake_run(args, **kwargs):
+        seen_args.append(args)
+        asm_path = Path(args[-1])
+        assert asm_path.exists()
+        assert asm_path.read_text(encoding="utf-8") == disasm
+        return subprocess.CompletedProcess(args, 0, "int simple_add(void) { return 0; }\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_m2c("simple_add", "melee/test/testfile.c", config)
+    assert result.success
+    assert seen_args
 
 
 # --- ghidra.py tests ---
