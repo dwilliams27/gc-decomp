@@ -495,6 +495,7 @@ def _run_claimed_campaign_task(
         function = session.get(Function, function_id)
         if function is None:
             raise ValueError(f"Function #{function_id} not found for campaign task #{task_id}")
+        warm_start = function.current_match_pct > 0.0
 
     try:
         result = run_function(
@@ -502,7 +503,7 @@ def _run_claimed_campaign_task(
             provider_config,
             engine,
             worker_label=f"[campaign {campaign_id} task {task_id}]",
-            warm_start=False,
+            warm_start=warm_start,
         )
     except Exception as exc:
         with Session(engine) as session:

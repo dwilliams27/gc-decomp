@@ -23,6 +23,7 @@ from decomp_agent.models.db import (
     record_run,
 )
 from decomp_agent.tools.build import check_match
+from decomp_agent.tools.source import get_function_source, read_source_file
 
 log = structlog.get_logger()
 
@@ -325,6 +326,8 @@ def run_function(
         # Capture values we need outside the session
         func_name = function.name
         source_file = function.source_file
+        current_match_pct = function.current_match_pct
+        attempt_count = function.attempts
 
     bound_log = log.bind(worker=worker_label) if worker_label else log
     bound_log.info(
@@ -361,7 +364,7 @@ def run_function(
             # Look up best prior attempt for warm start
             prior_best_code: str | None = None
             prior_match_pct: float = 0
-            if warm_start and function.attempts > 0:
+            if warm_start and attempt_count > 0:
                 with Session(engine) as session:
                     best = get_best_attempt(session, function.id)  # type: ignore[arg-type]
                     if best is not None:
@@ -371,6 +374,24 @@ def run_function(
                             "warm_start",
                             prior_match=prior_match_pct,
                         )
+            if warm_start and prior_best_code is None and current_match_pct > 0:
+                try:
+                    current_source = read_source_file(src_path)
+                    seeded_code = get_function_source(current_source, func_name)
+                    if seeded_code:
+                        prior_best_code = seeded_code
+                        prior_match_pct = current_match_pct
+                        bound_log.info(
+                            "warm_start_from_current_source",
+                            prior_match=prior_match_pct,
+                            code_len=len(seeded_code),
+                        )
+                except Exception as e:
+                    bound_log.warning(
+                        "warm_start_current_source_failed",
+                        function=func_name,
+                        error=str(e),
+                    )
 
             # Run the agent
             try:
@@ -413,6 +434,19 @@ def run_function(
                     error=str(e),
                     termination_reason="agent_crash",
                 )
+
+            if (
+                isolated_worker
+                and result.patch_path
+                and result.best_match_percent >= 100.0
+                and result.termination_reason != "isolated_patch_ready"
+            ):
+                bound_log.info(
+                    "isolated_patch_ready_recovered",
+                    function=func_name,
+                    prior_reason=result.termination_reason,
+                )
+                result.termination_reason = "isolated_patch_ready"
 
             if isolated_worker and result.termination_reason == "isolated_patch_ready":
                 with file_lock:
@@ -478,11 +512,6 @@ def run_function(
             # the source file here while it still contains the agent's work.
             if not result.final_code:
                 try:
-                    from decomp_agent.tools.source import (
-                        get_function_source,
-                        read_source_file,
-                    )
-
                     current_source = read_source_file(src_path)
                     captured = get_function_source(current_source, func_name)
                     if captured:

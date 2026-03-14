@@ -87,6 +87,7 @@ def test_build_headless_task_prompt_warm_start_includes_diff(tmp_path):
     assert "diff body" in prompt
     assert "VERY close" in prompt
     assert "Be relentless" in prompt
+    assert "DO NOT rewrite the function" in prompt
 
 
 def test_build_headless_task_prompt_cold_start_includes_relentless_guidance(tmp_path):

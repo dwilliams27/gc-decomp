@@ -146,14 +146,16 @@ def build_headless_task_prompt(
                 "You are VERY close. Make only tiny, targeted changes: "
                 "reorder variable declarations, split or merge expressions, "
                 "adjust casts, or change variable types. "
-                "DO NOT rewrite the function or change its structure."
+                "DO NOT rewrite the function, change its signature, alter "
+                "surrounding callsites, or make broad structural edits."
             )
         elif prior_match_pct >= 50.0:
             strategy = (
                 "The structure is mostly right. Focus on register allocation: "
                 "reorder variable declarations, change how temporaries are used, "
                 "split compound expressions, or merge separate statements. "
-                "Preserve the overall logic — do NOT rewrite from scratch."
+                "Preserve the overall logic, signature, and callsite surface — "
+                "do NOT rewrite from scratch."
             )
         else:
             strategy = (

@@ -147,6 +147,7 @@ class CampaignConfig(BaseModel):
     baseline_compile_retries: int = 1
     rate_limit_backoff_seconds: int = 300
     rate_limit_reset_hours: int = 5
+    orchestrator_poll_seconds: int = 30
     root_dir: Path = Path("/tmp/decomp-campaigns")
     allow_shared_fix_workers: bool = False
     allow_temporary_unmatched_regressions: bool = False

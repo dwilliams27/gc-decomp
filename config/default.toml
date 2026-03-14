@@ -63,6 +63,7 @@ max_no_progress_cycles = 6
 baseline_compile_retries = 1
 rate_limit_backoff_seconds = 300
 rate_limit_reset_hours = 5
+orchestrator_poll_seconds = 30
 root_dir = "/tmp/decomp-campaigns"
 allow_shared_fix_workers = false
 allow_temporary_unmatched_regressions = false

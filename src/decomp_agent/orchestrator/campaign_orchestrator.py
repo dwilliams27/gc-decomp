@@ -357,7 +357,14 @@ def run_campaign_orchestrator_loop(
         cooldown_until = _provider_cooldown_until(campaign, campaign.orchestrator_provider)
         now = datetime.now(timezone.utc)
         if cooldown_until is not None and _ensure_utc(cooldown_until) > now:
-            break
+            if max_sessions is not None:
+                break
+            sleep_seconds = min(
+                max((_ensure_utc(cooldown_until) - now).total_seconds(), 1.0),
+                max(float(config.campaign.orchestrator_poll_seconds), 1.0),
+            )
+            time.sleep(sleep_seconds)
+            continue
 
         refreshed_campaign, result = run_campaign_orchestrator_once(
             engine,
@@ -389,7 +396,10 @@ def run_campaign_orchestrator_loop(
         running_after = sum(1 for task in tasks if task.status == "running")
         pending_after = sum(1 for task in tasks if task.status == "pending")
         if running_after > 0:
-            break
+            if max_sessions is not None:
+                break
+            time.sleep(max(config.campaign.orchestrator_poll_seconds, 1))
+            continue
         if pending_after == 0:
             break
 

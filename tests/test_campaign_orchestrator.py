@@ -120,6 +120,68 @@ def test_run_campaign_orchestrator_loop_respects_session_limit(tmp_path):
     assert summary.completed_tasks == 2
 
 
+def test_run_campaign_orchestrator_loop_polls_while_worker_is_running(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.root_dir = tmp_path / "campaigns"
+    config.campaign.orchestrator_poll_seconds = 0
+    engine = get_engine(tmp_path / "campaign-orchestrator-poll.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="mixed",
+        )
+        campaign_id = campaign.id
+
+    call_count = {"count": 0}
+
+    def side_effect(engine_arg, config_arg, *, campaign_id):
+        del config_arg
+        call_count["count"] += 1
+        with Session(engine_arg) as session:
+            tasks = session.exec(
+                select(CampaignTask)
+                .where(CampaignTask.campaign_id == campaign_id)
+                .order_by(CampaignTask.id.asc())  # type: ignore[arg-type]
+            ).all()
+            assert tasks
+            if call_count["count"] == 1:
+                tasks[0].status = "running"
+                session.add(tasks[0])
+            else:
+                tasks[0].status = "completed"
+                session.add(tasks[0])
+                for task in tasks[1:]:
+                    task.status = "completed"
+                    session.add(task)
+            session.commit()
+            campaign = session.get(Campaign, campaign_id)
+            assert campaign is not None
+            return campaign, None
+
+    with (
+        patch(
+            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_once",
+            side_effect=side_effect,
+        ),
+        patch("decomp_agent.orchestrator.campaign_orchestrator.time.sleep"),
+    ):
+        _campaign, summary = run_campaign_orchestrator_loop(
+            engine,
+            config,
+            campaign_id=campaign_id,  # type: ignore[arg-type]
+        )
+
+    assert call_count["count"] == 2
+    assert summary.completed_tasks == 3
+
+
 def test_campaign_orchestrator_lock_rejects_overlap(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
     config.campaign.root_dir = tmp_path / "campaigns"

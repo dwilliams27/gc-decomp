@@ -235,3 +235,49 @@ def test_run_function_retries_transient_baseline_failure(tmp_path):
 
     assert result.best_match_percent == 77.0
     assert mocked_check_match.call_count == 2
+
+
+def test_run_function_warm_starts_from_current_source_when_no_attempt_exists(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    config.claude_code.enabled = True
+
+    engine = get_engine(":memory:")
+    functions = _seed_db(engine, config)
+    target_func = next(f for f in functions if f.name == "simple_add")
+
+    baseline = CompileResult(
+        object_name="melee/test/testfile.c",
+        success=True,
+        functions=[
+            FunctionMatch(name="simple_init", fuzzy_match_percent=55.0, size=40),
+            FunctionMatch(name="simple_add", fuzzy_match_percent=60.0, size=8),
+            FunctionMatch(name="simple_loop", fuzzy_match_percent=50.0, size=48),
+        ],
+    )
+    captured: dict[str, object] = {}
+
+    def fake_headless(function_name, source_file, config, **kwargs):
+        del function_name, source_file, config
+        captured["prior_best_code"] = kwargs.get("prior_best_code")
+        captured["prior_match_pct"] = kwargs.get("prior_match_pct")
+        return AgentResult(
+            matched=False,
+            best_match_percent=77.0,
+            termination_reason="model_stopped",
+        )
+
+    with (
+        patch(
+            "decomp_agent.orchestrator.headless.run_headless",
+            side_effect=fake_headless,
+        ),
+        patch(
+            "decomp_agent.orchestrator.runner.check_match",
+            return_value=baseline,
+        ),
+        patch("decomp_agent.orchestrator.runner._auto_commit_match"),
+    ):
+        run_function(target_func, config, engine, warm_start=True)
+
+    assert "return a + b;" in str(captured["prior_best_code"])
+    assert captured["prior_match_pct"] == 60.0

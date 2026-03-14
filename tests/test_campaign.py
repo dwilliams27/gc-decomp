@@ -173,6 +173,48 @@ def test_run_campaign_task_once_completes_one_task(tmp_path):
     assert task.patch_path.endswith("worker.patch")
 
 
+def test_run_campaign_task_once_uses_warm_start_for_existing_code(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign-warm-start.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="codex",
+            worker_provider_policy="mixed",
+        )
+
+    fake_result = AgentResult(
+        matched=False,
+        best_match_percent=88.5,
+        termination_reason="model_stopped",
+        session_id="worker-session-1",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_function(function, config, engine, *, worker_label="", warm_start=False):
+        del function, config, engine, worker_label
+        captured["warm_start"] = warm_start
+        return fake_result
+
+    with patch(
+        "decomp_agent.orchestrator.runner.run_function",
+        side_effect=fake_run_function,
+    ):
+        run_campaign_task_once(
+            engine,
+            config,
+            campaign_id=campaign.id,  # type: ignore[arg-type]
+        )
+
+    assert captured["warm_start"] is True
+
+
 def test_run_campaign_loop_respects_task_limit(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
     engine = get_engine(tmp_path / "campaign-loop-limit.db")
