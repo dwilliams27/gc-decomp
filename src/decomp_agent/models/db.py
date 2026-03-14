@@ -422,6 +422,33 @@ def mark_campaign_stopped(
     session.commit()
 
 
+def stop_running_campaign_tasks(
+    session: Session,
+    campaign_id: int,
+    *,
+    error: str = "campaign stopped",
+) -> int:
+    """Mark any currently running campaign tasks as stopped."""
+    now = datetime.now(timezone.utc)
+    tasks = list(
+        session.exec(
+            select(CampaignTask).where(
+                CampaignTask.campaign_id == campaign_id,
+                CampaignTask.status == "running",
+            )
+        ).all()
+    )
+    for task in tasks:
+        task.status = "stopped"
+        task.completed_at = now
+        task.updated_at = now
+        task.error = error
+        task.termination_reason = "stopped"
+        session.add(task)
+    session.commit()
+    return len(tasks)
+
+
 def mark_campaign_task_running(
     session: Session,
     task: CampaignTask,

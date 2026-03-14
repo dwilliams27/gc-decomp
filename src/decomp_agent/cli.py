@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import click
@@ -17,9 +24,12 @@ from decomp_agent.models.db import (
     backup_database_files,
     check_database_integrity,
     get_engine,
+    mark_campaign_stopped,
     reset_database_files,
+    stop_running_campaign_tasks,
     sync_from_report,
 )
+from decomp_agent.orchestrator.worktree import slugify_worker_token
 
 console = Console()
 
@@ -93,6 +103,103 @@ def _provider_choice(value: str | None, *, allow_mixed: bool = False) -> str | N
         allowed = ", ".join(sorted(choices))
         raise click.ClickException(f"Invalid provider '{value}'. Choose from: {allowed}")
     return normalized
+
+
+def _campaign_cli_base_cmd(ctx: click.Context) -> list[str]:
+    executable = shutil.which("decomp-agent") or sys.argv[0]
+    cmd = [executable]
+    config_path = ctx.obj.get("config_path")
+    if config_path is not None:
+        cmd.extend(["--config", str(config_path)])
+    log_level = ctx.obj.get("log_level")
+    if log_level:
+        cmd.extend(["--log-level", log_level])
+    return cmd
+
+
+def _campaign_process_manifest_path(campaign: Campaign) -> Path:
+    artifact_dir = Path(campaign.artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir / "campaign-processes.json"
+
+
+def _load_campaign_process_manifest(campaign: Campaign) -> dict[str, object]:
+    path = _campaign_process_manifest_path(campaign)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_campaign_process_manifest(campaign: Campaign, payload: dict[str, object]) -> Path:
+    path = _campaign_process_manifest_path(campaign)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _launch_campaign_process(command: list[str], *, log_path: Path) -> subprocess.Popen:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("ab")
+    return subprocess.Popen(
+        command,
+        cwd=Path.cwd(),
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _stop_pid(pid: int, *, timeout_seconds: float = 10.0) -> bool:
+    try:
+        os.kill(pid, signal.SIGINT)
+    except OSError:
+        return False
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if not _pid_is_alive(pid):
+            return True
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return True
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if not _pid_is_alive(pid):
+            return True
+        time.sleep(0.2)
+    return not _pid_is_alive(pid)
+
+
+def _stop_campaign_worker_containers(campaign: Campaign) -> list[str]:
+    source_prefix = slugify_worker_token(campaign.source_file)
+    completed = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return []
+    removed: list[str] = []
+    prefixes = (
+        f"claude-worker-{source_prefix}-",
+        f"codex-worker-{source_prefix}-",
+    )
+    for name in completed.stdout.splitlines():
+        if not any(name.startswith(prefix) for prefix in prefixes):
+            continue
+        subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True)
+        removed.append(name)
+    return removed
 
 
 @main.command()
@@ -455,6 +562,109 @@ def campaign_start(
     console.print(f"  Artifacts:    {campaign.artifact_dir}")
 
 
+@campaign_group.command("launch")
+@click.argument("source_file")
+@click.option(
+    "--orchestrator-provider",
+    type=click.Choice(["claude", "codex"], case_sensitive=False),
+    default=None,
+    help="Provider for the orchestrator agent",
+)
+@click.option(
+    "--worker-provider-policy",
+    type=click.Choice(["claude", "codex", "mixed"], case_sensitive=False),
+    default=None,
+    help="Provider policy for worker agents",
+)
+@click.option("--max-active-workers", type=int, default=None, help="Max concurrent workers")
+@click.option("--timeout-hours", type=int, default=None, help="Campaign wall-clock timeout")
+@click.option("--allow-shared-fix-workers", is_flag=True, default=False, help="Allow workers to make broader shared-file fixes")
+@click.option("--allow-temporary-unmatched-regressions", is_flag=True, default=False, help="Allow temporary regressions in unmatched functions when net file progress improves")
+@click.pass_context
+def campaign_launch(
+    ctx: click.Context,
+    source_file: str,
+    orchestrator_provider: str | None,
+    worker_provider_policy: str | None,
+    max_active_workers: int | None,
+    timeout_hours: int | None,
+    allow_shared_fix_workers: bool,
+    allow_temporary_unmatched_regressions: bool,
+) -> None:
+    """Create a campaign and launch its orchestrator + worker loops in the background."""
+    config, engine = _load(ctx)
+    src_path = config.melee.resolve_source_path(source_file)
+    if not src_path.exists():
+        console.print(
+            f"[red]Source file '{source_file}' not found at {src_path}.[/red]"
+        )
+        raise SystemExit(1)
+
+    from decomp_agent.orchestrator.campaign import start_campaign
+
+    with Session(engine) as session:
+        campaign = start_campaign(
+            session,
+            config,
+            source_file=source_file,
+            orchestrator_provider=_provider_choice(orchestrator_provider),
+            worker_provider_policy=_provider_choice(
+                worker_provider_policy,
+                allow_mixed=True,
+            ),
+            max_active_workers=max_active_workers,
+            timeout_hours=timeout_hours,
+            allow_shared_fix_workers=allow_shared_fix_workers or None,
+            allow_temporary_unmatched_regressions=(
+                allow_temporary_unmatched_regressions or None
+            ),
+        )
+        task_count = len(
+            session.exec(
+                select(CampaignTask).where(CampaignTask.campaign_id == campaign.id)
+            ).all()
+        )
+
+    base_cmd = _campaign_cli_base_cmd(ctx)
+    orchestrator_log = Path(campaign.artifact_dir) / "orchestrator.log"
+    worker_log = Path(campaign.artifact_dir) / "worker.log"
+    orchestrator_cmd = base_cmd + ["campaign", "orchestrate", str(campaign.id)]
+    worker_cmd = base_cmd + ["campaign", "run", str(campaign.id)]
+
+    orchestrator_proc = _launch_campaign_process(orchestrator_cmd, log_path=orchestrator_log)
+    worker_proc = _launch_campaign_process(worker_cmd, log_path=worker_log)
+
+    manifest = {
+        "campaign_id": campaign.id,
+        "source_file": campaign.source_file,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "orchestrator": {
+            "pid": orchestrator_proc.pid,
+            "command": orchestrator_cmd,
+            "log_path": str(orchestrator_log),
+        },
+        "worker": {
+            "pid": worker_proc.pid,
+            "command": worker_cmd,
+            "log_path": str(worker_log),
+        },
+    }
+    manifest_path = _write_campaign_process_manifest(campaign, manifest)
+
+    console.print(
+        f"Launched campaign [bold]#{campaign.id}[/bold] for {campaign.source_file}"
+    )
+    console.print(f"  Orchestrator: {campaign.orchestrator_provider}")
+    console.print(f"  Workers:      {campaign.worker_provider_policy}")
+    console.print(f"  Max workers:  {campaign.max_active_workers}")
+    console.print(f"  Timeout:      {campaign.timeout_hours}h")
+    console.print(f"  Tasks:        {task_count}")
+    console.print(f"  Artifacts:    {campaign.artifact_dir}")
+    console.print(f"  PID file:     {manifest_path}")
+    console.print(f"  Manager log:  {orchestrator_log}")
+    console.print(f"  Worker log:   {worker_log}")
+
+
 @campaign_group.command("show")
 @click.argument("campaign_id", type=int)
 @click.pass_context
@@ -501,6 +711,53 @@ def campaign_show(ctx: click.Context, campaign_id: int) -> None:
             task.function_name or "(file task)",
         )
     console.print(table)
+
+
+@campaign_group.command("stop")
+@click.argument("campaign_id", type=int)
+@click.pass_context
+def campaign_stop(ctx: click.Context, campaign_id: int) -> None:
+    """Stop a launched campaign, terminate its worker containers, and mark it stopped."""
+    _config, engine = _load(ctx)
+
+    with Session(engine) as session:
+        campaign = session.get(Campaign, campaign_id)
+        if campaign is None:
+            console.print(f"[red]Campaign #{campaign_id} not found.[/red]")
+            raise SystemExit(1)
+        manifest_path = _campaign_process_manifest_path(campaign)
+        manifest = _load_campaign_process_manifest(campaign)
+
+    stopped_roles: list[str] = []
+    for role in ("orchestrator", "worker"):
+        process_info = manifest.get(role)
+        if not isinstance(process_info, dict):
+            continue
+        pid = process_info.get("pid")
+        if isinstance(pid, int) and _stop_pid(pid):
+            stopped_roles.append(role)
+
+    removed_containers = _stop_campaign_worker_containers(campaign)
+
+    with Session(engine) as session:
+        campaign = session.get(Campaign, campaign_id)
+        assert campaign is not None
+        mark_campaign_stopped(session, campaign)
+        stopped_tasks = stop_running_campaign_tasks(
+            session,
+            campaign_id,
+            error="campaign stopped by operator",
+        )
+
+    manifest["stopped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    manifest["stopped_roles"] = stopped_roles
+    manifest["removed_containers"] = removed_containers
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    console.print(f"Stopped campaign [bold]#{campaign_id}[/bold]")
+    console.print(f"  Host loops:    {', '.join(stopped_roles) or '(none found)'}")
+    console.print(f"  Task cleanup:  {stopped_tasks} running task(s) marked stopped")
+    console.print(f"  Containers:    {len(removed_containers)} removed")
 
 
 @campaign_group.command("run-once")
