@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from decomp_agent.models.db import (
     set_campaign_provider_cooldown,
     seed_campaign_function_tasks,
 )
+from decomp_agent.orchestrator.worktree import slugify_worker_token
 
 VALID_PROVIDERS = frozenset({"claude", "codex"})
 VALID_WORKER_POLICIES = frozenset({"claude", "codex", "mixed"})
@@ -48,6 +50,8 @@ _HARD_RATE_LIMIT_PATTERNS = (
 )
 _CLAUDE_RATE_LIMIT_ANCHOR_UTC = datetime(2026, 3, 13, 7, 4, tzinfo=timezone.utc)
 _CLAUDE_RATE_LIMIT_WINDOW = timedelta(hours=5)
+_MATCH_RE = re.compile(r":\s*(\d+(?:\.\d+)?)%")
+_TASK_FUNCTION_RE = re.compile(r"([A-Za-z0-9_]+):\s*(\d+(?:\.\d+)?)%")
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,120 @@ class CampaignSupervisorSummary:
     stop_reason: str
     no_progress_cycles: int
     summary_path: str = ""
+
+
+@dataclass(frozen=True)
+class RunningTaskLiveStatus:
+    live_best_match_pct: float | None
+    last_activity_at: datetime | None
+    transcript_path: str
+    detail: str
+
+
+def _normalize_task_provider(campaign: Campaign, provider: str) -> str:
+    normalized = provider.strip()
+    if normalized:
+        return normalized
+    if campaign.worker_provider_policy in VALID_PROVIDERS:
+        return campaign.worker_provider_policy
+    return ""
+
+
+def _predicted_worker_root(
+    config: Config,
+    *,
+    provider: str,
+    source_file: str,
+    function_name: str | None,
+) -> Path:
+    if provider == "claude":
+        worker_root = config.claude_code.worker_root
+    elif provider == "codex":
+        worker_root = config.codex_code.worker_root
+    else:
+        raise ValueError(f"Unsupported worker provider '{provider}'")
+    token_parts = [source_file]
+    if function_name:
+        token_parts.append(function_name)
+    worker_id = slugify_worker_token("-".join(token_parts))
+    return worker_root / worker_id
+
+
+def _extract_live_match(function_name: str, text: str) -> float | None:
+    best = None
+    for line in text.splitlines():
+        if function_name not in line:
+            continue
+        if "MATCH" in line:
+            best = max(best or 0.0, 100.0)
+        match = _TASK_FUNCTION_RE.search(line)
+        if match and match.group(1) == function_name:
+            pct = float(match.group(2))
+            best = max(best or 0.0, pct)
+    return best
+
+
+def _load_running_task_live_status(
+    config: Config,
+    campaign: Campaign,
+    task: CampaignTask,
+) -> RunningTaskLiveStatus | None:
+    provider = _normalize_task_provider(campaign, task.provider)
+    if provider not in VALID_PROVIDERS or task.function_name is None:
+        return None
+
+    worker_root = _predicted_worker_root(
+        config,
+        provider=provider,
+        source_file=task.source_file,
+        function_name=task.function_name,
+    )
+    transcript_candidates = sorted(
+        [
+            path
+            for path in worker_root.rglob("*.jsonl")
+            if "/subagents/" not in str(path)
+        ],
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+    )
+    if not transcript_candidates:
+        return None
+
+    transcript_path = transcript_candidates[-1]
+    try:
+        raw = transcript_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    lines = [line for line in raw.splitlines() if line.strip()]
+    last_activity = None
+    if lines:
+        try:
+            entry = json.loads(lines[-1])
+            ts = entry.get("timestamp")
+            if isinstance(ts, str):
+                last_activity = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            last_activity = datetime.fromtimestamp(
+                transcript_path.stat().st_mtime,
+                tz=timezone.utc,
+            )
+
+    tail = raw[-200_000:]
+    live_best = _extract_live_match(task.function_name, tail)
+
+    detail_parts = []
+    if live_best is not None:
+        detail_parts.append(f"live best seen: {live_best:.1f}%")
+    if last_activity is not None:
+        detail_parts.append(f"last activity: {_ensure_utc(last_activity).isoformat()}")
+    detail = ", ".join(detail_parts) if detail_parts else "running with no parsed match yet"
+    return RunningTaskLiveStatus(
+        live_best_match_pct=live_best,
+        last_activity_at=_ensure_utc(last_activity) if last_activity else None,
+        transcript_path=str(transcript_path),
+        detail=detail,
+    )
 
 
 def _campaign_notes_path(campaign: Campaign) -> Path | None:
@@ -657,7 +775,7 @@ def run_campaign_loop(
     )
 
 
-def format_campaign_status(engine: Engine, campaign_id: int) -> str:
+def format_campaign_status(engine: Engine, config: Config, campaign_id: int) -> str:
     """Return a human-readable campaign status summary for an orchestrator."""
     with Session(engine) as session:
         campaign = get_campaign(session, campaign_id)
@@ -693,16 +811,22 @@ def format_campaign_status(engine: Engine, campaign_id: int) -> str:
     if running:
         lines.append("Running tasks:")
         for task in running[:5]:
-            lines.append(
-                f"  #{task.id} {_task_label(task)} via {task.provider or 'default'}"
+            provider = _normalize_task_provider(campaign, task.provider)
+            live = _load_running_task_live_status(config, campaign, task)
+            line = (
+                f"  #{task.id} {_task_label(task)} via {provider or 'default'} "
+                f"(finalized best: {task.best_match_pct:.1f}%)"
             )
+            if live is not None:
+                line += f" [{live.detail}]"
+            lines.append(line)
 
     if pending:
         lines.append("Next pending tasks:")
         for task in pending[:10]:
             lines.append(
                 f"  #{task.id} {_task_label(task)} "
-                f"(priority={task.priority}, provider={task.provider or 'default'})"
+                f"(priority={task.priority}, provider={_normalize_task_provider(campaign, task.provider) or 'default'})"
             )
 
     if failed:
@@ -714,7 +838,12 @@ def format_campaign_status(engine: Engine, campaign_id: int) -> str:
     return "\n".join(lines)
 
 
-def format_campaign_task_result(engine: Engine, campaign_id: int, task_id: int) -> str:
+def format_campaign_task_result(
+    engine: Engine,
+    config: Config,
+    campaign_id: int,
+    task_id: int,
+) -> str:
     """Return a detailed result summary for one campaign task."""
     with Session(engine) as session:
         campaign = get_campaign(session, campaign_id)
@@ -728,10 +857,15 @@ def format_campaign_task_result(engine: Engine, campaign_id: int, task_id: int) 
         f"Campaign task #{task.id}",
         f"Function/scope: {_task_label(task)}",
         f"Status: {task.status}",
-        f"Provider: {task.provider or campaign.worker_provider_policy}",
-        f"Best match: {task.best_match_pct:.1f}%",
+        f"Provider: {_normalize_task_provider(campaign, task.provider) or 'default'}",
+        f"Finalized best match: {task.best_match_pct:.1f}%",
         f"Termination: {task.termination_reason or '(none)'}",
     ]
+    if task.status == "running":
+        live = _load_running_task_live_status(config, campaign, task)
+        if live is not None:
+            lines.append(f"Live status: {live.detail}")
+            lines.append(f"Transcript: {live.transcript_path}")
     if task.instructions:
         lines.append(f"Instructions: {task.instructions}")
     if task.worker_session_id:
@@ -776,7 +910,7 @@ def create_campaign_worker_task(
             source_file=campaign.source_file,
             function_id=function.id,
             function_name=function.name,
-            provider=provider,
+            provider=_normalize_task_provider(campaign, provider),
             scope=scope,
             priority=priority if priority is not None else 1000,
             instructions=instructions,
@@ -814,7 +948,7 @@ def retry_campaign_task(
             source_file=task.source_file,
             function_id=task.function_id,
             function_name=task.function_name,
-            provider=provider or task.provider,
+            provider=_normalize_task_provider(campaign, provider or task.provider),
             scope=task.scope,
             priority=priority if priority is not None else max(task.priority + 1, 1),
             instructions=combined_instructions,

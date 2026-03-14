@@ -104,10 +104,11 @@ def _dispatch_campaign_ipc_request(
     payload: dict[str, Any],
 ) -> str:
     if tool_name == "campaign_get_status":
-        return format_campaign_status(engine, int(payload["campaign_id"]))
+        return format_campaign_status(engine, config, int(payload["campaign_id"]))
     if tool_name == "campaign_get_task_result":
         return format_campaign_task_result(
             engine,
+            config,
             int(payload["campaign_id"]),
             int(payload["task_id"]),
         )

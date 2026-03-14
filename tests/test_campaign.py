@@ -324,7 +324,7 @@ def test_campaign_notes_are_persisted_in_artifacts(tmp_path):
         "Tried foo. Suspect header mismatch. Next cycle should retry with tighter guidance.",
     )
     notes = get_campaign_notes(engine, campaign.id)  # type: ignore[arg-type]
-    status = format_campaign_status(engine, campaign.id)  # type: ignore[arg-type]
+    status = format_campaign_status(engine, config, campaign.id)  # type: ignore[arg-type]
 
     assert path.endswith("manager-notes.md")
     assert "Suspect header mismatch" in notes
@@ -521,9 +521,10 @@ def test_campaign_status_and_result_formatters(tmp_path):
         campaign_id = campaign.id
         task_id = task.id
 
-    status_text = format_campaign_status(engine, campaign_id)  # type: ignore[arg-type]
+    status_text = format_campaign_status(engine, config, campaign_id)  # type: ignore[arg-type]
     result_text = format_campaign_task_result(
         engine,
+        config,
         campaign_id,  # type: ignore[arg-type]
         task_id,  # type: ignore[arg-type]
     )
@@ -617,6 +618,35 @@ def test_create_campaign_worker_task_deduplicates_pending_task(tmp_path):
     assert second_task.priority == 77
 
 
+def test_create_campaign_worker_task_normalizes_blank_provider_to_campaign_default(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign-provider-normalize.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="claude",
+        )
+        campaign_id = campaign.id
+
+    task = create_campaign_worker_task(
+        engine,
+        campaign_id=campaign_id,  # type: ignore[arg-type]
+        function_name="simple_add",
+        provider="",
+        instructions="Use the default provider",
+        priority=50,
+    )
+
+    assert task.provider == "claude"
+
+
 def test_retry_campaign_task_deduplicates_existing_pending_retry(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
     engine = get_engine(tmp_path / "campaign-retry-dedupe.db")
@@ -658,6 +688,81 @@ def test_retry_campaign_task_deduplicates_existing_pending_retry(tmp_path):
     )
 
     assert retry_two.id == retry_one.id
+
+
+def test_format_campaign_status_includes_live_running_details(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.root_dir = tmp_path / "campaigns"
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+    engine = get_engine(tmp_path / "campaign-live.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="claude",
+        )
+        task = session.exec(
+            select(CampaignTask)
+            .where(CampaignTask.campaign_id == campaign.id)
+            .order_by(CampaignTask.id.asc())  # type: ignore[arg-type]
+        ).first()
+        assert task is not None
+        function_name = task.function_name
+        assert function_name is not None
+        task.status = "running"
+        session.add(task)
+        session.commit()
+        campaign_id = campaign.id
+        task_id = task.id
+
+    transcript = (
+        config.claude_code.worker_root
+        / f"melee-test-testfile.c-{function_name}"
+        / "agent-home"
+        / "projects"
+        / "-"
+        / "live.jsonl"
+    )
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"timestamp": "2026-03-14T12:00:00Z", "type": "assistant"}),
+                json.dumps(
+                    {
+                        "timestamp": "2026-03-14T12:01:00Z",
+                        "type": "user",
+                        "message": {
+                            "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "content": f'{{"result":"{function_name}: 60.0%"}}',
+                                    }
+                                ]
+                            },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    status = format_campaign_status(engine, config, campaign_id)  # type: ignore[arg-type]
+    assert "live best seen: 60.0%" in status
+
+    task_text = format_campaign_task_result(
+        engine,
+        config,
+        campaign_id,  # type: ignore[arg-type]
+        task_id,  # type: ignore[arg-type]
+    )
+    assert "Live status: live best seen: 60.0%" in task_text
 
 
 def test_run_campaign_next_task_summary_reports_result(tmp_path):

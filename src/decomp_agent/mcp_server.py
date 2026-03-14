@@ -116,10 +116,11 @@ def _campaign_tool_result(tool_name: str, payload: dict[str, object]) -> str:
         return submit_campaign_ipc_request(tool_name, payload)
 
     if tool_name == "campaign_get_status":
-        return format_campaign_status(_get_engine(), int(payload["campaign_id"]))
+        return format_campaign_status(_get_engine(), _get_config(), int(payload["campaign_id"]))
     if tool_name == "campaign_get_task_result":
         return format_campaign_task_result(
             _get_engine(),
+            _get_config(),
             int(payload["campaign_id"]),
             int(payload["task_id"]),
         )
