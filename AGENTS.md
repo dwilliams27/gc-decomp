@@ -163,6 +163,21 @@ Practical target-selection guidance:
 
 The current recommended overnight path is the `campaign` CLI, not ad hoc batch runs.
 
+**Campaign launch rules**
+
+- Use the real `decomp-agent` entrypoint, not `python -m decomp_agent.cli`. In this repo, `python -m decomp_agent.cli` may import the module without actually invoking the Click app, which can look like a successful no-op.
+- Host control-plane loops (`campaign orchestrate`, `campaign run`, `campaign supervise`) must be launched on the host with enough permissions to:
+  - talk to Docker
+  - create/remove git worktrees
+  - manage isolated worker containers
+- Do not launch overnight campaign control loops from a restricted sandbox that cannot access the Docker socket or mutate `.git/worktrees`.
+- After launch, immediately validate that the run is real:
+  - campaign row exists in `decomp.db`
+  - task statuses start changing
+  - manager notes or supervisor summary artifacts appear
+  - an isolated worker container appears for the active task
+- If you are launching long-running loops from an interactive agent session, prefer persistent PTY sessions over fragile background/nohup launches unless you have already proven the background method works in that environment.
+
 ## Container Delegation
 
 There are now two distinct container patterns:
@@ -230,7 +245,9 @@ When evaluating whether the system is healthy, validate these components in orde
    - If a task that should be isolated is touching shared state, the setup is wrong.
 
 6. **Campaign DB and orchestration state**
-   - Shared worker and host must point at the same writable campaign DB.
+   - The host is the only writer to the real campaign DB.
+   - Containerized managers must use campaign IPC, not direct writes to `decomp.db`.
+   - The shared worker must not point at the host repo DB path for live campaign writes.
    - Campaign locks, queued tasks, cooldown timestamps, and task status transitions should be consistent with the live processes.
 
 7. **Rate limiting and cooldowns**
@@ -244,6 +261,11 @@ When evaluating whether the system is healthy, validate these components in orde
 9. **Promotion path**
    - A worker producing a good patch is not enough; verify that patch promotion, validation, and DB state updates are working too.
    - If a worker reaches `100%` in isolation but the function is still not matched, the bug is in promotion/finalization, not generation.
+
+10. **Launch-path validation**
+   - Confirm the campaign was launched through `decomp-agent`, not a no-op module invocation.
+   - Confirm host control loops have the permissions they need for Docker + git worktrees.
+   - If early tasks all fail with Docker socket or `git worktree add` errors, the launch path is wrong even if the campaign row exists.
 
 ## Key Conventions
 

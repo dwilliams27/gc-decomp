@@ -15,6 +15,7 @@ from decomp_agent.orchestrator.worktree import (
     WorktreeSpec,
     create_git_worktree,
     remove_git_worktree,
+    prune_git_worktrees,
     slugify_worker_token,
 )
 
@@ -237,6 +238,7 @@ def _reset_worker_root(
     worktree_path: Path,
 ) -> None:
     """Remove stale worker state so a worker id can be reused safely."""
+    prune_git_worktrees(repo_root)
     if worktree_path.exists():
         subprocess.run(
             ["git", "worktree", "remove", "--force", str(worktree_path)],
@@ -245,8 +247,18 @@ def _reset_worker_root(
             text=True,
             check=False,
         )
+    else:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        prune_git_worktrees(repo_root)
     if root_dir.exists():
         shutil.rmtree(root_dir, ignore_errors=True)
+    prune_git_worktrees(repo_root)
 
 
 def create_worker_spec(

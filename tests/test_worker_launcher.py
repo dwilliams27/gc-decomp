@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -216,6 +217,43 @@ def test_create_worker_spec_reuses_existing_worker_root(tmp_path):
         assert second.root_dir == first.root_dir
         assert second.melee_worktree.worktree_path.exists()
         assert not stale_marker.exists()
+    finally:
+        cleanup_worker_spec(second)
+
+
+def test_create_worker_spec_recovers_missing_but_registered_worktree(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+
+    first = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    registered_path = first.melee_worktree.worktree_path
+    assert registered_path.exists()
+
+    shutil.rmtree(registered_path, ignore_errors=True)
+    assert not registered_path.exists()
+
+    second = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    try:
+        assert second.melee_worktree.worktree_path.exists()
+        listed = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            check=True,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert str(second.melee_worktree.worktree_path) in listed
     finally:
         cleanup_worker_spec(second)
 
