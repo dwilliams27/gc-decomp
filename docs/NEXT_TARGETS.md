@@ -33,6 +33,33 @@ Filtered to 8+ unmatched stubs. Activity = upstream commits in last 30 days.
 | **gr/groldkongo.c** | 8 | 3 KB | gr | **0** | Past Kongo Jungle |
 | **it/itseakneedlethrown.c** | 17 | 2 KB | it | **0** | Sheik needles |
 
+## Recommended Hill-Climb Order
+
+These are the three best campaign targets to climb through in sequence with the
+current overnight system:
+
+1. **mn/mnsnap.c**
+   - Best immediate target.
+   - We already validated the full manager/worker loop on this file.
+   - It has multiple near-match footholds, so the campaign can compound real
+     progress instead of starting from a wall of pure stubs.
+
+2. **mn/mnmainrule.c**
+   - Best follow-up target.
+   - Same `mn/` module family, smaller surface area, low upstream activity.
+   - Good file for validating that the overnight system generalizes beyond
+     `mnsnap.c` without jumping into a huge file.
+
+3. **ft/ftCo_0A01.c**
+   - Best large-scale stretch target.
+   - Massive amount of remaining work with zero recent upstream activity.
+   - Better once we have another round of overnight campaign data and want to
+     push the system on a large file with many functions.
+
+`ft/ftPr_SpecialN.c` remains interesting, but it is not the recommended first
+overnight validation target because the prior live run on it produced poor real
+progress despite good infrastructure coverage.
+
 ## Moderate Activity (1-2 recent commits, probably safe)
 
 | File | Stubs | Size | Module | Activity | Notes |
