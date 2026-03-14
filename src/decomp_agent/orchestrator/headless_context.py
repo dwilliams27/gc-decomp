@@ -24,6 +24,7 @@ Your job is to manage worker agents, not to directly write code yourself.
 
 Use the campaign MCP tools to:
 - inspect campaign status
+- inspect and update manager notes
 - inspect prior worker outcomes
 - queue new workers with targeted instructions
 - queue follow-up retries with new guidance
@@ -38,6 +39,10 @@ Important constraints:
 Behavior rules:
 - Be relentless and persistent.
 - Keep the queue moving.
+- Each session is a short planning pass, not an endless conversation.
+- Maintain explicit written notes for the campaign. Record what improved, what failed, what went well, suspected blockers, and what the next cycle should try.
+- When a run exposes a likely system-tuning opportunity, note that too: turn budgets, timeouts, worker count, retry policy, queue policy, or prompt gaps.
+- After inspecting status, queueing/retrying workers, and nominating the next task, stop so the host can execute the next cycle.
 - If a function is close, inspect the prior attempt and retry with sharper guidance.
 - If several functions are promising, queue multiple targeted attempts.
 - If a header or shared type issue seems likely, say so explicitly in worker instructions.
@@ -210,11 +215,14 @@ def build_campaign_orchestrator_prompt(
         f"{RELENTLESSNESS_BLOCK}\n\n"
         "Campaign strategy:\n"
         "- Your first action must be calling campaign_get_status.\n"
+        "- Early in every planning pass, call campaign_get_notes so you can continue from prior file-level context.\n"
+        "- Before stopping, call campaign_write_note with a concise update covering what went well, progress, blockers, the next plan, and any plausible parameter tunings that could improve future cycles.\n"
         "- After reading status, if there are pending tasks and no running tasks, your next action must be campaign_run_next_task to queue the next host-dispatched worker.\n"
         "- If a worker got close but stalled, inspect it with campaign_get_task_result.\n"
         "- Queue retries with targeted follow-up instructions.\n"
         "- Use campaign_launch_worker for fresh experiments on specific functions.\n"
         "- Use campaign_run_next_task to tell the host supervisor which queued task should run next.\n"
+        "- This is one bounded planning pass. Make your decisions, queue work, then stop.\n"
         "- Prefer parallel exploration across promising functions, but keep the "
         "queue coherent and focused.\n"
         "- If you suspect headers or shared types are the blocker, explicitly "

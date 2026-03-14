@@ -214,3 +214,16 @@ class CampaignRunNextTaskParams(BaseModel):
     pipeline and return the result summary."""
 
     campaign_id: int = Field(description="Campaign id to advance")
+
+
+class CampaignWriteNoteParams(BaseModel):
+    """Append a manager note to the campaign notes log."""
+
+    campaign_id: int = Field(description="Campaign id to annotate")
+    note: str = Field(description="Markdown note describing progress, blockers, or hypotheses")
+
+
+class CampaignGetNotesParams(BaseModel):
+    """Read the manager notes log for a campaign."""
+
+    campaign_id: int = Field(description="Campaign id to inspect")

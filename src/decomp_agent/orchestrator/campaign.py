@@ -96,6 +96,42 @@ class CampaignSupervisorSummary:
     summary_path: str = ""
 
 
+def _campaign_notes_path(campaign: Campaign) -> Path | None:
+    if not campaign.artifact_dir:
+        return None
+    artifact_dir = Path(campaign.artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir / "manager-notes.md"
+
+
+def append_campaign_note(engine: Engine, campaign_id: int, note: str) -> str:
+    """Append a timestamped manager note to the campaign notes artifact."""
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        notes_path = _campaign_notes_path(campaign)
+        if notes_path is None:
+            raise ValueError(f"Campaign #{campaign_id} has no artifact_dir")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        block = f"## {timestamp}\n\n{note.strip()}\n\n"
+        with notes_path.open("a", encoding="utf-8") as handle:
+            handle.write(block)
+        return str(notes_path)
+
+
+def get_campaign_notes(engine: Engine, campaign_id: int) -> str:
+    """Return the accumulated manager notes for a campaign."""
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        notes_path = _campaign_notes_path(campaign)
+        if notes_path is None or not notes_path.exists():
+            return f"Campaign #{campaign.id} has no manager notes yet."
+        return notes_path.read_text(encoding="utf-8")
+
+
 def _campaign_progress_snapshot(tasks: list[CampaignTask]) -> tuple[int, int, int, int, int]:
     """Return a coarse progress snapshot for no-progress detection."""
     completed = sum(1 for task in tasks if task.status == "completed")
@@ -582,6 +618,9 @@ def format_campaign_status(engine: Engine, campaign_id: int) -> str:
         lines.append(f"Claude cooldown until: {_ensure_utc(campaign.claude_cooldown_until).isoformat()}")
     if campaign.codex_cooldown_until:
         lines.append(f"Codex cooldown until: {_ensure_utc(campaign.codex_cooldown_until).isoformat()}")
+    notes_path = _campaign_notes_path(campaign)
+    if notes_path is not None:
+        lines.append(f"Manager notes: {notes_path}")
 
     if running:
         lines.append("Running tasks:")

@@ -8,6 +8,7 @@ from decomp_agent.orchestrator.worker_launcher import (
     cleanup_worker_spec,
     create_worker_spec,
     render_worker_container_config,
+    render_worker_mcp_config,
     wait_for_worker_container,
 )
 from tests.fixtures.fake_repo import create_fake_repo
@@ -52,6 +53,14 @@ def test_render_worker_container_config_uses_worktree_repo_path(tmp_path):
     assert "enabled = false" in rendered
 
 
+def test_render_worker_mcp_config_uses_worker_decomp_config(tmp_path):
+    decomp_config_path = tmp_path / "worker" / "container.toml"
+    rendered = render_worker_mcp_config(decomp_config_path=decomp_config_path)
+
+    assert str(decomp_config_path) in rendered
+    assert "decomp-tools" in rendered
+
+
 def test_create_worker_spec_creates_worktree_and_metadata(tmp_path):
     repo_path, config = create_fake_repo(tmp_path)
     _init_git_repo(repo_path)
@@ -69,6 +78,7 @@ def test_create_worker_spec_creates_worktree_and_metadata(tmp_path):
         assert spec.melee_worktree.worktree_path.exists()
         assert (spec.output_dir / "worker-spec.json").exists()
         assert spec.decomp_config_path.exists()
+        assert spec.mcp_config_path is None
         assert spec.auth_seed_path == config.codex_code.auth_file
         copied_source = spec.melee_worktree.worktree_path / "src" / "melee" / "test" / "testfile.c"
         assert copied_source.exists()
@@ -220,6 +230,8 @@ def test_build_worker_container_run_args_mounts_private_claude_home(tmp_path):
     )
     try:
         args = build_worker_container_run_args(spec, config)
+        assert spec.mcp_config_path is not None
+        assert spec.mcp_config_path.exists()
     finally:
         cleanup_worker_spec(spec)
 
@@ -227,4 +239,5 @@ def test_build_worker_container_run_args_mounts_private_claude_home(tmp_path):
     assert spec.provider == "claude"
     assert spec.container_name.startswith("claude-worker-")
     assert f"{spec.agent_home_dir}:/home/decomp/.claude:rw" in joined
+    assert f"{spec.mcp_config_path}:{spec.mcp_config_path}:ro" in joined
     assert "decomp-agent-worker:test" in joined

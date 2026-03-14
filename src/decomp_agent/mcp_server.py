@@ -19,9 +19,11 @@ from mcp.server.fastmcp import FastMCP
 from decomp_agent.config import Config, load_config
 from decomp_agent.models.db import get_engine
 from decomp_agent.orchestrator.campaign import (
+    append_campaign_note,
     create_campaign_worker_task,
     format_campaign_status,
     format_campaign_task_result,
+    get_campaign_notes,
     run_campaign_next_task_summary,
     retry_campaign_task,
 )
@@ -42,9 +44,11 @@ from decomp_agent.tools.schemas import (
     CompileAndCheckParams,
     CampaignGetStatusParams,
     CampaignGetTaskResultParams,
+    CampaignGetNotesParams,
     CampaignLaunchWorkerParams,
     CampaignRunNextTaskParams,
     CampaignRetryTaskParams,
+    CampaignWriteNoteParams,
     GetContextParams,
     GetDiffParams,
     GetGhidraDecompilationParams,
@@ -67,6 +71,20 @@ def _get_config() -> Config:
     global _config
     if _config is None:
         config_path = os.environ.get("DECOMP_CONFIG")
+        if config_path:
+            p = Path(config_path)
+            if not p.exists() or not Path(load_config(p).melee.repo_path).exists():
+                # Try worker-specific config paths
+                import glob
+                worker_configs = glob.glob("/tmp/decomp-claude-workers/*/config/container.toml")
+                for wc in worker_configs:
+                    try:
+                        candidate = load_config(Path(wc))
+                        if Path(candidate.melee.repo_path).exists():
+                            config_path = wc
+                            break
+                    except Exception:
+                        continue
         _config = load_config(Path(config_path) if config_path else None)
     return _config
 
@@ -329,6 +347,26 @@ def campaign_run_next_task(campaign_id: int) -> str:
         _get_config(),
         campaign_id=params.campaign_id,
     )
+
+
+@mcp.tool()
+def campaign_write_note(campaign_id: int, note: str) -> str:
+    """Append a manager note to the campaign notes log."""
+    params = CampaignWriteNoteParams(campaign_id=campaign_id, note=note)
+    _log_campaign_tool(
+        "campaign_write_note",
+        {"campaign_id": params.campaign_id, "note_preview": params.note[:160]},
+    )
+    path = append_campaign_note(_get_engine(), params.campaign_id, params.note)
+    return f"Wrote manager note for campaign #{params.campaign_id} to {path}"
+
+
+@mcp.tool()
+def campaign_get_notes(campaign_id: int) -> str:
+    """Read the manager notes log for a campaign."""
+    params = CampaignGetNotesParams(campaign_id=campaign_id)
+    _log_campaign_tool("campaign_get_notes", {"campaign_id": params.campaign_id})
+    return get_campaign_notes(_get_engine(), params.campaign_id)
 
 
 if __name__ == "__main__":

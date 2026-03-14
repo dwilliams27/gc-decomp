@@ -63,10 +63,32 @@ def _campaign_orchestrator_lock(campaign: Campaign):
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as exc:
-        raise RuntimeError(
-            f"Campaign #{campaign.id} already has an active orchestrator session "
-            f"({lock_path})"
-        ) from exc
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            existing = {}
+        stale_pid = int(existing.get("pid", -1)) if isinstance(existing, dict) else -1
+        if stale_pid > 0:
+            try:
+                os.kill(stale_pid, 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = True
+        else:
+            alive = False
+        if not alive:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        else:
+            raise RuntimeError(
+                f"Campaign #{campaign.id} already has an active orchestrator session "
+                f"({lock_path})"
+            ) from exc
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
@@ -124,8 +146,8 @@ def _run_claude_orchestrator(
 ) -> AgentResult:
     start_time = time.monotonic()
     result = AgentResult(model="claude-campaign-orchestrator")
-    max_turns = max(config.claude_code.max_turns, 80)
-    timeout = max(config.claude_code.timeout_seconds, 5400)
+    max_turns = max(config.claude_code.orchestrator_max_turns, 1)
+    timeout = max(config.claude_code.orchestrator_timeout_seconds, 60)
     system_prompt = load_campaign_orchestrator_system_prompt()
 
     claude_args = [
@@ -343,7 +365,7 @@ def run_campaign_orchestrator_loop(
             campaign_id=campaign_id,
         )
         sessions_run += 1
-        if result.termination_reason == "rate_limited":
+        if result is not None and result.termination_reason == "rate_limited":
             now = datetime.now(timezone.utc)
             cooldown = _compute_rate_limit_cooldown(
                 config,

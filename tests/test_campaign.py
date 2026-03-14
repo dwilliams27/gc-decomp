@@ -10,10 +10,12 @@ from decomp_agent.agent.loop import AgentResult
 from decomp_agent.models.db import Campaign, CampaignTask, get_engine, sync_from_report
 from decomp_agent.orchestrator.campaign import (
     _compute_rate_limit_cooldown,
+    append_campaign_note,
     build_campaign_spec,
     create_campaign_worker_task,
     format_campaign_status,
     format_campaign_task_result,
+    get_campaign_notes,
     run_campaign_next_task_summary,
     run_campaign_loop,
     run_campaign_supervisor_loop,
@@ -234,6 +236,35 @@ def test_compute_rate_limit_cooldown_uses_fixed_claude_window(tmp_path):
     )
 
     assert cooldown == timedelta(hours=2, minutes=52)
+
+
+def test_campaign_notes_are_persisted_in_artifacts(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign-notes.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="claude",
+        )
+
+    path = append_campaign_note(
+        engine,
+        campaign.id,  # type: ignore[arg-type]
+        "Tried foo. Suspect header mismatch. Next cycle should retry with tighter guidance.",
+    )
+    notes = get_campaign_notes(engine, campaign.id)  # type: ignore[arg-type]
+    status = format_campaign_status(engine, campaign.id)  # type: ignore[arg-type]
+
+    assert path.endswith("manager-notes.md")
+    assert "Suspect header mismatch" in notes
+    assert "Manager notes:" in status
 
 
 def test_run_campaign_task_once_requeues_stale_running_task(tmp_path):

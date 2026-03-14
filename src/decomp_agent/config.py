@@ -100,8 +100,18 @@ class GhidraConfig(BaseModel):
 class ClaudeCodeConfig(BaseModel):
     enabled: bool = False
     container_name: str = "docker-worker-1"
-    timeout_seconds: int = 1800  # 30 min per function attempt
+    timeout_seconds: int = 3600  # 60 min per cold-start function attempt
     max_turns: int = 50
+    warm_start_turns: int = 80
+    near_match_turns: int = 150
+    warm_start_timeout_seconds: int = 3600
+    near_match_timeout_seconds: int = 5400
+    warm_start_threshold_pct: float = 80.0
+    near_match_threshold_pct: float = 95.0
+    file_mode_max_turns: int = 150
+    file_mode_timeout_seconds: int = 7200
+    orchestrator_max_turns: int = 30
+    orchestrator_timeout_seconds: int = 1800
     isolated_worker_enabled: bool = False
     worker_root: Path = Path("/tmp/decomp-claude-workers")
     image: str = "decomp-agent-worker:latest"

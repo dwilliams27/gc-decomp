@@ -145,9 +145,19 @@ Useful things to inspect:
 
 - campaign row in `decomp.db`
 - `campaigntask` rows for the campaign
+- manager notes:
+  - `/tmp/decomp-campaigns/campaign-<id>/artifacts/manager-notes.md`
 - worker artifact dirs under `/tmp/decomp-campaigns/campaign-<id>/` and `/tmp/decomp-*-workers/...`
 - supervisor summary artifact, when produced:
   - `/tmp/decomp-campaigns/campaign-<id>/artifacts/supervisor-summary.json`
+
+When reviewing a run, do not stop at “matched vs failed”. Also answer:
+
+- what went well?
+- which functions improved, even if they did not match?
+- what blocked progress?
+- did the orchestrator leave useful manager notes?
+- what parameter tunings look promising for the next run?
 
 Useful commands:
 

@@ -38,9 +38,85 @@ from decomp_agent.orchestrator.worker_results import (
 log = structlog.get_logger()
 
 
+def _resolve_claude_worker_budget(
+    config: Config,
+    *,
+    file_mode: bool,
+    prior_best_code: str | None,
+    prior_match_pct: float,
+) -> tuple[int, int]:
+    """Resolve Claude worker turn/time budgets from config."""
+    claude = config.claude_code
+    max_turns = claude.max_turns
+    timeout = claude.timeout_seconds
+
+    if file_mode:
+        return max(max_turns, claude.file_mode_max_turns), max(
+            timeout,
+            claude.file_mode_timeout_seconds,
+        )
+
+    if prior_best_code is None:
+        return max_turns, timeout
+
+    if prior_match_pct >= claude.near_match_threshold_pct:
+        return max(max_turns, claude.near_match_turns), max(
+            timeout,
+            claude.near_match_timeout_seconds,
+        )
+
+    if prior_match_pct >= claude.warm_start_threshold_pct:
+        return max(max_turns, claude.warm_start_turns), max(
+            timeout,
+            claude.warm_start_timeout_seconds,
+        )
+
+    return max(max_turns, claude.warm_start_turns), max(
+        timeout,
+        claude.warm_start_timeout_seconds,
+    )
+
+
 def _claude_shared_lock_path() -> Path:
     """Return the host-side lock path for the shared Claude worker container."""
     return Path("/tmp/decomp-claude-shared-worker.lock")
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return whether a host PID is still alive."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _reap_stale_claude_shared_lock(lock_path: Path) -> bool:
+    """Remove a stale shared Claude lock file left by a dead process."""
+    try:
+        contents = lock_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+    try:
+        pid = int(contents)
+    except ValueError:
+        pid = -1
+
+    if _pid_is_alive(pid):
+        return False
+
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 @contextmanager
@@ -52,6 +128,7 @@ def claude_shared_worker_lock():
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             break
         except FileExistsError:
+            _reap_stale_claude_shared_lock(lock_path)
             time.sleep(1)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -156,31 +233,23 @@ def run_headless(
 
     # Build the docker exec command
     container = config.claude_code.container_name
-    max_turns = config.claude_code.max_turns
-    timeout = config.claude_code.timeout_seconds
-
-    # File mode gets many more turns — it's working on multiple functions.
-    # Warm starts get more turns than cold starts.
-    if file_mode:
-        max_turns = max(max_turns, 100)
-        timeout = max(timeout, 5400)  # 90 min
-    elif prior_best_code is not None:
-        if prior_match_pct >= 75.0:
-            max_turns = max(max_turns, 80)
-            timeout = max(timeout, 3600)
-        else:
-            max_turns = max(max_turns, 50)
-            timeout = max(timeout, 2400)
+    max_turns, timeout = _resolve_claude_worker_budget(
+        config,
+        file_mode=file_mode,
+        prior_best_code=prior_best_code,
+        prior_match_pct=prior_match_pct,
+    )
 
     system_prompt = load_headless_system_prompt()
 
+    mcp_config_path = "/app/mcp.json"
     claude_args = [
         "claude",
         "-p", shlex.quote(prompt),
         "--output-format", "json",
         "--model", "claude-opus-4-6",
         "--append-system-prompt", shlex.quote(system_prompt),
-        "--mcp-config", "/app/mcp.json",
+        "--mcp-config", mcp_config_path,
         "--dangerously-skip-permissions",
         "--max-turns", str(max_turns),
     ]
@@ -204,6 +273,10 @@ def run_headless(
         )
         write_worker_artifact_manifest(isolated_spec)
         worker_config = _config_for_repo_path(config, isolated_spec.melee_worktree.worktree_path)
+        if isolated_spec.mcp_config_path is None:
+            raise RuntimeError("Isolated Claude worker missing MCP config path")
+        claude_args[claude_args.index("--mcp-config") + 1] = shlex.quote(str(isolated_spec.mcp_config_path))
+        shell_cmd = " ".join(claude_args)
         start_args = build_worker_container_run_args(isolated_spec, config)
         subprocess.run(
             start_args,

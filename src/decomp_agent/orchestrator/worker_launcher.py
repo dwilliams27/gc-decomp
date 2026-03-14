@@ -47,6 +47,7 @@ class WorkerSpec:
     container_name: str
     melee_worktree: WorktreeSpec
     decomp_config_path: Path
+    mcp_config_path: Path | None
     auth_seed_path: Path | None
 
 
@@ -78,6 +79,22 @@ def render_worker_container_config(config: Config, *, repo_path: Path) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def render_worker_mcp_config(*, decomp_config_path: Path) -> str:
+    """Render a worker-local MCP config for Claude workers."""
+    return json.dumps(
+        {
+            "mcpServers": {
+                "decomp-tools": {
+                    "command": "python",
+                    "args": ["-m", "decomp_agent.mcp_server"],
+                    "env": {"DECOMP_CONFIG": str(decomp_config_path)},
+                }
+            }
+        },
+        indent=2,
+    )
 
 
 def build_worker_container_run_args(
@@ -142,6 +159,11 @@ def build_worker_container_run_args(
         "sleep",
         "infinity",
     ])
+    if spec.mcp_config_path is not None:
+        args[args.index(image):args.index(image)] = [
+            "-v",
+            f"{spec.mcp_config_path}:{spec.mcp_config_path}:ro",
+        ]
     return args
 
 
@@ -222,6 +244,7 @@ def create_worker_spec(
     worktree_path = root_dir / "repo"
     config_dir = root_dir / "config"
     decomp_config_path = config_dir / "container.toml"
+    mcp_config_path = config_dir / "mcp.json" if provider == "claude" else None
 
     _reset_worker_root(config.melee.repo_path, root_dir, worktree_path)
     root_dir.mkdir(parents=True, exist_ok=True)
@@ -234,6 +257,11 @@ def create_worker_spec(
         render_worker_container_config(config, repo_path=worktree_path),
         encoding="utf-8",
     )
+    if mcp_config_path is not None:
+        mcp_config_path.write_text(
+            render_worker_mcp_config(decomp_config_path=decomp_config_path),
+            encoding="utf-8",
+        )
 
     auth_seed: Path | None = None
     if provider == "codex":
@@ -253,6 +281,7 @@ def create_worker_spec(
         container_name=f"{provider}-worker-{worker_id}",
         melee_worktree=worktree,
         decomp_config_path=decomp_config_path,
+        mcp_config_path=mcp_config_path,
         auth_seed_path=auth_seed,
     )
     (output_dir / "worker-spec.json").write_text(
@@ -266,6 +295,7 @@ def create_worker_spec(
                 "repo_path": str(worktree_path),
                 "agent_home_dir": str(agent_home_dir),
                 "decomp_config_path": str(decomp_config_path),
+                "mcp_config_path": str(mcp_config_path) if mcp_config_path else None,
                 "auth_seed_path": str(auth_seed) if auth_seed else None,
             },
             indent=2,

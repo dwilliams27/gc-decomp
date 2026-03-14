@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from unittest.mock import patch
 
@@ -151,3 +152,35 @@ def test_campaign_orchestrator_lock_rejects_overlap(tmp_path):
                 assert "active orchestrator session" in str(exc)
             else:
                 raise AssertionError("Expected overlapping orchestrator run to fail")
+
+
+def test_campaign_orchestrator_lock_reaps_stale_file(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.root_dir = tmp_path / "campaigns"
+    engine = get_engine(tmp_path / "campaign-orchestrator-stale-lock.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="mixed",
+        )
+        campaign_id = campaign.id
+
+    with Session(engine) as session:
+        campaign = session.get(Campaign, campaign_id)
+        assert campaign is not None
+        lock_path = tmp_path / "campaigns" / f"campaign-{campaign_id}" / "artifacts" / "orchestrator.lock"
+        lock_path.write_text(
+            json.dumps({"campaign_id": campaign_id, "pid": 999999, "timestamp": "2026-03-13T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+
+        with _campaign_orchestrator_lock(campaign):
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            assert payload["pid"] == os.getpid()
