@@ -18,6 +18,7 @@ services:
       HTTPS_PROXY: http://proxy:3128
       HTTP_PROXY: http://proxy:3128
       DECOMP_CONFIG: /app/config/container.toml
+      CAMPAIGN_IPC_DIR: /tmp/decomp-campaigns/ipc
       CODEX_AUTH_SEED: /seed/codex/auth.json
       MAX_MCP_OUTPUT_TOKENS: "50000"
       PYTHONPATH: /workspace/gc-decomp/src

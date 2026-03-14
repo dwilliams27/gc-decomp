@@ -27,6 +27,7 @@ from decomp_agent.orchestrator.campaign import (
     run_campaign_next_task_summary,
     retry_campaign_task,
 )
+from decomp_agent.orchestrator.campaign_ipc import submit_campaign_ipc_request
 from decomp_agent.tools.registry import (
     _check_inline_asm,
     _handle_compile_and_check,
@@ -107,6 +108,64 @@ def _log_campaign_tool(tool_name: str, payload: dict[str, object]) -> None:
             handle.write(json.dumps(entry) + "\n")
     except Exception:
         pass
+
+
+def _campaign_tool_result(tool_name: str, payload: dict[str, object]) -> str:
+    """Route campaign control-plane operations through the host when configured."""
+    if os.environ.get("CAMPAIGN_IPC_DIR"):
+        return submit_campaign_ipc_request(tool_name, payload)
+
+    if tool_name == "campaign_get_status":
+        return format_campaign_status(_get_engine(), int(payload["campaign_id"]))
+    if tool_name == "campaign_get_task_result":
+        return format_campaign_task_result(
+            _get_engine(),
+            int(payload["campaign_id"]),
+            int(payload["task_id"]),
+        )
+    if tool_name == "campaign_launch_worker":
+        task = create_campaign_worker_task(
+            _get_engine(),
+            campaign_id=int(payload["campaign_id"]),
+            function_name=str(payload["function_name"]),
+            provider=str(payload.get("provider", "")),
+            instructions=str(payload.get("instructions", "")),
+            priority=int(payload["priority"]) if payload.get("priority") is not None else None,
+            scope=str(payload.get("scope", "function")),
+        )
+        return (
+            f"Queued campaign task #{task.id} for {task.function_name} "
+            f"(provider={task.provider or 'default'}, priority={task.priority}, scope={task.scope})"
+        )
+    if tool_name == "campaign_retry_task":
+        task = retry_campaign_task(
+            _get_engine(),
+            campaign_id=int(payload["campaign_id"]),
+            task_id=int(payload["task_id"]),
+            provider=str(payload.get("provider", "")),
+            instructions=str(payload.get("instructions", "")),
+            priority=int(payload["priority"]) if payload.get("priority") is not None else None,
+        )
+        return (
+            f"Queued retry task #{task.id} for {task.function_name or task.scope} "
+            f"(provider={task.provider or 'default'}, priority={task.priority})"
+        )
+    if tool_name == "campaign_run_next_task":
+        return run_campaign_next_task_summary(
+            _get_engine(),
+            _get_config(),
+            campaign_id=int(payload["campaign_id"]),
+        )
+    if tool_name == "campaign_write_note":
+        path = append_campaign_note(
+            _get_engine(),
+            int(payload["campaign_id"]),
+            str(payload["note"]),
+        )
+        return f"Wrote manager note for campaign #{payload['campaign_id']} to {path}"
+    if tool_name == "campaign_get_notes":
+        return get_campaign_notes(_get_engine(), int(payload["campaign_id"]))
+    raise ValueError(f"Unsupported campaign tool '{tool_name}'")
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +294,7 @@ def campaign_get_status(campaign_id: int) -> str:
     completed, and failed worker tasks."""
     params = CampaignGetStatusParams(campaign_id=campaign_id)
     _log_campaign_tool("campaign_get_status", {"campaign_id": params.campaign_id})
-    return format_campaign_status(_get_engine(), params.campaign_id)
+    return _campaign_tool_result("campaign_get_status", {"campaign_id": params.campaign_id})
 
 
 @mcp.tool()
@@ -247,7 +306,10 @@ def campaign_get_task_result(campaign_id: int, task_id: int) -> str:
         "campaign_get_task_result",
         {"campaign_id": params.campaign_id, "task_id": params.task_id},
     )
-    return format_campaign_task_result(_get_engine(), params.campaign_id, params.task_id)
+    return _campaign_tool_result(
+        "campaign_get_task_result",
+        {"campaign_id": params.campaign_id, "task_id": params.task_id},
+    )
 
 
 @mcp.tool()
@@ -280,18 +342,16 @@ def campaign_launch_worker(
             "instructions": params.instructions or "",
         },
     )
-    task = create_campaign_worker_task(
-        _get_engine(),
-        campaign_id=params.campaign_id,
-        function_name=params.function_name,
-        provider=params.provider or "",
-        instructions=params.instructions or "",
-        priority=params.priority,
-        scope=params.scope or "function",
-    )
-    return (
-        f"Queued campaign task #{task.id} for {task.function_name} "
-        f"(provider={task.provider or 'default'}, priority={task.priority}, scope={task.scope})"
+    return _campaign_tool_result(
+        "campaign_launch_worker",
+        {
+            "campaign_id": params.campaign_id,
+            "function_name": params.function_name,
+            "provider": params.provider or "",
+            "instructions": params.instructions or "",
+            "priority": params.priority,
+            "scope": params.scope or "function",
+        },
     )
 
 
@@ -322,17 +382,15 @@ def campaign_retry_task(
             "instructions": params.instructions or "",
         },
     )
-    task = retry_campaign_task(
-        _get_engine(),
-        campaign_id=params.campaign_id,
-        task_id=params.task_id,
-        provider=params.provider or "",
-        instructions=params.instructions or "",
-        priority=params.priority,
-    )
-    return (
-        f"Queued retry task #{task.id} for {task.function_name or task.scope} "
-        f"(provider={task.provider or 'default'}, priority={task.priority})"
+    return _campaign_tool_result(
+        "campaign_retry_task",
+        {
+            "campaign_id": params.campaign_id,
+            "task_id": params.task_id,
+            "provider": params.provider or "",
+            "instructions": params.instructions or "",
+            "priority": params.priority,
+        },
     )
 
 
@@ -342,11 +400,7 @@ def campaign_run_next_task(campaign_id: int) -> str:
     pipeline and return the result summary."""
     params = CampaignRunNextTaskParams(campaign_id=campaign_id)
     _log_campaign_tool("campaign_run_next_task", {"campaign_id": params.campaign_id})
-    return run_campaign_next_task_summary(
-        _get_engine(),
-        _get_config(),
-        campaign_id=params.campaign_id,
-    )
+    return _campaign_tool_result("campaign_run_next_task", {"campaign_id": params.campaign_id})
 
 
 @mcp.tool()
@@ -357,8 +411,10 @@ def campaign_write_note(campaign_id: int, note: str) -> str:
         "campaign_write_note",
         {"campaign_id": params.campaign_id, "note_preview": params.note[:160]},
     )
-    path = append_campaign_note(_get_engine(), params.campaign_id, params.note)
-    return f"Wrote manager note for campaign #{params.campaign_id} to {path}"
+    return _campaign_tool_result(
+        "campaign_write_note",
+        {"campaign_id": params.campaign_id, "note": params.note},
+    )
 
 
 @mcp.tool()
@@ -366,7 +422,7 @@ def campaign_get_notes(campaign_id: int) -> str:
     """Read the manager notes log for a campaign."""
     params = CampaignGetNotesParams(campaign_id=campaign_id)
     _log_campaign_tool("campaign_get_notes", {"campaign_id": params.campaign_id})
-    return get_campaign_notes(_get_engine(), params.campaign_id)
+    return _campaign_tool_result("campaign_get_notes", {"campaign_id": params.campaign_id})
 
 
 if __name__ == "__main__":

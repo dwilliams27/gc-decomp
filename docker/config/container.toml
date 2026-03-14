@@ -9,7 +9,7 @@ max_iterations = 30
 enabled = false  # We're already inside the build container
 
 [orchestration]
-db_path = "/workspace/gc-decomp/decomp.db"
+db_path = "/tmp/decomp-agent-container.db"
 
 [ghidra]
 enabled = false

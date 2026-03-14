@@ -27,6 +27,7 @@ from decomp_agent.orchestrator.campaign import (
     _ensure_utc,
     _provider_cooldown_until,
 )
+from decomp_agent.orchestrator.campaign_ipc import campaign_ipc_service
 from decomp_agent.orchestrator.headless_context import (
     build_campaign_orchestrator_prompt,
     load_campaign_orchestrator_system_prompt,
@@ -140,6 +141,7 @@ def _set_orchestrator_provider_cooldown(
 
 
 def _run_claude_orchestrator(
+    engine: Engine,
     campaign: Campaign,
     prompt: str,
     config: Config,
@@ -168,21 +170,22 @@ def _run_claude_orchestrator(
         "-c",
         " ".join(claude_args),
     ]
-    with claude_shared_worker_lock():
-        cleanup_shared_claude_processes(config)
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
+    with campaign_ipc_service(engine, config):
+        with claude_shared_worker_lock():
             cleanup_shared_claude_processes(config)
-            result.elapsed_seconds = time.monotonic() - start_time
-            result.termination_reason = "timeout"
-            result.error = f"Claude orchestrator timed out after {timeout}s"
-            return result
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                cleanup_shared_claude_processes(config)
+                result.elapsed_seconds = time.monotonic() - start_time
+                result.termination_reason = "timeout"
+                result.error = f"Claude orchestrator timed out after {timeout}s"
+                return result
 
     if proc.returncode != 0:
         result.elapsed_seconds = time.monotonic() - start_time
@@ -215,6 +218,7 @@ def _run_claude_orchestrator(
 
 
 def _run_codex_orchestrator(
+    engine: Engine,
     campaign: Campaign,
     prompt: str,
     config: Config,
@@ -256,18 +260,19 @@ def _run_codex_orchestrator(
         "-lc",
         " ".join(codex_args),
     ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        result.elapsed_seconds = time.monotonic() - start_time
-        result.termination_reason = "timeout"
-        result.error = f"Codex orchestrator timed out after {timeout}s"
-        return result
+    with campaign_ipc_service(engine, config):
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            result.elapsed_seconds = time.monotonic() - start_time
+            result.termination_reason = "timeout"
+            result.error = f"Codex orchestrator timed out after {timeout}s"
+            return result
 
     termination_reason, error_detail = _parse_codex_result(proc.stdout or "", proc.stderr or "", result)
     result.termination_reason = termination_reason
@@ -295,9 +300,9 @@ def run_campaign_orchestrator_once(
         prompt = build_campaign_orchestrator_prompt(campaign_id, campaign.source_file, config)
 
         if campaign.orchestrator_provider == "claude":
-            result = _run_claude_orchestrator(campaign, prompt, config)
+            result = _run_claude_orchestrator(engine, campaign, prompt, config)
         elif campaign.orchestrator_provider == "codex":
-            result = _run_codex_orchestrator(campaign, prompt, config)
+            result = _run_codex_orchestrator(engine, campaign, prompt, config)
         else:
             raise ValueError(f"Unsupported orchestrator provider '{campaign.orchestrator_provider}'")
 
