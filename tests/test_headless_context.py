@@ -32,6 +32,7 @@ def test_load_campaign_orchestrator_system_prompt_is_manager_focused():
     assert "campaign MCP tools" in prompt
     assert "Do not use write_function" in prompt
     assert "Maintain explicit written notes" in prompt
+    assert "Move quickly" in prompt
 
 
 def test_build_headless_task_prompt_file_mode_includes_status(tmp_path):
@@ -130,3 +131,4 @@ def test_build_campaign_orchestrator_prompt_mentions_campaign_tools(tmp_path):
     assert "campaign_write_note" in prompt
     assert "campaign_run_next_task" in prompt
     assert "campaign_launch_worker" in prompt
+    assert "queue or nominate at least one worker within the first few turns" in prompt

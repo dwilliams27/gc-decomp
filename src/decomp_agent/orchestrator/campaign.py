@@ -115,7 +115,8 @@ def append_campaign_note(engine: Engine, campaign_id: int, note: str) -> str:
         if notes_path is None:
             raise ValueError(f"Campaign #{campaign_id} has no artifact_dir")
         timestamp = datetime.now(timezone.utc).isoformat()
-        block = f"## {timestamp}\n\n{note.strip()}\n\n"
+        normalized_note = note.replace("\\n", "\n").strip()
+        block = f"## {timestamp}\n\n{normalized_note}\n\n"
         with notes_path.open("a", encoding="utf-8") as handle:
             handle.write(block)
         return str(notes_path)
@@ -171,6 +172,69 @@ def _write_supervisor_summary_artifact(
     }
     summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return str(summary_path)
+
+
+def _write_supervisor_checkpoint(
+    engine: Engine,
+    *,
+    campaign_id: int,
+    cycles_run: int,
+    orchestrator_sessions: int,
+    tasks_run: int,
+    timed_out: bool,
+    stopped_by_limit: bool,
+    stop_reason: str,
+    no_progress_cycles: int,
+) -> str:
+    """Persist an interim supervisor summary while long-running work is active."""
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        tasks = list_campaign_tasks(session, campaign_id)
+        pending_tasks = sum(1 for task in tasks if task.status == "pending")
+        running_tasks = sum(1 for task in tasks if task.status == "running")
+        failed_tasks = sum(1 for task in tasks if task.status == "failed")
+        completed_tasks = sum(1 for task in tasks if task.status == "completed")
+        summary = CampaignSupervisorSummary(
+            campaign_id=campaign_id,
+            cycles_run=cycles_run,
+            orchestrator_sessions=orchestrator_sessions,
+            tasks_run=tasks_run,
+            completed_tasks=completed_tasks,
+            failed_tasks=failed_tasks,
+            pending_tasks=pending_tasks,
+            running_tasks=running_tasks,
+            timed_out=timed_out,
+            stopped_by_limit=stopped_by_limit,
+            stop_reason=stop_reason,
+            no_progress_cycles=no_progress_cycles,
+        )
+        return _write_supervisor_summary_artifact(campaign, summary)
+
+
+def _append_supervisor_cycle_note(
+    engine: Engine,
+    *,
+    campaign_id: int,
+    cycle_index: int,
+    claimed_tasks: list[tuple[int, str]],
+    orchestrator_sessions: int,
+    stop_reason: str,
+) -> None:
+    """Record host-side cycle progress even if the manager forgets to write notes."""
+    lines = [
+        f"Supervisor cycle {cycle_index}",
+        f"Orchestrator sessions so far: {orchestrator_sessions}",
+    ]
+    if claimed_tasks:
+        lines.append("Host dispatched tasks:")
+        for task_id, label in claimed_tasks:
+            lines.append(f"- #{task_id} {label}")
+    else:
+        lines.append("Host dispatched tasks: none")
+    lines.append(f"Current supervisor state: {stop_reason}")
+    append_campaign_note(engine, campaign_id, "\n".join(lines))
 
 
 def _task_label(task: CampaignTask) -> str:
@@ -877,6 +941,32 @@ def run_campaign_supervisor_loop(
             dispatch_budget=dispatch_budget,
         )
         if claimed_task_ids:
+            with Session(engine) as session:
+                claimed_tasks = []
+                for task_id in claimed_task_ids:
+                    task = get_campaign_task(session, task_id)
+                    if task is not None:
+                        claimed_tasks.append((task_id, _task_label(task)))
+            tasks_run += len(claimed_task_ids)
+            _append_supervisor_cycle_note(
+                engine,
+                campaign_id=campaign_id,
+                cycle_index=cycles_run + 1,
+                claimed_tasks=claimed_tasks,
+                orchestrator_sessions=orchestrator_sessions,
+                stop_reason="dispatching_tasks",
+            )
+            _write_supervisor_checkpoint(
+                engine,
+                campaign_id=campaign_id,
+                cycles_run=cycles_run,
+                orchestrator_sessions=orchestrator_sessions,
+                tasks_run=tasks_run,
+                timed_out=timed_out,
+                stopped_by_limit=max_cycles is not None and (cycles_run + 1) >= max_cycles,
+                stop_reason="dispatching_tasks",
+                no_progress_cycles=no_progress_cycles,
+            )
             if len(claimed_task_ids) == 1:
                 _run_claimed_campaign_task(
                     engine,
@@ -898,9 +988,27 @@ def run_campaign_supervisor_loop(
                     ]
                     for future in futures:
                         future.result()
-            tasks_run += len(claimed_task_ids)
 
         if not claimed_task_ids and running_tasks == 0:
+            _append_supervisor_cycle_note(
+                engine,
+                campaign_id=campaign_id,
+                cycle_index=cycles_run + 1,
+                claimed_tasks=[],
+                orchestrator_sessions=orchestrator_sessions,
+                stop_reason="waiting_for_next_eligible_task",
+            )
+            _write_supervisor_checkpoint(
+                engine,
+                campaign_id=campaign_id,
+                cycles_run=cycles_run,
+                orchestrator_sessions=orchestrator_sessions,
+                tasks_run=tasks_run,
+                timed_out=timed_out,
+                stopped_by_limit=max_cycles is not None and (cycles_run + 1) >= max_cycles,
+                stop_reason="waiting_for_next_eligible_task",
+                no_progress_cycles=no_progress_cycles,
+            )
             with Session(engine) as session:
                 campaign = get_campaign(session, campaign_id)
                 if campaign is None:

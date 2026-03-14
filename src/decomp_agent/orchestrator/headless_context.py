@@ -40,6 +40,8 @@ Behavior rules:
 - Be relentless and persistent.
 - Keep the queue moving.
 - Each session is a short planning pass, not an endless conversation.
+- Move quickly: do not spend the whole session analyzing. Queue concrete work early.
+- Within the first few turns, you should normally: inspect status, inspect notes, queue or nominate at least one worker task, write a note, and stop.
 - Maintain explicit written notes for the campaign. Record what improved, what failed, what went well, suspected blockers, and what the next cycle should try.
 - When a run exposes a likely system-tuning opportunity, note that too: turn budgets, timeouts, worker count, retry policy, queue policy, or prompt gaps.
 - After inspecting status, queueing/retrying workers, and nominating the next task, stop so the host can execute the next cycle.
@@ -216,6 +218,8 @@ def build_campaign_orchestrator_prompt(
         "Campaign strategy:\n"
         "- Your first action must be calling campaign_get_status.\n"
         "- Early in every planning pass, call campaign_get_notes so you can continue from prior file-level context.\n"
+        "- Do not try to fully analyze every remaining function before acting.\n"
+        "- In a normal pass, queue or nominate at least one worker within the first few turns.\n"
         "- Before stopping, call campaign_write_note with a concise update covering what went well, progress, blockers, the next plan, and any plausible parameter tunings that could improve future cycles.\n"
         "- After reading status, if there are pending tasks and no running tasks, your next action must be campaign_run_next_task to queue the next host-dispatched worker.\n"
         "- If a worker got close but stalled, inspect it with campaign_get_task_result.\n"
@@ -223,6 +227,7 @@ def build_campaign_orchestrator_prompt(
         "- Use campaign_launch_worker for fresh experiments on specific functions.\n"
         "- Use campaign_run_next_task to tell the host supervisor which queued task should run next.\n"
         "- This is one bounded planning pass. Make your decisions, queue work, then stop.\n"
+        "- Prefer shipping one good worker instruction now over writing a long analysis with no dispatched work.\n"
         "- Prefer parallel exploration across promising functions, but keep the "
         "queue coherent and focused.\n"
         "- If you suspect headers or shared types are the blocker, explicitly "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from sqlmodel import Session, select
@@ -286,6 +287,31 @@ def test_campaign_notes_are_persisted_in_artifacts(tmp_path):
     assert path.endswith("manager-notes.md")
     assert "Suspect header mismatch" in notes
     assert "Manager notes:" in status
+
+
+def test_campaign_notes_normalize_escaped_newlines(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign-notes-format.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="claude",
+        )
+
+    append_campaign_note(
+        engine,
+        campaign.id,  # type: ignore[arg-type]
+        "Header\\n\\nBody line",
+    )
+    notes = get_campaign_notes(engine, campaign.id)  # type: ignore[arg-type]
+    assert "Header\n\nBody line" in notes
 
 
 def test_run_campaign_task_once_requeues_stale_running_task(tmp_path):
@@ -758,3 +784,71 @@ def test_run_campaign_supervisor_loop_runs_orchestrator_and_tasks(tmp_path):
     assert summary.completed_tasks == 2
     assert summary.pending_tasks == 1
     assert summary.stopped_by_limit is True
+
+
+def test_run_campaign_supervisor_loop_writes_cycle_artifacts_before_task_execution(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign-cycle-artifacts.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="codex",
+            worker_provider_policy="codex",
+        )
+        campaign_id = campaign.id
+        artifact_dir = campaign.artifact_dir
+
+    def _fake_run_claimed(*args, **kwargs):
+        del args, kwargs
+        notes_path = Path(artifact_dir) / "manager-notes.md"
+        summary_path = Path(artifact_dir) / "supervisor-summary.json"
+        assert notes_path.exists()
+        assert summary_path.exists()
+        assert "Host dispatched tasks:" in notes_path.read_text(encoding="utf-8")
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert payload["stop_reason"] == "dispatching_tasks"
+        with Session(engine) as session:
+            refreshed_campaign = session.get(Campaign, campaign_id)
+            task = session.exec(
+                select(CampaignTask)
+                .where(CampaignTask.campaign_id == campaign_id)
+                .order_by(CampaignTask.priority.desc(), CampaignTask.id.asc())
+            ).first()
+            assert refreshed_campaign is not None
+            assert task is not None
+        return (
+            refreshed_campaign,
+            task,
+            AgentResult(
+                matched=False,
+                best_match_percent=91.0,
+                termination_reason="model_stopped",
+            ),
+        )
+
+    with (
+        patch(
+            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_loop",
+            return_value=(campaign, type("Summary", (), {"sessions_run": 1})()),
+        ),
+        patch(
+            "decomp_agent.orchestrator.campaign._run_claimed_campaign_task",
+            side_effect=_fake_run_claimed,
+        ),
+    ):
+        refreshed_campaign, summary = run_campaign_supervisor_loop(
+            engine,
+            config,
+            campaign_id=campaign_id,  # type: ignore[arg-type]
+            max_cycles=1,
+            max_tasks_per_cycle=1,
+        )
+
+    assert refreshed_campaign.status == "stopped"
+    assert summary.tasks_run == 1

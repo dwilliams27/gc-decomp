@@ -23,6 +23,7 @@ services:
       PYTHONPATH: /workspace/gc-decomp/src
     volumes:
       - ${MELEE_REPO_PATH}:${MELEE_REPO_PATH}:rw
+      - /tmp/decomp-campaigns:/tmp/decomp-campaigns:rw
       - ${HOME}/.claude:/home/decomp/.claude:rw
       - ${HOME}/.codex/auth.json:/seed/codex/auth.json:ro
       - ..:/workspace/gc-decomp:rw
