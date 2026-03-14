@@ -162,21 +162,34 @@ Practical target-selection guidance:
 - bias toward one-file campaigns with low merge-conflict risk
 
 The current recommended overnight path is the `campaign` CLI, not ad hoc batch runs.
+The standard lifecycle commands are:
+
+```bash
+decomp-agent --config config/default.toml campaign launch melee/mn/mnsnap.c --orchestrator-provider claude --worker-provider-policy claude --max-active-workers 1 --timeout-hours 8
+decomp-agent --config config/default.toml campaign stop 5
+```
 
 **Campaign launch rules**
 
 - Use the real `decomp-agent` entrypoint, not `python -m decomp_agent.cli`. In this repo, `python -m decomp_agent.cli` may import the module without actually invoking the Click app, which can look like a successful no-op.
-- Host control-plane loops (`campaign orchestrate`, `campaign run`, `campaign supervise`) must be launched on the host with enough permissions to:
+- Prefer `campaign launch` and `campaign stop` over manually starting `campaign orchestrate` and `campaign run`. Those manual subcommands still exist for debugging, but they are no longer the standard operator path.
+- `campaign launch` must be run on the host with enough permissions to:
   - talk to Docker
   - create/remove git worktrees
   - manage isolated worker containers
 - Do not launch overnight campaign control loops from a restricted sandbox that cannot access the Docker socket or mutate `.git/worktrees`.
+- `campaign launch` writes `campaign-processes.json`, `orchestrator.log`, and `worker.log` into the campaign artifact dir. Treat those as the source of truth for process lifecycle.
 - After launch, immediately validate that the run is real:
   - campaign row exists in `decomp.db`
   - task statuses start changing
   - manager notes or supervisor summary artifacts appear
   - an isolated worker container appears for the active task
-- If you are launching long-running loops from an interactive agent session, prefer persistent PTY sessions over fragile background/nohup launches unless you have already proven the background method works in that environment.
+  - the artifact dir contains `campaign-processes.json`
+- Use `campaign stop <id>` for normal shutdown. It is responsible for:
+  - stopping the host manager and worker loops
+  - removing leftover isolated worker containers for that file
+  - marking the campaign stopped in the DB
+  - marking any running tasks stopped
 
 ## Container Delegation
 

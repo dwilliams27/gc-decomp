@@ -159,6 +159,14 @@ Practical target-selection guidance:
 - bias toward one-file campaigns with low merge-conflict risk
 
 The current recommended overnight path is the `campaign` CLI, not ad hoc batch runs.
+The standard lifecycle commands are:
+
+```bash
+decomp-agent --config config/default.toml campaign launch melee/mn/mnsnap.c --orchestrator-provider claude --worker-provider-policy claude --max-active-workers 1 --timeout-hours 8
+decomp-agent --config config/default.toml campaign stop 5
+```
+
+`campaign launch` is the normal operator entrypoint. It creates the campaign, launches the orchestrator loop and worker loop in the background, and writes `campaign-processes.json`, `orchestrator.log`, and `worker.log` into the campaign artifact dir. `campaign stop` is the normal shutdown path; it stops those host loops, removes leftover isolated worker containers for the campaign source file, and marks the campaign/tasks stopped in the DB.
 
 ## Container Delegation
 

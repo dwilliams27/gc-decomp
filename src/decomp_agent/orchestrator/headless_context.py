@@ -222,6 +222,7 @@ def build_campaign_orchestrator_prompt(
         "- Early in every planning pass, call campaign_get_notes so you can continue from prior file-level context.\n"
         "- Read running-task live status carefully. If a worker is still running and its live status shows no materially new information, do not keep spawning duplicate follow-up tasks every pass.\n"
         "- When a worker is still actively iterating on a promising function, prefer waiting and taking notes over queue spam.\n"
+        "- Treat live worker status as provisional. Only consider a function truly done when the exact target function is confirmed MATCH, not when other functions in the same file are matched or when the target is only at 100% structural/register-allocation parity.\n"
         "- Do not try to fully analyze every remaining function before acting.\n"
         "- In a normal pass, queue or nominate at least one worker within the first few turns.\n"
         "- Before stopping, call campaign_write_note with a concise update covering what went well, progress, blockers, the next plan, and any plausible parameter tunings that could improve future cycles.\n"

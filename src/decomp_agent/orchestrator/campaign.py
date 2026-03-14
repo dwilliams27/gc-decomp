@@ -50,8 +50,10 @@ _HARD_RATE_LIMIT_PATTERNS = (
 )
 _CLAUDE_RATE_LIMIT_ANCHOR_UTC = datetime(2026, 3, 13, 7, 4, tzinfo=timezone.utc)
 _CLAUDE_RATE_LIMIT_WINDOW = timedelta(hours=5)
-_MATCH_RE = re.compile(r":\s*(\d+(?:\.\d+)?)%")
-_TASK_FUNCTION_RE = re.compile(r"([A-Za-z0-9_]+):\s*(\d+(?:\.\d+)?)%")
+_TASK_MATCH_LINE_RE = re.compile(
+    r"^\s*([A-Za-z0-9_]+):\s*(MATCH|\d+(?:\.\d+)?%)",
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -138,17 +140,55 @@ def _predicted_worker_root(
     return worker_root / worker_id
 
 
-def _extract_live_match(function_name: str, text: str) -> float | None:
+def _extract_live_match_from_text(function_name: str, text: str) -> float | None:
     best = None
-    for line in text.splitlines():
-        if function_name not in line:
+    for match in _TASK_MATCH_LINE_RE.finditer(text):
+        if match.group(1) != function_name:
             continue
-        if "MATCH" in line:
-            best = max(best or 0.0, 100.0)
-        match = _TASK_FUNCTION_RE.search(line)
-        if match and match.group(1) == function_name:
-            pct = float(match.group(2))
-            best = max(best or 0.0, pct)
+        value = match.group(2)
+        pct = 100.0 if value == "MATCH" else float(value.rstrip("%"))
+        best = max(best or 0.0, pct)
+    return best
+
+
+def _candidate_texts_from_object(value: object) -> list[str]:
+    texts: list[str] = []
+    if isinstance(value, str):
+        texts.append(value)
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if decoded is not None and decoded is not value:
+            texts.extend(_candidate_texts_from_object(decoded))
+    elif isinstance(value, dict):
+        for nested in value.values():
+            texts.extend(_candidate_texts_from_object(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            texts.extend(_candidate_texts_from_object(nested))
+    return texts
+
+
+def _extract_live_match(function_name: str, raw: str) -> float | None:
+    best = None
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        candidate_texts = [line]
+        try:
+            entry = json.loads(line)
+        except Exception:
+            entry = None
+        if isinstance(entry, dict):
+            tool_result = entry.get("toolUseResult")
+            candidate_texts.extend(_candidate_texts_from_object(tool_result))
+            message = entry.get("message")
+            candidate_texts.extend(_candidate_texts_from_object(message))
+        for text in candidate_texts:
+            pct = _extract_live_match_from_text(function_name, text)
+            if pct is not None:
+                best = max(best or 0.0, pct)
     return best
 
 
