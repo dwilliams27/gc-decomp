@@ -932,24 +932,27 @@ let farRidgeTreeCache: SimpleTree[] | null = null;
 function getFarRidgeTreeCache(): SimpleTree[] {
   if (!farRidgeTreeCache) {
     farRidgeTreeCache = [];
-    // Multiple rows from crest down the face of the far ridge
-    const rowCount = 6;
+    // Dense forest covering ALL back mounds — 10 rows from crest downward
+    const rowCount = 10;
     let globalIdx = 0;
     for (let row = 0; row < rowCount; row++) {
-      const yOff = row * 8 + seededF(row * 7 + 950) * 4; // 0, ~8, ~16, ~24, ~32, ~40 down the slope
-      // Trees further down are slightly darker/fainter
+      const rowF = row / rowCount;
+      const yOffBase = row * 6;
       const shades = [
-        ["#0b1018", "#0c111a", "#0a0f17", "#0d1219"],  // crest
-        ["#0a0e16", "#0b1018", "#090e15", "#0c1118"],   // mid
-        ["#090d14", "#0a0f16", "#080c13", "#0b1017"],   // lower
-      ][Math.min(2, Math.floor(row / 2))];
-      let fx = 0.03;
+        ["#0b1018", "#0c111a", "#0a0f17", "#0d1219"],
+        ["#0a0e16", "#0b1018", "#090e15", "#0c1118"],
+        ["#090d14", "#0a0f16", "#080c13", "#0b1017"],
+      ][Math.min(2, Math.floor(row / 3))];
+      let fx = 0.02;
       while (fx < 0.97) {
-        const density = 0.5 + 0.5 * Math.abs(Math.sin(fx * 12 + 3.7 + row * 2.1));
-        const gap = 0.006 + seededF(globalIdx * 3 + 900) * 0.016 / density;
+        const gap = 0.002 + seededF(globalIdx * 3 + 900) * 0.005;
         fx += gap;
         if (fx >= 0.97) break;
-        if (seededF(globalIdx * 3 + 903) < 0.25) { globalIdx++; continue; }
+        // 10% skip for slight natural gaps
+        if (seededF(globalIdx * 3 + 903) < 0.10) { globalIdx++; continue; }
+        // Per-tree y jitter to avoid ring patterns
+        const yJitter = (seededF(globalIdx * 3 + 905) - 0.5) * 8;
+        const yOff = yOffBase + yJitter;
         const height = 3 + seededF(globalIdx * 3 + 901) * 6;
         const width = 1.2 + seededF(globalIdx * 3 + 902) * 1.5;
         const shade = shades[Math.floor(seededF(globalIdx * 3 + 904) * shades.length)];
@@ -957,7 +960,6 @@ function getFarRidgeTreeCache(): SimpleTree[] {
         globalIdx++;
       }
     }
-    // Sort by yOffset so back rows draw first
     farRidgeTreeCache.sort((a, b) => a.yOffset - b.yOffset);
   }
   return farRidgeTreeCache;
