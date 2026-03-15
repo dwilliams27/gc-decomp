@@ -1,134 +1,150 @@
-/** TypeScript types matching API responses. */
+/** TypeScript types for the Star Map campaign visualizer. */
 
-export interface FunctionEntry {
+// --- Starmap data ---
+
+export interface StarFunction {
   id: number;
   name: string;
   address: number;
   size: number;
   source_file: string;
-  library: string;
-  initial_match_pct: number;
-  current_match_pct: number;
-  status: "pending" | "in_progress" | "matched" | "failed" | "skipped";
+  match_pct: number;
+  status: string;
   attempts: number;
-  matched_at: string | null;
-  updated_at: string;
-  created_at?: string;
 }
 
-export interface FunctionListResponse {
+export interface StarLibrary {
+  name: string;
+  functions: StarFunction[];
+}
+
+export interface StarmapResponse {
+  libraries: StarLibrary[];
+}
+
+// --- Campaigns ---
+
+export interface CampaignSummary {
+  id: number;
+  source_file: string;
+  status: string;
+  orchestrator_provider: string;
+  worker_provider_policy: string;
+  max_active_workers: number;
+  timeout_hours: number;
+  notes: string;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CampaignTask {
+  id: number;
+  campaign_id: number;
+  function_id: number | null;
+  function_name: string | null;
+  source_file: string;
+  provider: string;
+  scope: string;
+  status: string;
+  priority: number;
+  best_match_pct: number;
+  termination_reason: string;
+  error: string;
+  worker_id: string;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface CampaignDetail extends CampaignSummary {
+  tasks: CampaignTask[];
+}
+
+export interface CampaignListResponse {
   total: number;
   page: number;
   per_page: number;
-  functions: FunctionEntry[];
+  campaigns: CampaignSummary[];
 }
 
-export interface TreemapLeaf {
-  name: string;
+// --- Campaign Events ---
+
+export interface CampaignEvent {
   id: number;
-  size: number;
-  match_pct: number;
-  status: string;
+  campaign_id: number;
+  task_id: number | null;
+  function_name: string | null;
+  event_type: string;
+  data: Record<string, unknown>;
+  created_at: string | null;
 }
 
-export interface TreemapNode {
-  name: string;
-  children: (TreemapNode | TreemapLeaf)[];
+export interface CampaignEventsResponse {
+  events: CampaignEvent[];
+  last_id: number;
 }
 
-export interface AttemptEntry {
+// --- Campaign Messages ---
+
+export interface CampaignMessage {
   id: number;
-  started_at: string;
-  completed_at: string | null;
-  matched: boolean;
-  best_match_pct: number;
-  iterations: number;
-  total_tokens: number;
-  input_tokens: number;
-  output_tokens: number;
-  cached_tokens: number;
-  elapsed_seconds: number;
-  termination_reason: string;
-  final_code: string | null;
-  error: string | null;
-  model: string;
-  reasoning_effort: string;
-  match_history: [number, number][];
-  tool_counts: Record<string, number>;
-  cost: number;
+  campaign_id: number;
+  role: string;
+  content: string;
+  session_number: number;
+  turn_number: number;
+  created_at: string | null;
 }
 
-export interface AttemptsResponse {
-  function_name: string;
-  attempts: AttemptEntry[];
+export interface CampaignMessagesResponse {
+  messages: CampaignMessage[];
+  last_id: number;
 }
 
-export interface OverviewStats {
-  total_functions: number;
-  status_counts: Record<string, number>;
-  total_tokens: number;
-  total_cost: number;
-  total_attempts: number;
-  total_bytes: number;
-  matched_bytes: number;
-  match_histogram: { range: string; count: number }[];
+// --- Timeline ---
+
+export interface CampaignTimelineResponse {
+  events: CampaignEvent[];
+  tasks: CampaignTask[];
 }
 
-export interface LibraryStats {
+// --- Star layout (2D sky) ---
+
+/** Star position as fractions of viewport (0..1). */
+export interface StarPosition {
+  id: number;
+  /** x position as fraction of viewport width (0..1). */
+  x: number;
+  /** y position as fraction of sky height (0..1, 0=top). */
+  y: number;
+  radius: number;
   library: string;
-  count: number;
-  matched: number;
-  avg_match_pct: number;
-  total_size: number;
-  cost: number;
-  tokens: number;
+  sourceFile: string;
+  name: string;
+  matchPct: number;
+  size: number;
+  status: string;
+  attempts: number;
 }
 
-export interface BatchParams {
-  limit: number;
-  max_size: number | null;
-  budget: number | null;
-  workers: number;
-  strategy: string;
-  library: string | null;
-  min_match: number | null;
-  max_match: number | null;
-  max_tokens: number | null;
-  warm_start: boolean;
+export interface ConstellationEdge {
+  source: number;
+  target: number;
 }
 
-export interface BatchStatus {
-  running: boolean;
-  cancelled?: boolean;
-  started_at?: number;
-  elapsed?: number;
-  params?: BatchParams;
-  attempted?: number;
-  matched?: number;
-  failed?: number;
-  total_cost?: number;
-  total_tokens?: number;
-  current_functions?: string[];
-  recent_completed?: Record<string, unknown>[];
+export interface LibraryCentroid {
+  name: string;
+  x: number;
+  y: number;
+  functionCount: number;
 }
 
-export interface ConfigResponse {
-  agent: { model: string; max_iterations: number; max_tokens_per_attempt: number };
-  orchestration: {
-    db_path: string;
-    batch_size: number;
-    default_workers: number;
-    default_budget: number | null;
-    max_function_size: number | null;
-  };
-  docker: { enabled: boolean };
-  ghidra: { enabled: boolean };
-}
+// --- Effects ---
 
-export interface AgentEvent {
-  type: string;
-  ts: number;
-  event?: string;
-  level?: string;
-  [key: string]: unknown;
+export interface Supernova {
+  starId: number;
+  startTime: number;
+  duration: number;
 }
