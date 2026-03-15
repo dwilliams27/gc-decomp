@@ -282,10 +282,29 @@ def _extract_stream_text(value: object) -> str:
                 parts.append(block)
         return "\n".join(part for part in parts if part)
     if isinstance(value, dict):
-        for key in ("content", "message", "result"):
+        for key in ("content", "message", "result", "toolUseResult", "text"):
             if key in value:
                 return _extract_stream_text(value[key])
     return ""
+
+
+def _extract_best_match_from_stream_event(
+    function_name: str | None,
+    data: dict,
+) -> float | None:
+    """Extract the best exact target-function match from one Claude stream event."""
+    if function_name is None:
+        return None
+    best = None
+    candidate_texts: list[str] = []
+    for key in ("content", "message", "result", "toolUseResult"):
+        if key in data:
+            candidate_texts.extend(_candidate_texts_from_object(data.get(key)))
+    for text in candidate_texts:
+        pct = _extract_best_match_from_text(function_name, text)
+        if pct is not None:
+            best = max(best or 0.0, pct)
+    return best
 
 
 def _run_claude_stream(
@@ -323,12 +342,13 @@ def _run_claude_stream(
         msg_type = data.get("type", "")
         if msg_type == "tool_use":
             current_tool_name = str(data.get("name") or data.get("tool") or "")
-        elif msg_type == "tool_result":
-            content = _extract_stream_text(data.get("content", ""))
-            observed = _extract_best_match_from_text(function_name, content) if function_name else None
+        else:
+            observed = _extract_best_match_from_stream_event(function_name, data)
             if observed is not None:
                 best_observed = max(best_observed, observed)
-            if progress_callback is not None:
+            if progress_callback is not None and (
+                msg_type == "tool_result" or msg_type == "user" or observed is not None
+            ):
                 detail = current_tool_name or "tool_result"
                 if observed is not None:
                     detail = f"{detail}: observed {observed:.1f}%"

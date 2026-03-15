@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -10,6 +11,7 @@ from decomp_agent.config import Config, MeleeConfig
 from decomp_agent.orchestrator.headless import (
     _reap_stale_claude_shared_lock,
     _resolve_claude_worker_budget,
+    _run_claude_stream,
     run_headless,
 )
 from decomp_agent.orchestrator.worker_launcher import WorkerSpec
@@ -274,3 +276,58 @@ def test_isolated_claude_recovers_best_match_from_transcript(tmp_path):
         result = run_headless("target_fn", "melee/test/testfile.c", config)
 
     assert result.best_match_percent == 66.0
+
+
+def test_run_claude_stream_reports_progress_from_user_tool_result():
+    stdout = io.StringIO(
+        "\n".join(
+            [
+                json.dumps({"type": "tool_use", "name": "mcp__decomp-tools__write_function"}),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "toolUseResult": (
+                            "Compilation successful.\n"
+                            "  other_func: MATCH (size: 8)\n"
+                            "  target_fn: 66.0% (97% structural — wrong instructions)\n"
+                        ),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "usage": {"input_tokens": 1, "output_tokens": 2},
+                        "result": "done",
+                        "session_id": "sess-1",
+                        "num_turns": 2,
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = stdout
+            self.stderr = io.StringIO("")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            del timeout
+            self.returncode = 0
+            return 0
+
+    seen: list[tuple[float | None, str]] = []
+
+    with patch("decomp_agent.orchestrator.headless.subprocess.Popen", return_value=FakeProc()):
+        _proc, output, _stdout, best = _run_claude_stream(
+            ["claude", "-p", "stub"],
+            timeout=30,
+            function_name="target_fn",
+            progress_callback=lambda pct, detail: seen.append((pct, detail)),
+        )
+
+    assert output is not None
+    assert best == 66.0
+    assert any(pct == 66.0 for pct, _detail in seen)

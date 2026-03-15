@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import threading
+import time
 from unittest.mock import patch
 
 from sqlmodel import Session, select
@@ -300,6 +302,60 @@ def test_run_campaign_loop_marks_completed_when_queue_drained(tmp_path):
     assert refreshed_campaign.status == "completed"
     assert summary.tasks_run == 3
     assert summary.completed_tasks == 3
+
+
+def test_run_campaign_loop_uses_multiple_worker_slots(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.max_active_workers = 2
+    engine = get_engine(tmp_path / "campaign-loop-parallel.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="claude",
+        )
+
+    fake_result = AgentResult(
+        matched=False,
+        best_match_percent=87.0,
+        termination_reason="model_stopped",
+    )
+    state_lock = threading.Lock()
+    active = 0
+    max_seen = 0
+    gate = threading.Event()
+
+    def fake_run_function(*args, **kwargs):
+        nonlocal active, max_seen
+        del args, kwargs
+        with state_lock:
+            active += 1
+            max_seen = max(max_seen, active)
+            if active >= 2:
+                gate.set()
+        gate.wait(timeout=1.0)
+        time.sleep(0.05)
+        with state_lock:
+            active -= 1
+        return fake_result
+
+    with patch("decomp_agent.orchestrator.runner.run_function", side_effect=fake_run_function):
+        refreshed_campaign, summary = run_campaign_loop(
+            engine,
+            config,
+            campaign_id=campaign.id,  # type: ignore[arg-type]
+            max_tasks=2,
+        )
+
+    assert refreshed_campaign.status == "stopped"
+    assert summary.tasks_run == 2
+    assert max_seen == 2
 
 
 def test_compute_rate_limit_cooldown_uses_fixed_claude_window(tmp_path):

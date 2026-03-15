@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 import shutil
 import time
 
@@ -661,29 +662,67 @@ def run_campaign_loop(
         if campaign is None:
             raise ValueError(f"Campaign #{campaign_id} not found")
         mark_campaign_running(session, campaign)
+        requeue_running_campaign_tasks(session, campaign_id)
         session.refresh(campaign)
         started_at = _ensure_utc(campaign.started_at or datetime.now(timezone.utc))
         timeout_deadline = started_at + timedelta(hours=campaign.timeout_hours)
 
     tasks_run = 0
     timed_out = False
+    worker_budget = max(config.campaign.max_active_workers, 1)
+    active_futures: dict[Future, int] = {}
 
-    while True:
-        if max_tasks is not None and tasks_run >= max_tasks:
-            break
+    with ThreadPoolExecutor(max_workers=worker_budget) as executor:
+        while True:
+            completed_futures = [future for future in active_futures if future.done()]
+            for future in completed_futures:
+                future.result()
+                del active_futures[future]
 
-        if datetime.now(timezone.utc) >= timeout_deadline:
-            timed_out = True
-            break
+            if datetime.now(timezone.utc) >= timeout_deadline and not active_futures:
+                timed_out = True
+                break
 
-        _campaign, task, _result = run_campaign_task_once(
-            engine,
-            config,
-            campaign_id=campaign_id,
-        )
-        if task is None:
-            break
-        tasks_run += 1
+            with Session(engine) as session:
+                campaign = get_campaign(session, campaign_id)
+                if campaign is None:
+                    raise ValueError("Campaign disappeared during run loop")
+                tasks = list_campaign_tasks(session, campaign_id)
+                pending_tasks = sum(1 for task in tasks if task.status == "pending")
+                running_tasks = sum(1 for task in tasks if task.status == "running")
+
+            if pending_tasks == 0 and running_tasks == 0 and not active_futures:
+                break
+
+            remaining_limit = None if max_tasks is None else max(max_tasks - tasks_run, 0)
+            available_slots = max(worker_budget - len(active_futures), 0)
+            if remaining_limit is not None:
+                available_slots = min(available_slots, remaining_limit)
+
+            if available_slots > 0 and datetime.now(timezone.utc) < timeout_deadline:
+                _campaign, claimed_task_ids = _claim_campaign_tasks(
+                    engine,
+                    campaign_id=campaign_id,
+                    dispatch_budget=available_slots,
+                )
+                for task_id in claimed_task_ids:
+                    future = executor.submit(
+                        _run_claimed_campaign_task,
+                        engine,
+                        config,
+                        campaign_id=campaign_id,
+                        task_id=task_id,
+                    )
+                    active_futures[future] = task_id
+                    tasks_run += 1
+
+            if max_tasks is not None and tasks_run >= max_tasks and not active_futures:
+                break
+
+            if active_futures:
+                time.sleep(1.0)
+            else:
+                time.sleep(0.25)
 
     with Session(engine) as session:
         campaign = get_campaign(session, campaign_id)
