@@ -70,7 +70,7 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
 
   // ── Near ridge ──────────────────────────────────────────────────────────
   const domeX = w * 0.40;
-  const domeY = horizonY - 30;
+  const domeY = horizonY - 26;
 
   // Sample the ridge contour so trees can sit on it
   const ridgeY = (fx: number): number => {
@@ -151,6 +151,24 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   }
   ctx.restore();
 
+  // ── Observatory annex building (attached to the right of the dome) ───
+  const annexL = domeX + 10;
+  const annexR = domeX + 22;
+  const annexTop = domeY - 2;
+  const annexBot = domeY + 6;
+  // Main body
+  ctx.fillStyle = "#0c1119";
+  ctx.fillRect(annexL, annexTop, annexR - annexL, annexBot - annexTop);
+  // Flat roof overhang
+  ctx.fillStyle = "#0a0f17";
+  ctx.fillRect(annexL - 1, annexTop - 1, annexR - annexL + 2, 2);
+  // Tiny window — faint warm glow
+  ctx.fillStyle = "rgba(200,170,100,0.08)";
+  ctx.fillRect(annexL + 3, annexTop + 3, 2, 2);
+  // Door frame
+  ctx.fillStyle = "#080c14";
+  ctx.fillRect(annexL + 8, annexTop + 4, 2, annexBot - annexTop - 4);
+
   // ── Observatory slit ──────────────────────────────────────────────────
   ctx.fillStyle = "rgba(200,180,120,0.12)";
   ctx.fillRect(domeX - 1, domeY - 10, 2, 10);
@@ -171,7 +189,7 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
 
 const DOME_FX = 0.40;
 const DOME_HORIZON_F = 0.65;
-const DOME_OFFSET = 30;
+const DOME_OFFSET = 26;
 
 function drawObservatoryBeam(
   ctx: CanvasRenderingContext2D,
@@ -189,7 +207,7 @@ function drawObservatoryBeam(
   if (!targetStar) return;
 
   const domeX = w * DOME_FX;
-  const slitY = h * DOME_HORIZON_F - DOME_OFFSET - 10;
+  const slitY = h * DOME_HORIZON_F - DOME_OFFSET - 8;
   const tx = targetStar.x * w;
   const ty = targetStar.y * h;
 
@@ -204,7 +222,7 @@ function drawObservatoryBeam(
   const farW = 12 + dist * 0.03;
 
   const pulse = 0.5 + 0.5 * Math.sin(time * 0.002);
-  const baseAlpha = 0.04 + pulse * 0.03;
+  const baseAlpha = 0.02 + pulse * 0.02;
 
   ctx.save();
 
@@ -230,6 +248,101 @@ function drawObservatoryBeam(
   ctx.fill();
 
   ctx.restore();
+}
+
+// ─── Radio telescope (per-frame, dish tracks active star) ────────────────────
+
+function drawRadioTelescope(
+  ctx: CanvasRenderingContext2D,
+  starMap: Map<number, StarPosition>,
+  pulsingStarIds: Set<number>,
+  time: number,
+  w: number, h: number,
+) {
+  const horizonY = h * DOME_HORIZON_F;
+  const domeY = horizonY - 26; // must match drawLandscape
+  const dishX = w * DOME_FX - 30;
+  const dishBase = domeY + 6;
+  const dishPivotY = dishBase - 18;
+  const dishRadius = 14;
+
+  // Compute dish tilt angle toward target star (or default upward)
+  let angle = -Math.PI / 2; // default: pointing straight up
+  if (pulsingStarIds.size > 0 && pulsingCache.length > 0) {
+    const idx = Math.floor(time / 8000) % pulsingCache.length;
+    const target = starMap.get(pulsingCache[idx]);
+    if (target) {
+      const tx = target.x * w;
+      const ty = target.y * h;
+      angle = Math.atan2(ty - dishPivotY, tx - dishX);
+    }
+  }
+
+  ctx.save();
+
+  // Support tower
+  ctx.fillStyle = "#0a0f17";
+  ctx.fillRect(dishX - 1.5, dishBase - 18, 3, 18);
+  // Tower cross-braces
+  ctx.strokeStyle = "#0a0f17";
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(dishX - 4, dishBase);
+  ctx.lineTo(dishX + 4, dishBase);
+  ctx.moveTo(dishX - 3, dishBase - 6);
+  ctx.lineTo(dishX + 3, dishBase - 6);
+  ctx.moveTo(dishX - 4, dishBase);
+  ctx.lineTo(dishX, dishBase - 12);
+  ctx.moveTo(dishX + 4, dishBase);
+  ctx.lineTo(dishX, dishBase - 12);
+  ctx.stroke();
+
+  // Draw dish rotated around pivot point
+  ctx.translate(dishX, dishPivotY);
+  ctx.rotate(angle + Math.PI / 2); // +90° so 0 = pointing up
+
+  // Parabolic dish
+  ctx.fillStyle = "#0c1119";
+  ctx.beginPath();
+  ctx.moveTo(-dishRadius, 4);
+  ctx.quadraticCurveTo(0, 10, dishRadius, 4);
+  ctx.quadraticCurveTo(0, -2, -dishRadius, 4);
+  ctx.closePath();
+  ctx.fill();
+  // Dish rim highlight
+  ctx.strokeStyle = "rgba(60,80,110,0.12)";
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(-dishRadius, 4);
+  ctx.quadraticCurveTo(0, -2, dishRadius, 4);
+  ctx.stroke();
+  // Feed arm struts
+  ctx.strokeStyle = "#0a0f17";
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(-dishRadius + 2, 3);
+  ctx.lineTo(0, -8);
+  ctx.lineTo(dishRadius - 2, 3);
+  ctx.stroke();
+  // Receiver
+  ctx.fillStyle = "#0e1420";
+  ctx.beginPath();
+  ctx.arc(0, -8, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+
+  // Pulsing red indicator light on top of tower (not rotated)
+  const redPulse = 0.06 + 0.06 * Math.sin(time * 0.0015);
+  ctx.fillStyle = `rgba(255,50,30,${redPulse})`;
+  ctx.beginPath();
+  ctx.arc(dishX, dishPivotY - 2, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  // Soft red glow around it
+  ctx.fillStyle = `rgba(255,50,30,${redPulse * 0.3})`;
+  ctx.beginPath();
+  ctx.arc(dishX, dishPivotY - 2, 4, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 // ─── Stars ──────────────────────────────────────────────────────────────────
@@ -528,9 +641,8 @@ function drawCars(
   ctx.save();
 
   // One car at a time, alternating direction each pass
-  // Each pass: car crosses screen in ~62s, then ~10s gap before next
-  const cycleDuration = 72; // seconds per full cycle (crossing + gap)
-  const crossingTime = 62;
+  const cycleDuration = 140;
+  const crossingTime = 124;
   const tSec = time / 1000;
   const cycleIndex = Math.floor(tSec / cycleDuration);
   const cycleProgress = (tSec % cycleDuration) / crossingTime;
@@ -722,7 +834,7 @@ function drawSteamboat(
       startX: stackX,
       startY: stackTop,
       vx: -0.003 + (Math.random() - 0.3) * 0.005,
-      vy: -0.003 - Math.random() * 0.004,
+      vy: -0.002 - Math.random() * 0.003,
       startTime: time,
       lifetime: 3500 + Math.random() * 3000,
       startSize: 0.4 + Math.random() * 0.5,
@@ -813,8 +925,9 @@ export function useStarAnimation() {
     const starMap = getStarMap(stars);
     updatePulsingCache(pulsingStarIds);
 
-    // Observatory beam
+    // Observatory beam + radio telescope
     drawObservatoryBeam(ctx, starMap, pulsingStarIds, time, w, h);
+    drawRadioTelescope(ctx, starMap, pulsingStarIds, time, w, h);
 
     // Stars (dim ones get fast path)
     drawAllStars(ctx, stars, pulsingStarIds, time, w, h);
