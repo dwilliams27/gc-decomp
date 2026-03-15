@@ -166,7 +166,12 @@ decomp-agent --config config/default.toml campaign launch melee/mn/mnsnap.c --or
 decomp-agent --config config/default.toml campaign stop 5
 ```
 
-`campaign launch` is the normal operator entrypoint. It creates the campaign, launches the orchestrator loop and worker loop in the background, and writes `campaign-processes.json`, `orchestrator.log`, and `worker.log` into the campaign artifact dir. `campaign stop` is the normal shutdown path; it stops those host loops, removes leftover isolated worker containers for the campaign source file, and marks the campaign/tasks stopped in the DB.
+`campaign launch` is the normal operator entrypoint. It creates the campaign, launches one host `campaign supervise` process in the background, and writes `campaign-processes.json` plus `supervisor.log` into the campaign artifact dir. `campaign stop` is the normal shutdown path; it stops that host supervisor, removes leftover isolated worker containers for the campaign source file, and marks the campaign/tasks stopped in the DB.
+
+Campaign orchestration is now intended to be persistent across wake-ups:
+- the manager session is resumed over time when the provider supports it
+- the host wakes the manager on significant events instead of constant polling
+- durable memory lives in `manager-scratchpad.md` and `artifacts/function-memory/*.md`
 
 ## Container Delegation
 

@@ -20,12 +20,16 @@ from decomp_agent.config import Config, load_config
 from decomp_agent.models.db import get_engine
 from decomp_agent.orchestrator.campaign import (
     append_campaign_note,
+    append_campaign_function_memory,
     create_campaign_worker_task,
     format_campaign_status,
     format_campaign_task_result,
+    get_campaign_function_memory,
     get_campaign_notes,
+    get_campaign_scratchpad,
     run_campaign_next_task_summary,
     retry_campaign_task,
+    write_campaign_scratchpad,
 )
 from decomp_agent.orchestrator.campaign_ipc import submit_campaign_ipc_request
 from decomp_agent.tools.registry import (
@@ -45,11 +49,15 @@ from decomp_agent.tools.schemas import (
     CompileAndCheckParams,
     CampaignGetStatusParams,
     CampaignGetTaskResultParams,
+    CampaignGetFunctionMemoryParams,
     CampaignGetNotesParams,
+    CampaignGetScratchpadParams,
+    CampaignAppendFunctionMemoryParams,
     CampaignLaunchWorkerParams,
     CampaignRunNextTaskParams,
     CampaignRetryTaskParams,
     CampaignWriteNoteParams,
+    CampaignWriteScratchpadParams,
     GetContextParams,
     GetDiffParams,
     GetGhidraDecompilationParams,
@@ -166,6 +174,32 @@ def _campaign_tool_result(tool_name: str, payload: dict[str, object]) -> str:
         return f"Wrote manager note for campaign #{payload['campaign_id']} to {path}"
     if tool_name == "campaign_get_notes":
         return get_campaign_notes(_get_engine(), int(payload["campaign_id"]))
+    if tool_name == "campaign_get_scratchpad":
+        return get_campaign_scratchpad(_get_engine(), int(payload["campaign_id"]))
+    if tool_name == "campaign_write_scratchpad":
+        path = write_campaign_scratchpad(
+            _get_engine(),
+            int(payload["campaign_id"]),
+            str(payload["content"]),
+        )
+        return f"Wrote manager scratchpad for campaign #{payload['campaign_id']} to {path}"
+    if tool_name == "campaign_get_function_memory":
+        return get_campaign_function_memory(
+            _get_engine(),
+            int(payload["campaign_id"]),
+            str(payload["function_name"]),
+        )
+    if tool_name == "campaign_append_function_memory":
+        path = append_campaign_function_memory(
+            _get_engine(),
+            int(payload["campaign_id"]),
+            str(payload["function_name"]),
+            str(payload["note"]),
+        )
+        return (
+            f"Appended function memory for {payload['function_name']} "
+            f"in campaign #{payload['campaign_id']} at {path}"
+        )
     raise ValueError(f"Unsupported campaign tool '{tool_name}'")
 
 
@@ -424,6 +458,71 @@ def campaign_get_notes(campaign_id: int) -> str:
     params = CampaignGetNotesParams(campaign_id=campaign_id)
     _log_campaign_tool("campaign_get_notes", {"campaign_id": params.campaign_id})
     return _campaign_tool_result("campaign_get_notes", {"campaign_id": params.campaign_id})
+
+
+@mcp.tool()
+def campaign_get_scratchpad(campaign_id: int) -> str:
+    """Read the persistent manager scratchpad for a campaign."""
+    params = CampaignGetScratchpadParams(campaign_id=campaign_id)
+    _log_campaign_tool("campaign_get_scratchpad", {"campaign_id": params.campaign_id})
+    return _campaign_tool_result("campaign_get_scratchpad", {"campaign_id": params.campaign_id})
+
+
+@mcp.tool()
+def campaign_write_scratchpad(campaign_id: int, content: str) -> str:
+    """Replace the persistent manager scratchpad for a campaign."""
+    params = CampaignWriteScratchpadParams(campaign_id=campaign_id, content=content)
+    _log_campaign_tool(
+        "campaign_write_scratchpad",
+        {"campaign_id": params.campaign_id, "content_preview": params.content[:160]},
+    )
+    return _campaign_tool_result(
+        "campaign_write_scratchpad",
+        {"campaign_id": params.campaign_id, "content": params.content},
+    )
+
+
+@mcp.tool()
+def campaign_get_function_memory(campaign_id: int, function_name: str) -> str:
+    """Read the persistent memory log for one function in a campaign."""
+    params = CampaignGetFunctionMemoryParams(
+        campaign_id=campaign_id,
+        function_name=function_name,
+    )
+    _log_campaign_tool(
+        "campaign_get_function_memory",
+        {"campaign_id": params.campaign_id, "function_name": params.function_name},
+    )
+    return _campaign_tool_result(
+        "campaign_get_function_memory",
+        {"campaign_id": params.campaign_id, "function_name": params.function_name},
+    )
+
+
+@mcp.tool()
+def campaign_append_function_memory(campaign_id: int, function_name: str, note: str) -> str:
+    """Append a timestamped note to one function's persistent memory log."""
+    params = CampaignAppendFunctionMemoryParams(
+        campaign_id=campaign_id,
+        function_name=function_name,
+        note=note,
+    )
+    _log_campaign_tool(
+        "campaign_append_function_memory",
+        {
+            "campaign_id": params.campaign_id,
+            "function_name": params.function_name,
+            "note_preview": params.note[:160],
+        },
+    )
+    return _campaign_tool_result(
+        "campaign_append_function_memory",
+        {
+            "campaign_id": params.campaign_id,
+            "function_name": params.function_name,
+            "note": params.note,
+        },
+    )
 
 
 if __name__ == "__main__":

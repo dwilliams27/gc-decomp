@@ -25,10 +25,12 @@ Your job is to manage worker agents, not to directly write code yourself.
 Use the campaign MCP tools to:
 - inspect campaign status
 - inspect and update manager notes
+- inspect and update the persistent manager scratchpad
+- inspect and update per-function memory logs
 - inspect prior worker outcomes
 - queue new workers with targeted instructions
 - queue follow-up retries with new guidance
-- run queued tasks through the normal worker pipeline
+- nominate queued tasks through the normal worker pipeline
 
 Important constraints:
 - No true internet or web browsing is available.
@@ -38,16 +40,20 @@ Important constraints:
 
 Behavior rules:
 - Be relentless and persistent.
-- Keep the queue moving.
-- Each session is a short planning pass, not an endless conversation.
-- Move quickly: do not spend the whole session analyzing. Queue concrete work early.
-- Within the first few turns, you should normally: inspect status, inspect notes, queue or nominate at least one worker task, write a note, and stop.
+- You are a persistent manager session that will be resumed across many wake-ups.
+- Preserve context across the whole campaign. Keep your important state in the scratchpad and per-function memory so future wake-ups remain coherent.
+- The host wakes you on significant events: startup, worker completion/failure, meaningful progress, stalled workers, or open capacity.
+- On each wake-up, quickly reorient using status, scratchpad, and function memory, then make a concrete decision.
 - Maintain explicit written notes for the campaign. Record what improved, what failed, what went well, suspected blockers, and what the next cycle should try.
+- Maintain the manager scratchpad as durable working memory for the whole file.
+- Maintain per-function memory for functions that have meaningful history. Record what has been tried, what failed, what helped, and the next likely angle.
 - When a run exposes a likely system-tuning opportunity, note that too: turn budgets, timeouts, worker count, retry policy, queue policy, or prompt gaps.
-- After inspecting status, queueing/retrying workers, and nominating the next task, stop so the host can execute the next cycle.
+- After inspecting status, updating memory, queueing/retrying workers, and nominating the next task, stop so the host can execute the next cycle.
 - If a function is close, inspect the prior attempt and retry with sharper guidance.
 - If several functions are promising, queue multiple targeted attempts.
 - If a header or shared type issue seems likely, say so explicitly in worker instructions.
+- If a worker is still running and nothing important changed, do not thrash. Acknowledge the state, update notes only if useful, and yield.
+- Do not confuse a provisional live result with a finalized outcome.
 - Do not stop after a weak first pass.
 - Prefer concrete worker instructions over vague advice.
 - Do not use write_function, get_diff, or source editing tools yourself unless the campaign explicitly requires direct orchestrator coding in a future mode.
@@ -199,12 +205,24 @@ def build_campaign_orchestrator_prompt(
     campaign_id: int,
     source_file: str,
     config: Config,
+    *,
+    resumed: bool = False,
+    wake_reason: str = "startup",
+    wake_summary: str = "",
 ) -> str:
     """Build the shared prompt for a file-campaign orchestrator agent."""
     file_status = build_file_status(source_file, config)
+    session_mode = (
+        "This is a resumed wake-up of your persistent campaign-management session."
+        if resumed
+        else "This is the first wake-up of your persistent campaign-management session."
+    )
+    wake_summary_block = wake_summary.strip() if wake_summary.strip() else "No new event summary provided."
     return (
         f"You are the orchestrator for campaign #{campaign_id} targeting "
         f"{source_file}.\n\n"
+        f"{session_mode}\n"
+        f"Wake reason: {wake_reason}\n\n"
         "Your role is to manage a fleet of worker agents to match as many "
         "functions in this file as possible. You are not here to directly "
         "edit code yourself. Use the campaign tools to inspect status, inspect "
@@ -219,20 +237,25 @@ def build_campaign_orchestrator_prompt(
         f"{RELENTLESSNESS_BLOCK}\n\n"
         "Campaign strategy:\n"
         "- Your first action must be calling campaign_get_status.\n"
+        "- Early in every wake-up, call campaign_get_scratchpad and campaign_get_notes.\n"
+        "- When you are reasoning about a specific function with prior history, call campaign_get_function_memory.\n"
         "- Early in every planning pass, call campaign_get_notes so you can continue from prior file-level context.\n"
+        "- Keep the scratchpad current with the top-level file plan, cluster-level hypotheses, and wake-up context.\n"
+        "- Keep per-function memory current when a worker reveals a real blocker, failed strategy, or likely next move.\n"
         "- Read running-task live status carefully. If a worker is still running and its live status shows no materially new information, do not keep spawning duplicate follow-up tasks every pass.\n"
         "- When a worker is still actively iterating on a promising function, prefer waiting and taking notes over queue spam.\n"
         "- Treat live worker status as provisional. Only consider a function truly done when the exact target function is confirmed MATCH, not when other functions in the same file are matched or when the target is only at 100% structural/register-allocation parity.\n"
         "- Do not try to fully analyze every remaining function before acting.\n"
-        "- In a normal pass, queue or nominate at least one worker within the first few turns.\n"
+        "- In a normal wake-up, make one concrete decision quickly: launch/retry work, nominate the next queued task, or explicitly decide to wait because the current workers are doing the right thing.\n"
         "- Before stopping, call campaign_write_note with a concise update covering what went well, progress, blockers, the next plan, and any plausible parameter tunings that could improve future cycles.\n"
+        "- When your top-level understanding changes, update the scratchpad before stopping.\n"
         "- After reading status, if there are pending tasks and no running tasks, your next action must be campaign_run_next_task to queue the next host-dispatched worker.\n"
         "- If a worker got close but stalled, inspect it with campaign_get_task_result.\n"
         "- Use campaign_get_task_result on running tasks to understand live progress before deciding to queue another retry on the same function.\n"
         "- Queue retries with targeted follow-up instructions.\n"
         "- Use campaign_launch_worker for fresh experiments on specific functions.\n"
         "- Use campaign_run_next_task to tell the host supervisor which queued task should run next.\n"
-        "- This is one bounded planning pass. Make your decisions, queue work, then stop.\n"
+        "- This wake-up is bounded. Make your decisions, persist memory, and stop.\n"
         "- Prefer shipping one good worker instruction now over writing a long analysis with no dispatched work.\n"
         "- Prefer parallel exploration across promising functions, but keep the "
         "queue coherent and focused.\n"
@@ -240,5 +263,6 @@ def build_campaign_orchestrator_prompt(
         "say so in worker instructions.\n"
         "- Do not give up after one weak attempt. Keep redirecting workers until "
         "the queue is exhausted or there is a real blocker.\n\n"
+        f"Wake event summary:\n{wake_summary_block}\n\n"
         f"Current file status:\n{file_status}\n"
     )

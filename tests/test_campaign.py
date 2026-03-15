@@ -19,18 +19,22 @@ from decomp_agent.models.db import (
 )
 from decomp_agent.orchestrator.campaign import (
     _compute_rate_limit_cooldown,
+    append_campaign_function_memory,
     append_campaign_note,
     build_campaign_spec,
     create_campaign_worker_task,
     format_campaign_status,
     format_campaign_task_result,
+    get_campaign_function_memory,
     get_campaign_notes,
+    get_campaign_scratchpad,
     run_campaign_next_task_summary,
     run_campaign_loop,
     run_campaign_supervisor_loop,
     run_campaign_task_once,
     retry_campaign_task,
     start_campaign,
+    write_campaign_scratchpad,
 )
 from tests.fixtures.fake_repo import create_fake_repo
 
@@ -424,6 +428,44 @@ def test_campaign_notes_normalize_escaped_newlines(tmp_path):
     )
     notes = get_campaign_notes(engine, campaign.id)  # type: ignore[arg-type]
     assert "Header\n\nBody line" in notes
+
+
+def test_campaign_scratchpad_and_function_memory_persist(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    engine = get_engine(tmp_path / "campaign-memory.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="claude",
+        )
+
+    scratchpad_path = write_campaign_scratchpad(
+        engine,
+        campaign.id,  # type: ignore[arg-type]
+        "# Scratchpad\n\nTrack file-level strategy.",
+    )
+    memory_path = append_campaign_function_memory(
+        engine,
+        campaign.id,  # type: ignore[arg-type]
+        "simple_add",
+        "Tried variable reorder. Next: split expression.",
+    )
+
+    assert scratchpad_path.endswith("manager-scratchpad.md")
+    assert memory_path.endswith("function-memory/simple_add.md")
+    assert "Track file-level strategy." in get_campaign_scratchpad(engine, campaign.id)  # type: ignore[arg-type]
+    assert "split expression" in get_campaign_function_memory(
+        engine,
+        campaign.id,  # type: ignore[arg-type]
+        "simple_add",
+    )
 
 
 def test_run_campaign_task_once_requeues_stale_running_task(tmp_path):
@@ -886,6 +928,8 @@ def test_run_campaign_next_task_summary_reports_result(tmp_path):
 def test_run_campaign_supervisor_loop_stops_after_no_progress(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
     config.campaign.max_no_progress_cycles = 2
+    config.campaign.orchestrator_poll_seconds = 0
+    config.campaign.manager_wake_cooldown_seconds = 0
     engine = get_engine(tmp_path / "campaign-no-progress.db")
 
     with Session(engine) as session:
@@ -903,8 +947,8 @@ def test_run_campaign_supervisor_loop_stops_after_no_progress(tmp_path):
 
     with (
         patch(
-            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_loop",
-            return_value=(campaign, type("Summary", (), {"sessions_run": 1})()),
+            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_once",
+            return_value=(campaign, AgentResult(termination_reason="model_stopped")),
         ),
         patch(
             "decomp_agent.orchestrator.campaign._claim_campaign_tasks",
@@ -929,6 +973,7 @@ def test_run_campaign_supervisor_loop_stops_after_no_progress(tmp_path):
 
 def test_run_campaign_supervisor_loop_writes_summary_on_completion(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.orchestrator_poll_seconds = 0
     engine = get_engine(tmp_path / "campaign-summary.db")
 
     with Session(engine) as session:
@@ -963,6 +1008,8 @@ def test_run_campaign_supervisor_loop_writes_summary_on_completion(tmp_path):
 
 def test_run_campaign_supervisor_loop_runs_orchestrator_and_tasks(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.orchestrator_poll_seconds = 0
+    config.campaign.manager_wake_cooldown_seconds = 0
     engine = get_engine(tmp_path / "campaign-supervisor.db")
 
     with Session(engine) as session:
@@ -979,7 +1026,7 @@ def test_run_campaign_supervisor_loop_runs_orchestrator_and_tasks(tmp_path):
 
     with (
         patch(
-            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_loop"
+            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_once"
         ) as mocked_orchestrator,
         patch(
             "decomp_agent.orchestrator.runner.run_function",
@@ -990,22 +1037,9 @@ def test_run_campaign_supervisor_loop_runs_orchestrator_and_tasks(tmp_path):
             ),
         ),
     ):
-        from decomp_agent.orchestrator.campaign_orchestrator import (
-            CampaignOrchestratorSummary,
-        )
-
         mocked_orchestrator.return_value = (
             campaign,
-            CampaignOrchestratorSummary(
-                campaign_id=campaign.id,  # type: ignore[arg-type]
-                sessions_run=1,
-                pending_tasks=3,
-                running_tasks=0,
-                completed_tasks=0,
-                failed_tasks=0,
-                timed_out=False,
-                stopped_by_limit=True,
-            ),
+            AgentResult(termination_reason="model_stopped"),
         )
         refreshed_campaign, summary = run_campaign_supervisor_loop(
             engine,
@@ -1026,6 +1060,8 @@ def test_run_campaign_supervisor_loop_runs_orchestrator_and_tasks(tmp_path):
 
 def test_run_campaign_supervisor_loop_writes_cycle_artifacts_before_task_execution(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.orchestrator_poll_seconds = 0
+    config.campaign.manager_wake_cooldown_seconds = 0
     engine = get_engine(tmp_path / "campaign-cycle-artifacts.db")
 
     with Session(engine) as session:
@@ -1072,8 +1108,8 @@ def test_run_campaign_supervisor_loop_writes_cycle_artifacts_before_task_executi
 
     with (
         patch(
-            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_loop",
-            return_value=(campaign, type("Summary", (), {"sessions_run": 1})()),
+            "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_once",
+            return_value=(campaign, AgentResult(termination_reason="model_stopped")),
         ),
         patch(
             "decomp_agent.orchestrator.campaign._run_claimed_campaign_task",

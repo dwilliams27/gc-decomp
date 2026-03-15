@@ -20,12 +20,16 @@ from sqlalchemy import Engine
 from decomp_agent.config import Config
 from decomp_agent.orchestrator.campaign import (
     append_campaign_note,
+    append_campaign_function_memory,
     create_campaign_worker_task,
     format_campaign_status,
     format_campaign_task_result,
+    get_campaign_function_memory,
     get_campaign_notes,
+    get_campaign_scratchpad,
     run_campaign_next_task_summary,
     retry_campaign_task,
+    write_campaign_scratchpad,
 )
 
 
@@ -172,6 +176,32 @@ def _dispatch_campaign_ipc_request(
         return f"Wrote manager note for campaign #{payload['campaign_id']} to {path}"
     if tool_name == "campaign_get_notes":
         return get_campaign_notes(engine, int(payload["campaign_id"]))
+    if tool_name == "campaign_get_scratchpad":
+        return get_campaign_scratchpad(engine, int(payload["campaign_id"]))
+    if tool_name == "campaign_write_scratchpad":
+        path = write_campaign_scratchpad(
+            engine,
+            int(payload["campaign_id"]),
+            str(payload["content"]),
+        )
+        return f"Wrote manager scratchpad for campaign #{payload['campaign_id']} to {path}"
+    if tool_name == "campaign_get_function_memory":
+        return get_campaign_function_memory(
+            engine,
+            int(payload["campaign_id"]),
+            str(payload["function_name"]),
+        )
+    if tool_name == "campaign_append_function_memory":
+        path = append_campaign_function_memory(
+            engine,
+            int(payload["campaign_id"]),
+            str(payload["function_name"]),
+            str(payload["note"]),
+        )
+        return (
+            f"Appended function memory for {payload['function_name']} "
+            f"in campaign #{payload['campaign_id']} at {path}"
+        )
     raise ValueError(f"Unsupported campaign IPC tool '{tool_name}'")
 
 

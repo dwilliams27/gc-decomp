@@ -46,14 +46,12 @@ def test_campaign_launch_starts_processes_and_writes_manifest(tmp_path):
 
     assert result.exit_code == 0
     assert "Launched campaign #1" in result.output
-    assert len(launched) == 2
-    assert launched[0][0][-3:] == ["campaign", "orchestrate", "1"]
-    assert launched[1][0][-3:] == ["campaign", "run", "1"]
+    assert len(launched) == 1
+    assert launched[0][0][-3:] == ["campaign", "supervise", "1"]
 
     manifest_path = config.campaign.root_dir / "campaign-1" / "artifacts" / "campaign-processes.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert payload["orchestrator"]["pid"] == 1001
-    assert payload["worker"]["pid"] == 1002
+    assert payload["supervisor"]["pid"] == 1001
 
 
 def test_campaign_launch_rolls_back_if_orchestrator_never_becomes_healthy(tmp_path):
@@ -85,7 +83,7 @@ def test_campaign_launch_rolls_back_if_orchestrator_never_becomes_healthy(tmp_pa
 
     assert result.exit_code != 0
     assert "health check failed" in result.output.lower()
-    assert stop_pid.call_count == 2
+    assert stop_pid.call_count == 1
     with Session(engine) as session:
         campaign = session.get(Campaign, 1)
         assert campaign is not None
@@ -210,13 +208,7 @@ def test_campaign_stop_stops_processes_and_marks_campaign_stopped(tmp_path):
         manifest_path = config.campaign.root_dir / "campaign-1" / "artifacts" / "campaign-processes.json"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
-            json.dumps(
-                {
-                    "campaign_id": 1,
-                    "orchestrator": {"pid": 111},
-                    "worker": {"pid": 222},
-                }
-            ),
+            json.dumps({"campaign_id": 1, "supervisor": {"pid": 111}}),
             encoding="utf-8",
         )
 
@@ -233,7 +225,7 @@ def test_campaign_stop_stops_processes_and_marks_campaign_stopped(tmp_path):
 
     assert result.exit_code == 0
     assert "Stopped campaign #1" in result.output
-    assert stop_pid.call_count == 2
+    assert stop_pid.call_count == 1
     assert "Functions:" in result.output
 
     with Session(engine) as session:

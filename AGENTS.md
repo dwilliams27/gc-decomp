@@ -173,12 +173,14 @@ decomp-agent --config config/default.toml campaign stop 5
 
 - Use the real `decomp-agent` entrypoint, not `python -m decomp_agent.cli`. In this repo, `python -m decomp_agent.cli` may import the module without actually invoking the Click app, which can look like a successful no-op.
 - Prefer `campaign launch` and `campaign stop` over manually starting `campaign orchestrate` and `campaign run`. Those manual subcommands still exist for debugging, but they are no longer the standard operator path.
+- `campaign launch` now starts one host `campaign supervise` process. That supervisor owns worker dispatch and wakes the manager only on significant events.
 - `campaign launch` must be run on the host with enough permissions to:
   - talk to Docker
   - create/remove git worktrees
   - manage isolated worker containers
 - Do not launch overnight campaign control loops from a restricted sandbox that cannot access the Docker socket or mutate `.git/worktrees`.
-- `campaign launch` writes `campaign-processes.json`, `orchestrator.log`, and `worker.log` into the campaign artifact dir. Treat those as the source of truth for process lifecycle.
+- `campaign launch` writes `campaign-processes.json` and `supervisor.log` into the campaign artifact dir. Treat those as the source of truth for process lifecycle.
+- Every campaign should have a persistent `manager-scratchpad.md` plus per-function files under `artifacts/function-memory/`. The orchestrator is expected to use these as durable memory across wake-ups.
 - After launch, immediately validate that the run is real:
   - campaign row exists in `decomp.db`
   - task statuses start changing

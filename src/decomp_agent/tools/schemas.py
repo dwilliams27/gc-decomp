@@ -227,3 +227,31 @@ class CampaignGetNotesParams(BaseModel):
     """Read the manager notes log for a campaign."""
 
     campaign_id: int = Field(description="Campaign id to inspect")
+
+
+class CampaignGetScratchpadParams(BaseModel):
+    """Read the persistent manager scratchpad for a campaign."""
+
+    campaign_id: int = Field(description="Campaign id to inspect")
+
+
+class CampaignWriteScratchpadParams(BaseModel):
+    """Replace the persistent manager scratchpad for a campaign."""
+
+    campaign_id: int = Field(description="Campaign id to update")
+    content: str = Field(description="Full markdown scratchpad content")
+
+
+class CampaignGetFunctionMemoryParams(BaseModel):
+    """Read the persistent memory log for one function in a campaign."""
+
+    campaign_id: int = Field(description="Campaign id to inspect")
+    function_name: str = Field(description="Function name to inspect")
+
+
+class CampaignAppendFunctionMemoryParams(BaseModel):
+    """Append a timestamped note to one function's persistent memory log."""
+
+    campaign_id: int = Field(description="Campaign id to update")
+    function_name: str = Field(description="Function name to annotate")
+    note: str = Field(description="Markdown note to append")

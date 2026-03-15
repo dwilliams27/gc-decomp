@@ -148,6 +148,8 @@ class CampaignConfig(BaseModel):
     rate_limit_backoff_seconds: int = 300
     rate_limit_reset_hours: int = 5
     orchestrator_poll_seconds: int = 30
+    manager_wake_cooldown_seconds: int = 45
+    worker_stall_seconds: int = 900
     root_dir: Path = Path("/tmp/decomp-campaigns")
     allow_shared_fix_workers: bool = False
     allow_temporary_unmatched_regressions: bool = False

@@ -140,6 +140,35 @@ def _campaign_notes_path(campaign: Campaign) -> Path | None:
     return artifact_dir / "manager-notes.md"
 
 
+def _campaign_scratchpad_path(campaign: Campaign) -> Path | None:
+    if not campaign.artifact_dir:
+        return None
+    artifact_dir = Path(campaign.artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir / "manager-scratchpad.md"
+
+
+def _function_memory_dir(campaign: Campaign) -> Path | None:
+    if not campaign.artifact_dir:
+        return None
+    artifact_dir = Path(campaign.artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir = artifact_dir / "function-memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    return memory_dir
+
+
+def _function_memory_path(campaign: Campaign, function_name: str) -> Path | None:
+    memory_dir = _function_memory_dir(campaign)
+    if memory_dir is None:
+        return None
+    safe_name = "".join(
+        ch if ch.isalnum() or ch in {"_", "-"} else "_"
+        for ch in function_name
+    )
+    return memory_dir / f"{safe_name}.md"
+
+
 def append_campaign_note(engine: Engine, campaign_id: int, note: str) -> str:
     """Append a timestamped manager note to the campaign notes artifact and DB."""
     from decomp_agent.models.db import emit_campaign_event
@@ -175,6 +204,75 @@ def get_campaign_notes(engine: Engine, campaign_id: int) -> str:
         if notes_path is None or not notes_path.exists():
             return f"Campaign #{campaign.id} has no manager notes yet."
         return notes_path.read_text(encoding="utf-8")
+
+
+def get_campaign_scratchpad(engine: Engine, campaign_id: int) -> str:
+    """Return the orchestrator scratchpad for a campaign."""
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        scratchpad_path = _campaign_scratchpad_path(campaign)
+        if scratchpad_path is None or not scratchpad_path.exists():
+            return (
+                f"Campaign #{campaign.id} has no scratchpad yet.\n"
+                "Create one to track file-level strategy, open questions, and wake-up context."
+            )
+        return scratchpad_path.read_text(encoding="utf-8")
+
+
+def write_campaign_scratchpad(engine: Engine, campaign_id: int, content: str) -> str:
+    """Replace the orchestrator scratchpad for a campaign."""
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        scratchpad_path = _campaign_scratchpad_path(campaign)
+        if scratchpad_path is None:
+            raise ValueError(f"Campaign #{campaign.id} has no artifact_dir")
+        scratchpad_path.write_text(content.strip() + "\n", encoding="utf-8")
+        return str(scratchpad_path)
+
+
+def get_campaign_function_memory(
+    engine: Engine,
+    campaign_id: int,
+    function_name: str,
+) -> str:
+    """Return the persistent memory log for one function in a campaign."""
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        memory_path = _function_memory_path(campaign, function_name)
+        if memory_path is None or not memory_path.exists():
+            return (
+                f"No function memory yet for {function_name}.\n"
+                "Create one when a worker reveals hypotheses, failed approaches, or follow-up ideas."
+            )
+        return memory_path.read_text(encoding="utf-8")
+
+
+def append_campaign_function_memory(
+    engine: Engine,
+    campaign_id: int,
+    function_name: str,
+    note: str,
+) -> str:
+    """Append a timestamped entry to a function-specific memory log."""
+    with Session(engine) as session:
+        campaign = get_campaign(session, campaign_id)
+        if campaign is None:
+            raise ValueError(f"Campaign #{campaign_id} not found")
+        memory_path = _function_memory_path(campaign, function_name)
+        if memory_path is None:
+            raise ValueError(f"Campaign #{campaign.id} has no artifact_dir")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        normalized_note = note.replace("\\n", "\n").strip()
+        block = f"## {timestamp}\n\n{normalized_note}\n\n"
+        with memory_path.open("a", encoding="utf-8") as handle:
+            handle.write(block)
+        return str(memory_path)
 
 
 def _campaign_progress_snapshot(tasks: list[CampaignTask]) -> tuple[int, int, int, int, int]:
@@ -352,6 +450,17 @@ def prepare_campaign_workspace(workspace: CampaignWorkspace) -> None:
         shutil.rmtree(workspace.root_dir, ignore_errors=True)
     workspace.root_dir.mkdir(parents=True, exist_ok=True)
     workspace.artifact_dir.mkdir(parents=True, exist_ok=True)
+    (workspace.artifact_dir / "function-memory").mkdir(parents=True, exist_ok=True)
+    (workspace.artifact_dir / "manager-scratchpad.md").write_text(
+        "# Manager Scratchpad\n\n"
+        "Use this file as persistent campaign memory.\n"
+        "- Overall file strategy\n"
+        "- Current open hypotheses\n"
+        "- Which functions are promising\n"
+        "- What not to retry blindly\n"
+        "- What should happen on the next wake-up\n",
+        encoding="utf-8",
+    )
 
 
 def start_campaign(
@@ -602,11 +711,31 @@ def _run_claimed_campaign_task(
                 provider=provider,
                 until=until,
             )
+            function_name = refreshed_task.function_name
         else:
             complete_campaign_task(session, refreshed_task, result)
+            function_name = refreshed_task.function_name
         session.refresh(refreshed_campaign)
         session.refresh(refreshed_task)
-        return refreshed_campaign, refreshed_task, result
+    if function_name:
+        memory_lines = [
+            f"Task #{task_id} via {provider}",
+            f"Termination: {result.termination_reason or '(none)'}",
+            f"Best match: {max(result.best_match_percent, refreshed_task.live_best_match_pct):.1f}%",
+        ]
+        if refreshed_task.instructions:
+            memory_lines.append(f"Instructions: {refreshed_task.instructions}")
+        if result.error:
+            memory_lines.append(f"Error: {result.error}")
+        if result.patch_path:
+            memory_lines.append(f"Patch: {result.patch_path}")
+        append_campaign_function_memory(
+            engine,
+            campaign_id,
+            function_name,
+            "\n".join(memory_lines),
+        )
+    return refreshed_campaign, refreshed_task, result
 
 
 def _claim_campaign_tasks(
@@ -783,6 +912,9 @@ def format_campaign_status(engine: Engine, config: Config, campaign_id: int) -> 
     notes_path = _campaign_notes_path(campaign)
     if notes_path is not None:
         lines.append(f"Manager notes: {notes_path}")
+    scratchpad_path = _campaign_scratchpad_path(campaign)
+    if scratchpad_path is not None:
+        lines.append(f"Scratchpad: {scratchpad_path}")
 
     if running:
         lines.append("Running tasks:")
@@ -967,6 +1099,116 @@ def run_campaign_next_task_summary(
     return "\n".join(lines)
 
 
+def _campaign_supervisor_state_path(campaign: Campaign) -> Path | None:
+    if not campaign.artifact_dir:
+        return None
+    artifact_dir = Path(campaign.artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir / "orchestrator-state.json"
+
+
+def _load_supervisor_state(campaign: Campaign) -> dict[str, object]:
+    path = _campaign_supervisor_state_path(campaign)
+    if path is None or not path.exists():
+        return {
+            "last_seen_event_id": 0,
+            "last_manager_wake_at": "",
+            "last_wake_reason": "startup",
+        }
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "last_seen_event_id": 0,
+            "last_manager_wake_at": "",
+            "last_wake_reason": "startup",
+        }
+
+
+def _save_supervisor_state(campaign: Campaign, state: dict[str, object]) -> None:
+    path = _campaign_supervisor_state_path(campaign)
+    if path is None:
+        return
+    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _summarize_campaign_events(events: list[object]) -> str:
+    if not events:
+        return "No new campaign events."
+    lines = ["Recent significant events:"]
+    for event in events[-10:]:
+        payload = {}
+        if getattr(event, "data", ""):
+            try:
+                payload = json.loads(event.data)
+            except json.JSONDecodeError:
+                payload = {"raw": event.data}
+        function_name = getattr(event, "function_name", None) or payload.get("function_name") or "(campaign)"
+        detail = ""
+        if "best_match_pct" in payload:
+            detail = f" best={payload['best_match_pct']}"
+        elif "observed_match_pct" in payload and payload["observed_match_pct"] is not None:
+            detail = f" observed={payload['observed_match_pct']}"
+        elif "error" in payload and payload["error"]:
+            detail = f" error={payload['error']}"
+        lines.append(
+            f"- #{getattr(event, 'id', '?')} {getattr(event, 'event_type', '?')} "
+            f"{function_name}{detail}"
+        )
+    return "\n".join(lines)
+
+
+def _needs_manager_wake(
+    config: Config,
+    *,
+    campaign: Campaign,
+    tasks: list[CampaignTask],
+    new_events: list[object],
+    state: dict[str, object],
+    active_futures: dict[Future, int],
+) -> tuple[bool, str]:
+    now = datetime.now(timezone.utc)
+    last_manager_wake_at_raw = str(state.get("last_manager_wake_at", "") or "")
+    last_manager_wake_at = None
+    if last_manager_wake_at_raw:
+        try:
+            last_manager_wake_at = datetime.fromisoformat(last_manager_wake_at_raw)
+            last_manager_wake_at = _ensure_utc(last_manager_wake_at)
+        except ValueError:
+            last_manager_wake_at = None
+    if (
+        last_manager_wake_at is not None
+        and (now - last_manager_wake_at).total_seconds() < config.campaign.manager_wake_cooldown_seconds
+        and new_events
+    ):
+        significant_recent = any(
+            getattr(event, "event_type", "") in {"worker_completed", "worker_failed", "match_achieved"}
+            for event in new_events
+        )
+        if not significant_recent:
+            return False, "manager_wake_cooldown"
+
+    running_tasks = [task for task in tasks if task.status == "running"]
+    pending_tasks = [task for task in tasks if task.status == "pending"]
+    if not campaign.notes.strip():
+        return True, "campaign_startup"
+    if new_events:
+        event_types = {getattr(event, "event_type", "") for event in new_events}
+        if event_types & {"worker_completed", "worker_failed", "match_achieved"}:
+            return True, "worker_terminal_event"
+        if event_types & {"match_improved"}:
+            return True, "meaningful_progress"
+    if not running_tasks and pending_tasks and not active_futures:
+        return True, "capacity_open_with_pending_work"
+    for task in running_tasks:
+        if task.live_last_activity_at is None:
+            continue
+        age = (now - _ensure_utc(task.live_last_activity_at)).total_seconds()
+        if age >= config.campaign.worker_stall_seconds:
+            return True, f"stalled_worker:{task.id}"
+    return False, "no_significant_event"
+
+
 def run_campaign_supervisor_loop(
     engine: Engine,
     config: Config,
@@ -975,23 +1217,22 @@ def run_campaign_supervisor_loop(
     max_cycles: int | None = None,
     max_tasks_per_cycle: int | None = None,
 ) -> tuple[Campaign, CampaignSupervisorSummary]:
-    """Alternate orchestrator planning with worker execution for one campaign.
-
-    This is intentionally sequential today. It provides an unattended control
-    loop before true parallel worker dispatch is implemented.
-    """
+    """Run one event-driven host supervisor for a campaign."""
     from decomp_agent.orchestrator.campaign_orchestrator import (
-        run_campaign_orchestrator_loop,
+        run_campaign_orchestrator_once,
     )
+    from decomp_agent.models.db import CampaignEvent
 
     with Session(engine) as session:
         campaign = get_campaign(session, campaign_id)
         if campaign is None:
             raise ValueError(f"Campaign #{campaign_id} not found")
         mark_campaign_running(session, campaign)
+        requeue_running_campaign_tasks(session, campaign_id)
         session.refresh(campaign)
         started_at = _ensure_utc(campaign.started_at or datetime.now(timezone.utc))
         timeout_deadline = started_at + timedelta(hours=campaign.timeout_hours)
+        state = _load_supervisor_state(campaign)
 
     cycles_run = 0
     orchestrator_sessions = 0
@@ -1000,166 +1241,162 @@ def run_campaign_supervisor_loop(
     stop_reason = "queue_drained"
     no_progress_cycles = 0
     previous_snapshot: tuple[int, int, int, int, int] | None = None
+    worker_budget = max(config.campaign.max_active_workers, 1)
+    if max_tasks_per_cycle is not None:
+        worker_budget = min(worker_budget, max(max_tasks_per_cycle, 1))
+    active_futures: dict[Future, int] = {}
 
-    while True:
-        if max_cycles is not None and cycles_run >= max_cycles:
-            stop_reason = "max_cycle_limit"
-            break
-        if datetime.now(timezone.utc) >= timeout_deadline:
-            timed_out = True
-            stop_reason = "timeout"
-            break
+    with ThreadPoolExecutor(max_workers=worker_budget) as executor:
+        while True:
+            if max_cycles is not None and cycles_run >= max_cycles:
+                stop_reason = "max_cycle_limit"
+                break
+            if datetime.now(timezone.utc) >= timeout_deadline:
+                timed_out = True
+                stop_reason = "timeout"
+                break
 
-        with Session(engine) as session:
-            campaign = get_campaign(session, campaign_id)
-            if campaign is None:
-                raise ValueError(f"Campaign #{campaign_id} disappeared during supervisor loop")
-            tasks = list_campaign_tasks(session, campaign_id)
-        current_snapshot = _campaign_progress_snapshot(tasks)
-        now = datetime.now(timezone.utc)
-        pending_tasks = sum(1 for task in tasks if task.status == "pending")
-        running_tasks = sum(1 for task in tasks if task.status == "running")
-        eligible_pending_tasks = sum(
-            1
-            for task in tasks
-            if task.status == "pending"
-            and (task.next_eligible_at is None or _ensure_utc(task.next_eligible_at) <= now)
-        )
-        if pending_tasks == 0 and running_tasks == 0:
-            stop_reason = "queue_drained"
-            break
+            completed_futures = [future for future in active_futures if future.done()]
+            for future in completed_futures:
+                future.result()
+                del active_futures[future]
 
-        orchestrator_provider = campaign.orchestrator_provider
-        orchestrator_cooldown_until = _provider_cooldown_until(campaign, orchestrator_provider)
-        orchestrator_available = (
-            orchestrator_cooldown_until is None
-            or _ensure_utc(orchestrator_cooldown_until) <= now
-        )
-        if running_tasks == 0 and eligible_pending_tasks > 0 and orchestrator_available:
-            _campaign, orchestrator_summary = run_campaign_orchestrator_loop(
-                engine,
-                config,
-                campaign_id=campaign_id,
-                max_sessions=1,
-            )
-            orchestrator_sessions += orchestrator_summary.sessions_run
-
-        dispatch_budget = max_tasks_per_cycle or max(config.campaign.max_active_workers, 1)
-        _campaign, claimed_task_ids = _claim_campaign_tasks(
-            engine,
-            campaign_id=campaign_id,
-            dispatch_budget=dispatch_budget,
-        )
-        if claimed_task_ids:
             with Session(engine) as session:
-                claimed_tasks = []
-                for task_id in claimed_task_ids:
-                    task = get_campaign_task(session, task_id)
-                    if task is not None:
-                        claimed_tasks.append((task_id, _task_label(task)))
-            tasks_run += len(claimed_task_ids)
-            _append_supervisor_cycle_note(
-                engine,
-                campaign_id=campaign_id,
-                cycle_index=cycles_run + 1,
-                claimed_tasks=claimed_tasks,
-                orchestrator_sessions=orchestrator_sessions,
-                stop_reason="dispatching_tasks",
+                campaign = get_campaign(session, campaign_id)
+                if campaign is None:
+                    raise ValueError(f"Campaign #{campaign_id} disappeared during supervisor loop")
+                tasks = list_campaign_tasks(session, campaign_id)
+                last_seen_event_id = int(state.get("last_seen_event_id", 0) or 0)
+                new_events = list(
+                    session.exec(
+                        select(CampaignEvent)
+                        .where(
+                            CampaignEvent.campaign_id == campaign_id,
+                            CampaignEvent.id > last_seen_event_id,
+                        )
+                        .order_by(CampaignEvent.id.asc())  # type: ignore[arg-type]
+                    ).all()
+                )
+
+            current_snapshot = _campaign_progress_snapshot(tasks)
+            now = datetime.now(timezone.utc)
+            pending_tasks = sum(1 for task in tasks if task.status == "pending")
+            running_tasks = sum(1 for task in tasks if task.status == "running")
+            if pending_tasks == 0 and running_tasks == 0 and not active_futures:
+                stop_reason = "queue_drained"
+                break
+
+            should_wake, wake_reason = _needs_manager_wake(
+                config,
+                campaign=campaign,
+                tasks=tasks,
+                new_events=new_events,
+                state=state,
+                active_futures=active_futures,
             )
-            _write_supervisor_checkpoint(
-                engine,
-                campaign_id=campaign_id,
-                cycles_run=cycles_run,
-                orchestrator_sessions=orchestrator_sessions,
-                tasks_run=tasks_run,
-                timed_out=timed_out,
-                stopped_by_limit=max_cycles is not None and (cycles_run + 1) >= max_cycles,
-                stop_reason="dispatching_tasks",
-                no_progress_cycles=no_progress_cycles,
+            orchestrator_cooldown_until = _provider_cooldown_until(campaign, campaign.orchestrator_provider)
+            orchestrator_available = (
+                orchestrator_cooldown_until is None
+                or _ensure_utc(orchestrator_cooldown_until) <= now
             )
-            if len(claimed_task_ids) == 1:
-                _run_claimed_campaign_task(
+            if should_wake and orchestrator_available:
+                wake_summary = _summarize_campaign_events(new_events)
+                _campaign, result = run_campaign_orchestrator_once(
                     engine,
                     config,
                     campaign_id=campaign_id,
-                    task_id=claimed_task_ids[0],
+                    wake_reason=wake_reason,
+                    wake_summary=wake_summary,
                 )
-            else:
-                with ThreadPoolExecutor(max_workers=len(claimed_task_ids)) as executor:
-                    futures = [
-                        executor.submit(
+                orchestrator_sessions += 1
+                state["last_manager_wake_at"] = datetime.now(timezone.utc).isoformat()
+                state["last_wake_reason"] = wake_reason
+                if new_events:
+                    state["last_seen_event_id"] = max(
+                        getattr(event, "id", 0) or 0 for event in new_events
+                    )
+                _save_supervisor_state(campaign, state)
+                if result.termination_reason == "rate_limited":
+                    stop_reason = "orchestrator_rate_limited"
+                    break
+
+                with Session(engine) as session:
+                    campaign = get_campaign(session, campaign_id)
+                    if campaign is None:
+                        raise ValueError(f"Campaign #{campaign_id} disappeared after orchestrator wake")
+                    tasks = list_campaign_tasks(session, campaign_id)
+
+            available_slots = max(worker_budget - len(active_futures), 0)
+            if available_slots > 0:
+                _campaign, claimed_task_ids = _claim_campaign_tasks(
+                    engine,
+                    campaign_id=campaign_id,
+                    dispatch_budget=available_slots,
+                )
+                if claimed_task_ids:
+                    with Session(engine) as session:
+                        claimed_tasks = []
+                        for task_id in claimed_task_ids:
+                            task = get_campaign_task(session, task_id)
+                            if task is not None:
+                                claimed_tasks.append((task_id, _task_label(task)))
+                    tasks_run += len(claimed_task_ids)
+                    _append_supervisor_cycle_note(
+                        engine,
+                        campaign_id=campaign_id,
+                        cycle_index=cycles_run + 1,
+                        claimed_tasks=claimed_tasks,
+                        orchestrator_sessions=orchestrator_sessions,
+                        stop_reason="dispatching_tasks",
+                    )
+                    _write_supervisor_checkpoint(
+                        engine,
+                        campaign_id=campaign_id,
+                        cycles_run=cycles_run,
+                        orchestrator_sessions=orchestrator_sessions,
+                        tasks_run=tasks_run,
+                        timed_out=timed_out,
+                        stopped_by_limit=max_cycles is not None and (cycles_run + 1) >= max_cycles,
+                        stop_reason="dispatching_tasks",
+                        no_progress_cycles=no_progress_cycles,
+                    )
+                    for task_id in claimed_task_ids:
+                        future = executor.submit(
                             _run_claimed_campaign_task,
                             engine,
                             config,
                             campaign_id=campaign_id,
                             task_id=task_id,
                         )
-                        for task_id in claimed_task_ids
-                    ]
-                    for future in futures:
-                        future.result()
+                        active_futures[future] = task_id
 
-        if not claimed_task_ids and running_tasks == 0:
-            _append_supervisor_cycle_note(
-                engine,
-                campaign_id=campaign_id,
-                cycle_index=cycles_run + 1,
-                claimed_tasks=[],
-                orchestrator_sessions=orchestrator_sessions,
-                stop_reason="waiting_for_next_eligible_task",
-            )
-            _write_supervisor_checkpoint(
-                engine,
-                campaign_id=campaign_id,
-                cycles_run=cycles_run,
-                orchestrator_sessions=orchestrator_sessions,
-                tasks_run=tasks_run,
-                timed_out=timed_out,
-                stopped_by_limit=max_cycles is not None and (cycles_run + 1) >= max_cycles,
-                stop_reason="waiting_for_next_eligible_task",
-                no_progress_cycles=no_progress_cycles,
-            )
+            cycles_run += 1
             with Session(engine) as session:
-                campaign = get_campaign(session, campaign_id)
-                if campaign is None:
-                    raise ValueError(f"Campaign #{campaign_id} disappeared during cooldown check")
-                tasks = list_campaign_tasks(session, campaign_id)
-            now = datetime.now(timezone.utc)
-            candidate_times: list[datetime] = []
-            for provider in VALID_PROVIDERS:
-                cooldown_until = _provider_cooldown_until(campaign, provider)
-                if cooldown_until is not None and _ensure_utc(cooldown_until) > now:
-                    candidate_times.append(_ensure_utc(cooldown_until))
-            for task in tasks:
-                if task.status != "pending" or task.next_eligible_at is None:
-                    continue
-                eligible_at = _ensure_utc(task.next_eligible_at)
-                if eligible_at > now:
-                    candidate_times.append(eligible_at)
-            if candidate_times:
-                next_ready = min(candidate_times)
-                sleep_seconds = min(max((next_ready - now).total_seconds(), 1.0), 300.0)
-                stop_reason = "provider_cooldown"
-                time.sleep(sleep_seconds)
-                previous_snapshot = current_snapshot
-                continue
+                refreshed_tasks = list_campaign_tasks(session, campaign_id)
+            next_snapshot = _campaign_progress_snapshot(refreshed_tasks)
+            if next_snapshot == previous_snapshot == current_snapshot:
+                no_progress_cycles += 1
+            else:
+                no_progress_cycles = 0
+            previous_snapshot = next_snapshot
 
-        cycles_run += 1
-        with Session(engine) as session:
-            refreshed_tasks = list_campaign_tasks(session, campaign_id)
-        next_snapshot = _campaign_progress_snapshot(refreshed_tasks)
-        if next_snapshot == previous_snapshot == current_snapshot:
-            no_progress_cycles += 1
-        else:
-            no_progress_cycles = 0
-        previous_snapshot = next_snapshot
+            if (
+                config.campaign.max_no_progress_cycles > 0
+                and no_progress_cycles >= config.campaign.max_no_progress_cycles
+            ):
+                stop_reason = "no_progress_limit"
+                break
 
-        if (
-            config.campaign.max_no_progress_cycles > 0
-            and no_progress_cycles >= config.campaign.max_no_progress_cycles
-        ):
-            stop_reason = "no_progress_limit"
-            break
+            if new_events:
+                state["last_seen_event_id"] = max(
+                    getattr(event, "id", 0) or 0 for event in new_events
+                )
+                _save_supervisor_state(campaign, state)
+
+            if active_futures:
+                time.sleep(1.0)
+            else:
+                time.sleep(max(float(config.campaign.orchestrator_poll_seconds), 1.0))
 
     with Session(engine) as session:
         campaign = get_campaign(session, campaign_id)

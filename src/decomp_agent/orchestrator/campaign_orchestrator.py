@@ -220,17 +220,21 @@ def _run_claude_orchestrator(
     timeout = max(config.claude_code.orchestrator_timeout_seconds, 60)
     system_prompt = load_campaign_orchestrator_system_prompt()
 
-    claude_args = [
-        "claude",
-        "-p", shlex.quote(prompt),
-        "--output-format", "stream-json",
-        "--verbose",
-        "--model", "claude-opus-4-6",
-        "--append-system-prompt", shlex.quote(system_prompt),
-        "--mcp-config", "/app/mcp.json",
-        "--dangerously-skip-permissions",
-        "--max-turns", str(max_turns),
-    ]
+    claude_args = ["claude", "-p", shlex.quote(prompt)]
+    if campaign.orchestrator_session_id:
+        claude_args.extend(["--resume", campaign.orchestrator_session_id])
+    else:
+        claude_args.extend(["--append-system-prompt", shlex.quote(system_prompt)])
+    claude_args.extend(
+        [
+            "--output-format", "stream-json",
+            "--verbose",
+            "--model", "claude-opus-4-6",
+            "--mcp-config", "/app/mcp.json",
+            "--dangerously-skip-permissions",
+            "--max-turns", str(max_turns),
+        ]
+    )
     cmd = [
         "docker",
         "exec",
@@ -390,6 +394,8 @@ def run_campaign_orchestrator_once(
     config: Config,
     *,
     campaign_id: int,
+    wake_reason: str = "startup",
+    wake_summary: str = "",
 ) -> tuple[Campaign, AgentResult]:
     """Run one orchestrator session for a campaign using its configured provider."""
     with Session(engine) as session:
@@ -397,7 +403,14 @@ def run_campaign_orchestrator_once(
         if campaign is None:
             raise ValueError(f"Campaign #{campaign_id} not found")
     with _campaign_orchestrator_lock(campaign):
-        prompt = build_campaign_orchestrator_prompt(campaign_id, campaign.source_file, config)
+        prompt = build_campaign_orchestrator_prompt(
+            campaign_id,
+            campaign.source_file,
+            config,
+            resumed=bool(campaign.orchestrator_session_id),
+            wake_reason=wake_reason,
+            wake_summary=wake_summary,
+        )
 
         if campaign.orchestrator_provider == "claude":
             result = _run_claude_orchestrator(engine, campaign, prompt, config)

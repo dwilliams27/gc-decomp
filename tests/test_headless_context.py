@@ -32,7 +32,8 @@ def test_load_campaign_orchestrator_system_prompt_is_manager_focused():
     assert "campaign MCP tools" in prompt
     assert "Do not use write_function" in prompt
     assert "Maintain explicit written notes" in prompt
-    assert "Move quickly" in prompt
+    assert "persistent manager session" in prompt
+    assert "scratchpad" in prompt
 
 
 def test_build_headless_task_prompt_file_mode_includes_status(tmp_path):
@@ -123,13 +124,19 @@ def test_build_campaign_orchestrator_prompt_mentions_campaign_tools(tmp_path):
             7,
             "melee/test/testfile.c",
             config,
+            resumed=True,
+            wake_reason="worker_terminal_event",
+            wake_summary="Recent significant events:\n- worker_completed foo",
         )
 
     assert "campaign #7" in prompt
     assert "no true internet browsing access" in prompt
     assert "campaign_get_status" in prompt
+    assert "campaign_get_scratchpad" in prompt
+    assert "campaign_get_function_memory" in prompt
     assert "campaign_get_notes" in prompt
     assert "campaign_write_note" in prompt
     assert "campaign_run_next_task" in prompt
     assert "campaign_launch_worker" in prompt
-    assert "queue or nominate at least one worker within the first few turns" in prompt
+    assert "persistent campaign-management session" in prompt
+    assert "Wake reason: worker_terminal_event" in prompt

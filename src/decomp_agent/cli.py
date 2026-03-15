@@ -699,7 +699,7 @@ def campaign_launch(
     allow_temporary_unmatched_regressions: bool,
     allow_dirty_melee: bool,
 ) -> None:
-    """Create a campaign and launch its orchestrator + worker loops in the background."""
+    """Create a campaign and launch its event-driven supervisor in the background."""
     config, engine = _load(ctx)
     src_path = config.melee.resolve_source_path(source_file)
     if not src_path.exists():
@@ -745,27 +745,18 @@ def campaign_launch(
         )
 
     base_cmd = _campaign_cli_base_cmd(ctx)
-    orchestrator_log = Path(campaign.artifact_dir) / "orchestrator.log"
-    worker_log = Path(campaign.artifact_dir) / "worker.log"
-    orchestrator_cmd = base_cmd + ["campaign", "orchestrate", str(campaign.id)]
-    worker_cmd = base_cmd + ["campaign", "run", str(campaign.id)]
-
-    orchestrator_proc = _launch_campaign_process(orchestrator_cmd, log_path=orchestrator_log)
-    worker_proc = _launch_campaign_process(worker_cmd, log_path=worker_log)
+    supervisor_log = Path(campaign.artifact_dir) / "supervisor.log"
+    supervisor_cmd = base_cmd + ["campaign", "supervise", str(campaign.id)]
+    supervisor_proc = _launch_campaign_process(supervisor_cmd, log_path=supervisor_log)
 
     manifest = {
         "campaign_id": campaign.id,
         "source_file": campaign.source_file,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "orchestrator": {
-            "pid": orchestrator_proc.pid,
-            "command": orchestrator_cmd,
-            "log_path": str(orchestrator_log),
-        },
-        "worker": {
-            "pid": worker_proc.pid,
-            "command": worker_cmd,
-            "log_path": str(worker_log),
+        "supervisor": {
+            "pid": supervisor_proc.pid,
+            "command": supervisor_cmd,
+            "log_path": str(supervisor_log),
         },
     }
     manifest_path = _write_campaign_process_manifest(campaign, manifest)
@@ -773,7 +764,7 @@ def campaign_launch(
     deadline = time.time() + 30.0
     healthy = False
     while time.time() < deadline:
-        if not _pid_is_alive(orchestrator_proc.pid):
+        if not _pid_is_alive(supervisor_proc.pid):
             break
         if _orchestrator_healthy(engine, campaign.id):  # type: ignore[arg-type]
             healthy = True
@@ -782,7 +773,7 @@ def campaign_launch(
 
     if not healthy:
         stopped_roles: list[str] = []
-        for role, pid in (("orchestrator", orchestrator_proc.pid), ("worker", worker_proc.pid)):
+        for role, pid in (("supervisor", supervisor_proc.pid),):
             if _stop_pid(pid):
                 stopped_roles.append(role)
         removed_containers = _stop_campaign_worker_containers(campaign)
@@ -819,8 +810,7 @@ def campaign_launch(
     console.print(f"  Tasks:        {task_count}")
     console.print(f"  Artifacts:    {campaign.artifact_dir}")
     console.print(f"  PID file:     {manifest_path}")
-    console.print(f"  Manager log:  {orchestrator_log}")
-    console.print(f"  Worker log:   {worker_log}")
+    console.print(f"  Supervisor:   {supervisor_log}")
     if reset_before_launch:
         console.print(f"  Reset rows:   {reset_before_launch} stranded in_progress function row(s)")
 
@@ -889,7 +879,7 @@ def campaign_stop(ctx: click.Context, campaign_id: int) -> None:
         manifest = _load_campaign_process_manifest(campaign)
 
     stopped_roles: list[str] = []
-    for role in ("orchestrator", "worker"):
+    for role in ("supervisor", "orchestrator", "worker"):
         process_info = manifest.get(role)
         if not isinstance(process_info, dict):
             continue
