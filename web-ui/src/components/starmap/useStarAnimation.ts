@@ -943,11 +943,11 @@ function getFarRidgeTreeCache(): SimpleTree[] {
         ["#0a0e16", "#0b1018", "#090e15", "#0c1118"],
         ["#090d14", "#0a0f16", "#080c13", "#0b1017"],
       ][Math.min(2, Math.floor(row / 3))];
-      let fx = 0.02;
-      while (fx < 0.97) {
-        const gap = 0.002 + seededF(globalIdx * 3 + 900) * 0.005;
+      let fx = -0.02;
+      while (fx < 1.02) {
+        const gap = 0.0007 + seededF(globalIdx * 3 + 900) * 0.0016;
         fx += gap;
-        if (fx >= 0.97) break;
+        if (fx >= 1.02) break;
         // 10% skip for slight natural gaps
         if (seededF(globalIdx * 3 + 903) < 0.10) { globalIdx++; continue; }
         // Per-tree y jitter to avoid ring patterns
