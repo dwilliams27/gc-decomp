@@ -583,6 +583,155 @@ function seededF(seed: number): number {
   return x - Math.floor(x);
 }
 
+// ─── Steamboat on the river ─────────────────────────────────────────────────
+
+interface SteamParticle {
+  startX: number;
+  startY: number;
+  vx: number;
+  vy: number;
+  startTime: number;
+  lifetime: number;
+  startSize: number;
+}
+
+let steamParticles: SteamParticle[] = [];
+let lastSteamEmit = 0;
+
+/** Sample the river's y-coordinate at fractional x (matching drawLandscape curves). */
+function riverAtX(fx: number, riverY: number): number {
+  const quad = (t: number, p0: number, p1: number, p2: number) =>
+    p0 + (p1 - p0) * 2 * t * (1 - t) + (p2 - p0) * t * t;
+
+  if (fx < 0.18) {
+    const t = fx / 0.18;
+    return quad(t, riverY + 15, riverY - 5, riverY + 10);
+  }
+  if (fx < 0.42) {
+    const t = (fx - 0.18) / 0.24;
+    return quad(t, riverY + 10, riverY + 30, riverY + 5);
+  }
+  if (fx < 0.65) {
+    const t = (fx - 0.42) / 0.23;
+    return quad(t, riverY + 5, riverY - 25, riverY - 10);
+  }
+  if (fx < 0.88) {
+    const t = (fx - 0.65) / 0.23;
+    return quad(t, riverY - 10, riverY + 15, riverY - 5);
+  }
+  const t = (fx - 0.88) / 0.12;
+  return quad(t, riverY - 5, riverY - 15, riverY);
+}
+
+/** Distant steamboat traversing the river with warm light and steam. */
+function drawSteamboat(
+  ctx: CanvasRenderingContext2D,
+  time: number,
+  w: number, h: number,
+) {
+  const horizonY = h * 0.65;
+  const valleyTop = horizonY + 45;
+  const riverY = valleyTop + (h - valleyTop) * 0.35;
+
+  const cycleDuration = 225;
+  const crossingTime = 225;
+  const tSec = time / 1000;
+  const cycleIndex = Math.floor(tSec / cycleDuration);
+  const cycleProgress = (tSec % cycleDuration) / crossingTime;
+
+  // Update and draw surviving steam particles (even during gap)
+  const drawSteam = () => {
+    if (steamParticles.length === 0) return;
+    ctx.save();
+    ctx.fillStyle = "rgba(180,190,200,1)";
+    for (let i = steamParticles.length - 1; i >= 0; i--) {
+      const p = steamParticles[i];
+      const elapsed = time - p.startTime;
+      const life = elapsed / p.lifetime;
+      if (life >= 1) {
+        steamParticles.splice(i, 1);
+        continue;
+      }
+      const x = p.startX + p.vx * elapsed;
+      const y = p.startY + p.vy * elapsed;
+      const size = p.startSize + elapsed * 0.0012;
+      const pulse = 0.04 + 0.02 * Math.sin(time * 0.0008 + p.startTime * 0.3);
+      ctx.globalAlpha = pulse * (1 - life);
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  };
+
+  if (cycleProgress > 1) {
+    drawSteam();
+    return;
+  }
+
+  const dir = cycleIndex % 2 === 0 ? 1 : -1;
+  const fx = dir > 0 ? cycleProgress : 1 - cycleProgress;
+  const bx = fx * w;
+  const by = riverAtX(fx, riverY);
+
+  ctx.save();
+
+  // Hull — tiny trapezoid silhouette
+  ctx.fillStyle = "#1a1a2a";
+  ctx.beginPath();
+  ctx.moveTo(bx - 4, by);
+  ctx.lineTo(bx - 3, by + 2);
+  ctx.lineTo(bx + 3, by + 2);
+  ctx.lineTo(bx + 4, by);
+  ctx.closePath();
+  ctx.fill();
+
+  // Cabin
+  ctx.fillStyle = "#151525";
+  ctx.fillRect(bx - 1.5, by - 2, 3, 2);
+
+  // Smokestack
+  const stackX = bx + dir * 0.5;
+  const stackTop = by - 5;
+  ctx.fillStyle = "#101020";
+  ctx.fillRect(stackX - 0.5, stackTop, 1, 3);
+
+  // Warm cabin light
+  ctx.globalAlpha = 0.15;
+  const glow = ctx.createRadialGradient(bx, by - 1, 0, bx, by - 1, 5);
+  glow.addColorStop(0, "rgba(255,200,100,0.3)");
+  glow.addColorStop(1, "transparent");
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(bx, by - 1, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Water reflection — faint warm shimmer below the hull
+  ctx.globalAlpha = 0.06;
+  ctx.fillStyle = "#ffe0a0";
+  ctx.beginPath();
+  ctx.ellipse(bx, by + 4, 3, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+
+  // Emit steam from smokestack
+  if (steamParticles.length < 30 && time - lastSteamEmit > 80) {
+    lastSteamEmit = time;
+    steamParticles.push({
+      startX: stackX,
+      startY: stackTop,
+      vx: -0.003 + (Math.random() - 0.3) * 0.005,
+      vy: -0.003 - Math.random() * 0.004,
+      startTime: time,
+      lifetime: 3500 + Math.random() * 3000,
+      startSize: 0.4 + Math.random() * 0.5,
+    });
+  }
+
+  drawSteam();
+}
+
 // ─── Cached lookup structures (rebuilt when stars change) ───────────────────
 
 let cachedStarMap: Map<number, StarPosition> | null = null;
@@ -656,6 +805,9 @@ export function useStarAnimation() {
 
     // Distant cars on the road
     drawCars(ctx, time, w, h);
+
+    // Steamboat on the river
+    drawSteamboat(ctx, time, w, h);
 
     // Cached lookups
     const starMap = getStarMap(stars);
