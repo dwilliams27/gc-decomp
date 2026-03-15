@@ -53,6 +53,35 @@ def test_campaign_launch_starts_processes_and_writes_manifest(tmp_path):
     assert payload["supervisor"]["pid"] == 1001
 
 
+def test_orchestrator_healthy_accepts_tool_call_events(tmp_path):
+    from decomp_agent.cli import _orchestrator_healthy
+    from decomp_agent.models.db import emit_campaign_event
+
+    _repo_path, config = create_fake_repo(tmp_path)
+    config.orchestration.db_path = tmp_path / "campaign-launch-health.db"
+    config.campaign.root_dir = tmp_path / "campaigns"
+    engine = get_engine(config.orchestration.db_path)
+    _seed_functions(config, engine)
+
+    with Session(engine) as session:
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="claude",
+        )
+        campaign_id = campaign.id
+        emit_campaign_event(
+            session,
+            campaign_id,
+            "tool_call",
+            {"tool": "campaign_get_status"},
+        )
+
+    assert _orchestrator_healthy(engine, campaign_id) is True
+
+
 def test_campaign_launch_rolls_back_if_orchestrator_never_becomes_healthy(tmp_path):
     from decomp_agent.cli import main
 

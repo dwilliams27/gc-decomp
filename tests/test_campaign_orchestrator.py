@@ -30,6 +30,18 @@ def _mock_popen_for_stream_json(result_payload: dict, returncode: int = 0):
     return mock_proc
 
 
+def _mock_popen_with_lines(lines: list[dict], returncode: int = 0):
+    result_text = "\n".join(json.dumps(line) for line in lines) + "\n"
+    mock_proc = MagicMock()
+    mock_proc.stdout = io.StringIO(result_text)
+    mock_proc.stderr = io.StringIO("")
+    mock_proc.stdin = io.StringIO()
+    mock_proc.returncode = returncode
+    mock_proc.wait = MagicMock()
+    mock_proc.kill = MagicMock()
+    return mock_proc
+
+
 def test_run_campaign_orchestrator_once_stores_claude_session_id(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
     config.campaign.root_dir = tmp_path / "campaigns"
@@ -75,6 +87,51 @@ def test_run_campaign_orchestrator_once_stores_claude_session_id(tmp_path):
     assert result.session_id == "claude-orch-1"
     assert result.total_tokens == 150
     assert result.iterations == 4
+
+
+def test_run_campaign_orchestrator_once_detects_rate_limit_banner(tmp_path):
+    _repo_path, config = create_fake_repo(tmp_path)
+    config.campaign.root_dir = tmp_path / "campaigns"
+    engine = get_engine(tmp_path / "campaign-orchestrator-rate-limit.db")
+
+    with Session(engine) as session:
+        from decomp_agent.melee.functions import get_candidates, get_functions
+
+        sync_from_report(session, get_candidates(get_functions(config)))
+        campaign = start_campaign(
+            session,
+            config,
+            source_file="melee/test/testfile.c",
+            orchestrator_provider="claude",
+            worker_provider_policy="mixed",
+        )
+        campaign_id = campaign.id
+
+    mock_proc = _mock_popen_with_lines(
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "You've hit your limit · resets 12pm (UTC)"}
+                    ]
+                },
+            }
+        ],
+        returncode=1,
+    )
+    with (
+        patch("decomp_agent.orchestrator.campaign_orchestrator.subprocess.Popen", return_value=mock_proc),
+        patch("decomp_agent.orchestrator.campaign_orchestrator.cleanup_shared_claude_processes"),
+    ):
+        _campaign, result = run_campaign_orchestrator_once(
+            engine,
+            config,
+            campaign_id=campaign_id,  # type: ignore[arg-type]
+        )
+
+    assert result.termination_reason == "rate_limited"
+    assert result.error == "Rate limited: You've hit your limit · resets 12pm (UTC)"
 
 
 def test_run_campaign_orchestrator_loop_respects_session_limit(tmp_path):

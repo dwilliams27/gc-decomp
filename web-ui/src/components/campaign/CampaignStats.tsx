@@ -1,10 +1,15 @@
 import { useEffect, useState } from "react";
 import { useCampaignStore } from "../../stores/campaignStore";
 
+function parseUtc(iso: string): number {
+  // Backend stores UTC but may omit the Z suffix — ensure it's parsed as UTC
+  return new Date(iso.endsWith("Z") ? iso : iso + "Z").getTime();
+}
+
 function formatDuration(startIso: string | null, endIso: string | null): string {
   if (!startIso) return "--:--:--";
-  const start = new Date(startIso).getTime();
-  const end = endIso ? new Date(endIso).getTime() : Date.now();
+  const start = parseUtc(startIso);
+  const end = endIso ? parseUtc(endIso) : Date.now();
   const elapsed = Math.max(0, Math.floor((end - start) / 1000));
   const h = Math.floor(elapsed / 3600);
   const m = Math.floor((elapsed % 3600) / 60);

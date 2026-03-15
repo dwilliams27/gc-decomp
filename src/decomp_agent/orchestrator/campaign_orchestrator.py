@@ -20,6 +20,7 @@ from decomp_agent.agent.loop import AgentResult
 from decomp_agent.config import Config
 from decomp_agent.models.db import Campaign, CampaignTask, get_campaign
 from decomp_agent.orchestrator.headless import (
+    _extract_claude_rate_limit_detail,
     cleanup_shared_claude_processes,
     claude_shared_worker_lock,
 )
@@ -257,6 +258,7 @@ def _run_claude_orchestrator(
     session_number = (existing_sessions or 0) + 1
     turn_counter = [0]
     last_data: dict | None = None
+    stdout_lines: list[str] = []
 
     with campaign_ipc_service(engine, config):
         with claude_shared_worker_lock():
@@ -275,6 +277,7 @@ def _run_claude_orchestrator(
                 deadline = time.monotonic() + timeout
                 assert proc.stdout is not None
                 for line in proc.stdout:
+                    stdout_lines.append(line)
                     if time.monotonic() > deadline:
                         proc.kill()
                         result.elapsed_seconds = time.monotonic() - start_time
@@ -296,10 +299,16 @@ def _run_claude_orchestrator(
                 return result
 
     stderr_text = proc.stderr.read() if proc.stderr else ""
+    stdout_text = "".join(stdout_lines)
+    rate_limit_detail = _extract_claude_rate_limit_detail(stderr_text, stdout_text)
     if proc.returncode != 0:
         result.elapsed_seconds = time.monotonic() - start_time
-        result.termination_reason = "api_error"
-        result.error = stderr_text.strip()[:500] or "(no output)"
+        if rate_limit_detail is not None:
+            result.termination_reason = "rate_limited"
+            result.error = f"Rate limited: {rate_limit_detail}"
+        else:
+            result.termination_reason = "api_error"
+            result.error = stderr_text.strip()[:500] or "(no output)"
         return result
 
     # The last stream-json line with type=="result" has usage stats

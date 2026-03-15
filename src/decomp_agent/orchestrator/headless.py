@@ -49,6 +49,12 @@ _WRITE_RESULT_PCT_RE = re.compile(
     r"\b(?:match\s+)?(?:IMPROVED|REGRESSED)\s+from\s+(\d+(?:\.\d+)?)%\s+to\s+(\d+(?:\.\d+)?)%",
     re.IGNORECASE,
 )
+_CLAUDE_LIMIT_PREFIXES = (
+    "you've hit your limit",
+    "you have hit your limit",
+    "you've reached your limit",
+    "you have reached your limit",
+)
 
 
 def _resolve_claude_worker_budget(
@@ -301,6 +307,51 @@ def _extract_stream_text(value: object) -> str:
     return ""
 
 
+def _iter_claude_stream_texts(raw_text: str) -> list[str]:
+    """Extract structured text payloads from Claude stream-json output."""
+    texts: list[str] = []
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        texts.append(stripped)
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        for key in ("content", "message", "result", "toolUseResult"):
+            if key in data:
+                extracted = _extract_stream_text(data.get(key))
+                if extracted:
+                    texts.append(extracted)
+        texts.extend(_candidate_texts_from_object(data))
+    return texts
+
+
+def _is_claude_limit_banner(text: str) -> bool:
+    """Return whether text begins with Claude's explicit usage-limit banner."""
+    for line in text.splitlines():
+        normalized = line.strip().lower()
+        if not normalized:
+            continue
+        return normalized.startswith(_CLAUDE_LIMIT_PREFIXES)
+    return False
+
+
+def _extract_claude_rate_limit_detail(*texts: str) -> str | None:
+    """Extract the most relevant Claude usage-limit message from raw outputs."""
+    for text in texts:
+        if not text:
+            continue
+        for candidate in _iter_claude_stream_texts(text):
+            if _is_claude_limit_banner(candidate):
+                for line in candidate.splitlines():
+                    stripped = line.strip()
+                    if stripped:
+                        return stripped
+    return None
+
+
 def _extract_best_match_from_stream_event(
     function_name: str | None,
     data: dict,
@@ -545,22 +596,12 @@ def run_headless(
     stderr = proc.stderr.read() if proc.stderr else ""
     all_output = f"{stderr}\n{stdout}".lower()
 
-    # Check for rate limiting in stderr only — stdout contains JSON with
-    # large numbers that can false-positive on "429" substring matching.
-    stderr_lower = stderr.lower()
-    rate_limited = (
-        "rate limit" in stderr_lower
-        or "rate_limit" in stderr_lower
-        or "429" in stderr_lower
-        or "overloaded" in stderr_lower
-        or "too many requests" in stderr_lower
-    )
-    if rate_limited:
+    rate_limit_detail = _extract_claude_rate_limit_detail(stderr, stdout)
+    if rate_limit_detail is not None:
         result.elapsed_seconds = time.monotonic() - start_time
         result.termination_reason = "rate_limited"
-        error_detail = stderr.strip() or stdout.strip()[:500]
-        result.error = f"Rate limited: {error_detail}"
-        bound_log.warning("headless_rate_limited", error=error_detail)
+        result.error = f"Rate limited: {rate_limit_detail}"
+        bound_log.warning("headless_rate_limited", error=rate_limit_detail)
         return result
 
     # Check for non-zero exit
@@ -569,13 +610,12 @@ def run_headless(
         error_detail = stderr.strip() or stdout.strip()[:500] or "(no output)"
         elapsed = result.elapsed_seconds
 
-        # If Claude Code crashes fast with no useful output, it's almost
-        # certainly an API error (overloaded, rate limited, auth issue).
-        # Treat as rate_limited so the batch runner backs off.
         if elapsed < 15 and error_detail == "(no output)":
-            result.termination_reason = "rate_limited"
-            result.error = f"Claude Code crashed immediately (exit {proc.returncode}, {elapsed:.1f}s) — likely API overload"
-            bound_log.warning(
+            result.termination_reason = "api_error"
+            result.error = (
+                f"Claude Code crashed immediately (exit {proc.returncode}, {elapsed:.1f}s)"
+            )
+            bound_log.error(
                 "headless_fast_crash",
                 returncode=proc.returncode,
                 elapsed=round(elapsed, 1),

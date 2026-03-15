@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from decomp_agent.config import Config, MeleeConfig
 from decomp_agent.orchestrator.headless import (
+    _extract_claude_rate_limit_detail,
     _reap_stale_claude_shared_lock,
     _resolve_claude_worker_budget,
     _run_claude_stream,
@@ -389,3 +390,43 @@ def test_run_claude_stream_reports_progress_from_regression_message():
     assert output is not None
     assert best == 88.7
     assert any(pct == 88.7 for pct, _detail in seen)
+
+
+def test_extract_claude_rate_limit_detail_matches_exact_banner():
+    stdout = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "You've hit your limit · resets 12pm (UTC)\nWait for the reset window.",
+                    }
+                ]
+            },
+        }
+    )
+
+    detail = _extract_claude_rate_limit_detail("", stdout)
+
+    assert detail == "You've hit your limit · resets 12pm (UTC)"
+
+
+def test_extract_claude_rate_limit_detail_ignores_general_discussion():
+    stdout = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "We should handle rate limits better. Sometimes users see 'You've hit your limit' in the UI.",
+                    }
+                ]
+            },
+        }
+    )
+
+    detail = _extract_claude_rate_limit_detail("", stdout)
+
+    assert detail is None

@@ -19,6 +19,7 @@ from sqlmodel import Session, func, select
 from decomp_agent.config import load_config
 from decomp_agent.models.db import (
     Campaign,
+    CampaignEvent,
     CampaignTask,
     CampaignMessage,
     Function,
@@ -245,7 +246,15 @@ def _orchestrator_healthy(engine, campaign_id: int) -> bool:
                 CampaignMessage.campaign_id == campaign_id,
             )
         ).one()
-        return bool(message_count)
+        if message_count:
+            return True
+        event_count = session.exec(
+            select(func.count()).select_from(CampaignEvent).where(
+                CampaignEvent.campaign_id == campaign_id,
+                CampaignEvent.event_type == "tool_call",
+            )
+        ).one()
+        return bool(event_count)
 
 
 def _reset_in_progress_functions_for_source_file(engine, *, source_file: str) -> int:
