@@ -20,6 +20,8 @@ function eventLabel(type: string): { label: string; color: string } {
       return { label: "MATCH IMPROVED", color: "text-amber-400/80" };
     case "status_change":
       return { label: "STATUS CHANGE", color: "text-purple-400/80" };
+    case "progress":
+      return { label: "ACTIVITY", color: "text-cyan-400/50" };
     case "tool_call":
       return { label: "TOOL CALL", color: "text-yellow-500/60" };
     default:
@@ -34,12 +36,20 @@ export function CommLog() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
 
-  // Auto-scroll to bottom
+  // Auto-scroll only if already at bottom
+  const isAtBottomRef = useRef(true);
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (el && isAtBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages.length, events.length]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  };
 
   if (!selectedId) return null;
 
@@ -55,7 +65,7 @@ export function CommLog() {
 
   if (!expanded) {
     return (
-      <div className="absolute bottom-20 right-4 z-20">
+      <div className="absolute bottom-4 right-4 z-20">
         <button
           onClick={() => setExpanded(true)}
           className="bg-black/60 backdrop-blur-sm rounded-lg border border-green-500/20 px-3 py-1.5 text-xs font-mono text-green-400/50 hover:text-green-400/80 hover:border-green-500/30 transition-colors flex items-center gap-2"
@@ -70,7 +80,7 @@ export function CommLog() {
   }
 
   return (
-    <div className="absolute bottom-20 right-4 z-20 w-80" style={{ height: "40vh" }}>
+    <div className="absolute bottom-4 right-4 z-20 w-80" style={{ height: "40vh" }}>
       <div className="h-full bg-black/80 backdrop-blur-sm rounded-lg border border-green-500/20 flex flex-col overflow-hidden">
         <div className="px-3 py-2 border-b border-green-500/20 flex-shrink-0 flex items-center justify-between">
           <h2 className="text-xs font-bold text-green-400/80 uppercase tracking-wider font-mono">
@@ -85,6 +95,7 @@ export function CommLog() {
         </div>
         <div
           ref={scrollRef}
+          onScroll={handleScroll}
           className="flex-1 overflow-y-auto p-3 space-y-2 font-mono text-xs"
         >
           {entries.length === 0 && (
@@ -102,9 +113,9 @@ export function CommLog() {
                       [{msg.session_number}.{msg.turn_number}] ORCHESTRATOR
                     </div>
                     <div className="text-green-400/90 leading-relaxed whitespace-pre-wrap break-words">
-                      {msg.content.length > 500
-                        ? msg.content.slice(0, 500) + "..."
-                        : msg.content}
+                      {msg.content.trim().length > 500
+                        ? msg.content.trim().slice(0, 500) + "..."
+                        : msg.content.trim()}
                     </div>
                   </div>
                 );
@@ -126,15 +137,37 @@ export function CommLog() {
                 );
               }
               if (msg.role === "tool_result") {
+                let resultLabel = "RESULT";
+                let resultDetail = msg.content.trim();
+                let resultColor = "text-blue-300/50";
+                try {
+                  const parsed = JSON.parse(msg.content);
+                  if (parsed.tool) resultLabel = `RESULT: ${parsed.tool}`;
+                  if (parsed.error) {
+                    resultDetail = parsed.error;
+                    resultColor = "text-red-400/60";
+                  } else if (parsed.output != null) {
+                    resultDetail = String(parsed.output);
+                  } else if (parsed.match_pct != null) {
+                    resultDetail = `${parsed.match_pct}% match`;
+                    if (parsed.detail) resultDetail += ` · ${parsed.detail}`;
+                  } else if (parsed.fuzzy_match_percent != null) {
+                    resultDetail = `${parsed.fuzzy_match_percent}% fuzzy`;
+                    if (parsed.structural_match_percent != null)
+                      resultDetail += ` / ${parsed.structural_match_percent}% structural`;
+                  }
+                } catch {
+                  /* plain text content — use as-is */
+                }
                 return (
                   <div key={`m-${msg.id}`} className="comm-entry">
                     <div className="text-blue-400/40 text-[10px] mb-0.5">
-                      [{msg.session_number}.{msg.turn_number}] RESULT
+                      [{msg.session_number}.{msg.turn_number}] {resultLabel}
                     </div>
-                    <div className="text-blue-300/50 leading-relaxed whitespace-pre-wrap break-words max-h-20 overflow-hidden">
-                      {msg.content.length > 200
-                        ? msg.content.slice(0, 200) + "..."
-                        : msg.content}
+                    <div className={`${resultColor} leading-relaxed whitespace-pre-wrap break-words max-h-32 overflow-hidden`}>
+                      {resultDetail.length > 500
+                        ? resultDetail.slice(0, 500) + "..."
+                        : resultDetail}
                     </div>
                   </div>
                 );
@@ -150,8 +183,20 @@ export function CommLog() {
             if (evt.data) {
               try {
                 const d = typeof evt.data === "string" ? JSON.parse(evt.data) : evt.data;
-                if (d.best_match_pct !== undefined) detail = `${d.best_match_pct}% match`;
-                else if (d.status) detail = d.status;
+                if (evt.event_type === "match_improved" || evt.event_type === "progress") {
+                  const parts: string[] = [];
+                  if (d.observed_match_pct != null) parts.push(`${d.observed_match_pct.toFixed(1)}%`);
+                  if (d.live_best_match_pct != null && d.live_best_match_pct !== d.observed_match_pct)
+                    parts.push(`best ${d.live_best_match_pct.toFixed(1)}%`);
+                  if (d.detail) parts.push(d.detail);
+                  detail = parts.join(" · ");
+                } else if (evt.event_type === "tool_call" && d.tool) {
+                  detail = d.tool;
+                } else if (d.best_match_pct !== undefined) {
+                  detail = `${d.best_match_pct}% match`;
+                } else if (d.status) {
+                  detail = d.status;
+                }
               } catch {
                 /* ignore */
               }

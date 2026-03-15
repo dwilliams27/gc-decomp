@@ -93,7 +93,7 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   for (let i = 0; i < farTrees.length; i++) {
     const t = farTrees[i];
     const tx = t.fx * w;
-    const baseY = farRidgeY(t.fx) + 4;
+    const baseY = farRidgeY(t.fx) + 4 + t.yOffset;
     ctx.fillStyle = t.shade;
     // Simple small triangles — distant, so less detail
     ctx.beginPath();
@@ -197,6 +197,33 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
     }
   }
 
+  // ── Dense forest on the observatory hill ────────────────────────────
+  // Covers both slopes, leaving a gap for dome+annex (fx ~0.38-0.44)
+  const obsForestTrees = getObsHillForestCache();
+  for (let i = 0; i < obsForestTrees.length; i++) {
+    const t = obsForestTrees[i];
+    const tx = t.fx * w;
+    const baseY = ridgeY(t.fx) + 14 + t.yOffset;
+
+    ctx.fillStyle = "#070b13";
+    ctx.fillRect(tx - 0.5, baseY - t.trunk, 1, t.trunk);
+
+    ctx.fillStyle = t.shade;
+    const layers = t.layers;
+    for (let l = 0; l < layers; l++) {
+      const lf = l / layers;
+      const layerTop = baseY - t.trunk - t.height * (lf + 1 / layers);
+      const layerBot = baseY - t.trunk - t.height * lf * 0.6;
+      const layerW = t.width * (1 - lf * 0.35);
+      ctx.beginPath();
+      ctx.moveTo(tx, layerTop);
+      ctx.lineTo(tx - layerW, layerBot);
+      ctx.lineTo(tx + layerW, layerBot);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
   // ── Valley floor with subtle gradient ─────────────────────────────────
   const valleyTop = horizonY + 45;
   const valleyGrad = ctx.createLinearGradient(0, valleyTop, 0, h);
@@ -230,6 +257,31 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.quadraticCurveTo(w * 0.48, roadY - 12, w * 0.58, roadY + 4);
   ctx.quadraticCurveTo(w * 0.68, roadY + 18, w * 0.78, roadY - 2);
   ctx.quadraticCurveTo(w * 0.90, roadY - 14, w + 10, roadY + 4);
+  ctx.stroke();
+  ctx.restore();
+
+  // ── Winding road up to observatory ───────────────────────────────────
+  // Branches off the horizontal road and switchbacks up the near ridge
+  // Junction: around fx 0.35 on the horizontal road
+  const junctionX = w * 0.35;
+  const junctionY = roadY + 7; // roadAtX(0.35) ≈ roadY + 7
+  const obsRoadTop = domeY + 14; // arrives at base of observatory
+  ctx.save();
+  ctx.strokeStyle = "#0e1520";
+  ctx.lineWidth = 1.8;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  // Valley approach — curves from junction toward ridge base
+  ctx.moveTo(junctionX, junctionY);
+  ctx.quadraticCurveTo(w * 0.36, roadY - 10, w * 0.38, horizonY + 42);
+  // Switchback 1 — right
+  ctx.quadraticCurveTo(w * 0.42, horizonY + 28, w * 0.44, horizonY + 18);
+  // Switchback 2 — left
+  ctx.quadraticCurveTo(w * 0.42, horizonY + 8, w * 0.38, horizonY + 2);
+  // Switchback 3 — right
+  ctx.quadraticCurveTo(w * 0.40, horizonY - 8, w * 0.42, horizonY - 16);
+  // Final approach — curves back left to observatory
+  ctx.quadraticCurveTo(w * 0.41, horizonY - 22, domeX + 14, obsRoadTop);
   ctx.stroke();
   ctx.restore();
 
@@ -730,7 +782,7 @@ function getForestTreeCache(): ForestTree[] {
       const shades = ["#050910", "#060a12", "#070b14", "#080c15"];
       const shade = shades[shadeIdx];
       // Slightly different x range per row for natural look
-      const xStart = 0.69 + seededF(row * 7 + 800) * 0.02;
+      const xStart = 0.68 + seededF(row * 7 + 800) * 0.02;
       const xEnd = 0.84 + seededF(row * 7 + 801) * 0.02;
 
       let fx = xStart;
@@ -754,8 +806,50 @@ function getForestTreeCache(): ForestTree[] {
   return forestTreeCache;
 }
 
+let obsHillForestCache: ForestTree[] | null = null;
+
+function getObsHillForestCache(): ForestTree[] {
+  if (!obsHillForestCache) {
+    obsHillForestCache = [];
+    const rowCount = 12;
+    let globalIdx = 0;
+    for (let row = 0; row < rowCount; row++) {
+      const rowF = row / rowCount;
+      const yOff = -6 + row * 6;
+      const heightScale = 0.5 + rowF * 0.6;
+      const shadeIdx = Math.min(3, Math.floor(row / 2));
+      const shades = ["#050910", "#060a12", "#070b14", "#080c15"];
+      const shade = shades[shadeIdx];
+      // Left boundary tracks the slope: top rows start near the peak, lower rows extend further left
+      // This prevents trees from floating above the ridge on the left where it drops steeply
+      const xStart = 0.38 - rowF * 0.35 + seededF(row * 7 + 2000) * 0.01;
+      const xEnd = 0.70 + seededF(row * 7 + 2001) * 0.01;
+      let fx = xStart;
+      {
+        while (fx < xEnd) {
+          const gap = 0.0015 + seededF(globalIdx * 3 + 2100) * 0.003;
+          fx += gap;
+          if (fx >= xEnd) break;
+          // Skip the dome/annex clearing
+          if (fx > 0.3995 && fx < 0.4015) { globalIdx++; continue; }
+          const jitteredFx = fx + (seededF(globalIdx * 3 + 2106) - 0.5) * 0.004;
+          const height = (6 + seededF(globalIdx * 3 + 2101) * 12) * heightScale;
+          const width = (2 + seededF(globalIdx * 3 + 2102) * 2.5) * (0.7 + heightScale * 0.3);
+          const trunk = (1.5 + seededF(globalIdx * 3 + 2103) * 2) * heightScale;
+          const layers = 2 + Math.floor(seededF(globalIdx * 3 + 2104) * 2);
+          obsHillForestCache.push({ fx: jitteredFx, yOffset: yOff, height, width, trunk, layers, shade });
+          globalIdx++;
+        }
+      }
+    }
+    obsHillForestCache.sort((a, b) => a.yOffset - b.yOffset);
+  }
+  return obsHillForestCache;
+}
+
 interface SimpleTree {
   fx: number;
+  yOffset: number;
   height: number;
   width: number;
   shade: string;
@@ -766,24 +860,33 @@ let farRidgeTreeCache: SimpleTree[] | null = null;
 function getFarRidgeTreeCache(): SimpleTree[] {
   if (!farRidgeTreeCache) {
     farRidgeTreeCache = [];
-    // Sparse, varied scattering across the far ridge — fainter colors (more distant)
-    const shades = ["#0b1018", "#0c111a", "#0a0f17", "#0d1219"];
-    let fx = 0.03;
-    let i = 0;
-    while (fx < 0.97) {
-      // Varied density: some clumps, some gaps
-      const density = 0.4 + 0.6 * Math.abs(Math.sin(fx * 12 + 3.7));
-      const gap = 0.008 + seededF(i * 3 + 900) * 0.02 / density;
-      fx += gap;
-      if (fx >= 0.97) break;
-      // Skip some trees randomly for natural sparse feel
-      if (seededF(i * 3 + 903) < 0.3) { i++; continue; }
-      const height = 3 + seededF(i * 3 + 901) * 6; // small, distant
-      const width = 1.2 + seededF(i * 3 + 902) * 1.5;
-      const shade = shades[Math.floor(seededF(i * 3 + 904) * shades.length)];
-      farRidgeTreeCache.push({ fx, height, width, shade });
-      i++;
+    // Multiple rows from crest down the face of the far ridge
+    const rowCount = 6;
+    let globalIdx = 0;
+    for (let row = 0; row < rowCount; row++) {
+      const yOff = row * 8 + seededF(row * 7 + 950) * 4; // 0, ~8, ~16, ~24, ~32, ~40 down the slope
+      // Trees further down are slightly darker/fainter
+      const shades = [
+        ["#0b1018", "#0c111a", "#0a0f17", "#0d1219"],  // crest
+        ["#0a0e16", "#0b1018", "#090e15", "#0c1118"],   // mid
+        ["#090d14", "#0a0f16", "#080c13", "#0b1017"],   // lower
+      ][Math.min(2, Math.floor(row / 2))];
+      let fx = 0.03;
+      while (fx < 0.97) {
+        const density = 0.5 + 0.5 * Math.abs(Math.sin(fx * 12 + 3.7 + row * 2.1));
+        const gap = 0.006 + seededF(globalIdx * 3 + 900) * 0.016 / density;
+        fx += gap;
+        if (fx >= 0.97) break;
+        if (seededF(globalIdx * 3 + 903) < 0.25) { globalIdx++; continue; }
+        const height = 3 + seededF(globalIdx * 3 + 901) * 6;
+        const width = 1.2 + seededF(globalIdx * 3 + 902) * 1.5;
+        const shade = shades[Math.floor(seededF(globalIdx * 3 + 904) * shades.length)];
+        farRidgeTreeCache.push({ fx, yOffset: yOff, height, width, shade });
+        globalIdx++;
+      }
     }
+    // Sort by yOffset so back rows draw first
+    farRidgeTreeCache.sort((a, b) => a.yOffset - b.yOffset);
   }
   return farRidgeTreeCache;
 }
@@ -804,16 +907,16 @@ function getNearScatteredTreeCache(): SimpleTree[] {
     for (const zone of zones) {
       let fx = zone.start;
       while (fx < zone.end) {
-        const density = 0.3 + 0.7 * Math.abs(Math.sin(fx * 15 + 1.2));
-        const gap = 0.006 + seededF(globalIdx * 3 + 1100) * 0.018 / density;
+        const density = 0.4 + 0.6 * Math.abs(Math.sin(fx * 15 + 1.2));
+        const gap = 0.003 + seededF(globalIdx * 3 + 1100) * 0.009 / density;
         fx += gap;
         if (fx >= zone.end) break;
         // Random skip for sparse natural feel
-        if (seededF(globalIdx * 3 + 1103) < 0.25) { globalIdx++; continue; }
+        if (seededF(globalIdx * 3 + 1103) < 0.1) { globalIdx++; continue; }
         const height = 4 + seededF(globalIdx * 3 + 1101) * 10;
         const width = 1.8 + seededF(globalIdx * 3 + 1102) * 2.2;
         const shade = shades[Math.floor(seededF(globalIdx * 3 + 1104) * shades.length)];
-        nearScatteredTreeCache.push({ fx, height, width, shade });
+        nearScatteredTreeCache.push({ fx, yOffset: 0, height, width, shade });
         globalIdx++;
       }
     }
