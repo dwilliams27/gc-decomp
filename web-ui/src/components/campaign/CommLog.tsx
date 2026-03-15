@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useCampaignStore } from "../../stores/campaignStore";
 import type { CampaignEvent, CampaignMessage } from "../../api/types";
 
@@ -32,6 +32,7 @@ export function CommLog() {
   const events = useCampaignStore((s) => s.events);
   const selectedId = useCampaignStore((s) => s.selectedCampaignId);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -52,13 +53,35 @@ export function CommLog() {
   }
   entries.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
+  if (!expanded) {
+    return (
+      <div className="absolute bottom-20 right-4 z-20">
+        <button
+          onClick={() => setExpanded(true)}
+          className="bg-black/60 backdrop-blur-sm rounded-lg border border-green-500/20 px-3 py-1.5 text-xs font-mono text-green-400/50 hover:text-green-400/80 hover:border-green-500/30 transition-colors flex items-center gap-2"
+        >
+          Transmissions
+          {entries.length > 0 && (
+            <span className="text-green-400/30">{entries.length}</span>
+          )}
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="absolute top-4 right-4 bottom-20 z-20 w-80">
+    <div className="absolute bottom-20 right-4 z-20 w-80" style={{ height: "40vh" }}>
       <div className="h-full bg-black/80 backdrop-blur-sm rounded-lg border border-green-500/20 flex flex-col overflow-hidden">
-        <div className="px-3 py-2 border-b border-green-500/20 flex-shrink-0">
+        <div className="px-3 py-2 border-b border-green-500/20 flex-shrink-0 flex items-center justify-between">
           <h2 className="text-xs font-bold text-green-400/80 uppercase tracking-wider font-mono">
             Transmissions
           </h2>
+          <button
+            onClick={() => setExpanded(false)}
+            className="text-green-400/30 hover:text-green-400/60 text-xs px-1"
+          >
+            &times;
+          </button>
         </div>
         <div
           ref={scrollRef}

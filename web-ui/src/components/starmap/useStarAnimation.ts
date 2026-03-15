@@ -57,6 +57,17 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.closePath();
   ctx.fill();
 
+  // ── Distant road (in the valley, below the near ridge) ─────────────────
+  const roadY = horizonY + 75;
+  ctx.strokeStyle = "#090e18";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, roadY + 3);
+  ctx.quadraticCurveTo(w * 0.15, roadY - 1, w * 0.30, roadY + 2);
+  ctx.quadraticCurveTo(w * 0.50, roadY + 5, w * 0.70, roadY + 1);
+  ctx.quadraticCurveTo(w * 0.85, roadY - 2, w, roadY + 2);
+  ctx.stroke();
+
   // ── Near ridge ──────────────────────────────────────────────────────────
   const domeX = w * 0.40;
   const domeY = horizonY - 30;
@@ -491,6 +502,82 @@ function drawBackgroundStarsTwinkle(
   ctx.restore();
 }
 
+/** Distant cars with headlights driving along the road. */
+function drawCars(
+  ctx: CanvasRenderingContext2D,
+  time: number,
+  w: number, h: number,
+) {
+  const horizonY = h * 0.65;
+  const roadY = horizonY + 75;
+
+  // Road curve sampler (matches the static road drawn in landscape)
+  const roadAtX = (fx: number): number => {
+    if (fx < 0.30) {
+      const t = fx / 0.30;
+      return roadY + 3 + (roadY - 1 - (roadY + 3)) * 2 * t * (1 - t) + ((roadY + 2) - (roadY + 3)) * t * t;
+    }
+    if (fx < 0.70) {
+      const t = (fx - 0.30) / 0.40;
+      return roadY + 2 + (roadY + 6 - (roadY + 2)) * 2 * t * (1 - t) + ((roadY + 1) - (roadY + 2)) * t * t;
+    }
+    const t = (fx - 0.70) / 0.30;
+    return roadY + 1 + (roadY - 3 - (roadY + 1)) * 2 * t * (1 - t) + ((roadY + 2) - (roadY + 1)) * t * t;
+  };
+
+  ctx.save();
+
+  // One car at a time, alternating direction each pass
+  // Each pass: car crosses screen in ~62s, then ~10s gap before next
+  const cycleDuration = 72; // seconds per full cycle (crossing + gap)
+  const crossingTime = 62;
+  const tSec = time / 1000;
+  const cycleIndex = Math.floor(tSec / cycleDuration);
+  const cycleProgress = (tSec % cycleDuration) / crossingTime;
+
+  // Only draw if within the crossing portion (not the gap)
+  if (cycleProgress <= 1) {
+    const dir = cycleIndex % 2 === 0 ? 1 : -1;
+    // Vary speed slightly per cycle
+    const fx = dir > 0 ? cycleProgress : 1 - cycleProgress;
+
+    const cx = fx * w;
+    const cy = roadAtX(fx);
+
+    // Headlights — two tiny warm dots, very small (distant)
+    const spread = 2; // distance between headlights
+    const hlDir = dir;
+
+    // Headlight glow
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = "#ffe8a0";
+    ctx.beginPath();
+    ctx.arc(cx + hlDir * spread, cy, 1.2, 0, Math.PI * 2);
+    ctx.arc(cx - hlDir * spread, cy, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tiny forward light spill
+    ctx.globalAlpha = 0.06;
+    const spillLen = 20 * hlDir;
+    const grad = ctx.createRadialGradient(cx + spillLen * 0.5, cy, 0, cx + spillLen * 0.5, cy, Math.abs(spillLen));
+    grad.addColorStop(0, "rgba(255,230,160,0.15)");
+    grad.addColorStop(1, "transparent");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx + spillLen * 0.5, cy, Math.abs(spillLen), 0, Math.PI * 2);
+    ctx.fill();
+
+    // Faint red taillight
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = "#ff4030";
+    ctx.beginPath();
+    ctx.arc(cx - hlDir * 3, cy, 0.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
 function seededF(seed: number): number {
   const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
   return x - Math.floor(x);
@@ -566,6 +653,9 @@ export function useStarAnimation() {
 
     // Animated twinkle (batched)
     drawBackgroundStarsTwinkle(ctx, time, w, h);
+
+    // Distant cars on the road
+    drawCars(ctx, time, w, h);
 
     // Cached lookups
     const starMap = getStarMap(stars);

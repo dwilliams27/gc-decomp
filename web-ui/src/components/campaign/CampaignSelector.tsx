@@ -14,6 +14,7 @@ export function CampaignSelector() {
   const setTimeline = useCampaignStore((s) => s.setTimeline);
   const addMessages = useCampaignStore((s) => s.addMessages);
   const addEvents = useCampaignStore((s) => s.addEvents);
+  const processEvent = useStarMapStore((s) => s.processEvent);
 
   const [expanded, setExpanded] = useState(false);
 
@@ -51,7 +52,11 @@ export function CampaignSelector() {
       if (resp.messages.length > 0) addMessages(resp.messages);
     });
     campaignApi.getCampaignEvents(id, 0, 500).then((resp) => {
-      if (resp.events.length > 0) addEvents(resp.events);
+      if (resp.events.length > 0) {
+        addEvents(resp.events);
+        // Drive star pulsing from initial events
+        for (const evt of resp.events) processEvent(evt);
+      }
     });
 
     if (!isLive) {
