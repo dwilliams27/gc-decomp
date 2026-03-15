@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,8 @@ from decomp_agent.orchestrator.worktree import (
     prune_git_worktrees,
     slugify_worker_token,
 )
+
+_WORKER_SPEC_LOCK = threading.Lock()
 
 
 def _load_dotenv_value(repo_root: Path, key: str) -> str | None:
@@ -261,6 +264,9 @@ def _reset_worker_root(
     worktree_path: Path,
 ) -> None:
     """Remove stale worker state so a worker id can be reused safely."""
+    repo_root = repo_root.resolve()
+    root_dir = root_dir.resolve()
+    worktree_path = worktree_path.resolve()
     prune_git_worktrees(repo_root)
     if worktree_path.exists():
         subprocess.run(
@@ -304,21 +310,55 @@ def create_worker_spec(
     else:
         raise ValueError(f"Unsupported worker provider '{provider}'")
 
-    root_dir = worker_root / worker_id
-    output_dir = root_dir / "output"
-    agent_home_dir = root_dir / "agent-home"
-    worktree_path = root_dir / "repo"
-    config_dir = root_dir / "config"
+    worker_root = worker_root.resolve()
+    worktree: WorktreeSpec | None = None
+    chosen_worker_id = worker_id
+    last_error: Exception | None = None
+    for attempt_index in range(2):
+        candidate_worker_id = (
+            worker_id
+            if attempt_index == 0
+            else f"{worker_id}-{int(time.time() * 1000)}"
+        )
+        candidate_root_dir = (worker_root / candidate_worker_id).resolve()
+        candidate_output_dir = candidate_root_dir / "output"
+        candidate_agent_home_dir = candidate_root_dir / "agent-home"
+        candidate_worktree_path = candidate_root_dir / "repo"
+        candidate_config_dir = candidate_root_dir / "config"
+        try:
+            with _WORKER_SPEC_LOCK:
+                _reset_worker_root(
+                    config.melee.repo_path,
+                    candidate_root_dir,
+                    candidate_worktree_path,
+                )
+                candidate_root_dir.mkdir(parents=True, exist_ok=True)
+                candidate_output_dir.mkdir(parents=True, exist_ok=True)
+                candidate_agent_home_dir.mkdir(parents=True, exist_ok=True)
+                candidate_config_dir.mkdir(parents=True, exist_ok=True)
+
+                worktree = create_git_worktree(
+                    config.melee.repo_path,
+                    candidate_worktree_path,
+                )
+            chosen_worker_id = candidate_worker_id
+            root_dir = candidate_root_dir
+            output_dir = candidate_output_dir
+            agent_home_dir = candidate_agent_home_dir
+            worktree_path = candidate_worktree_path
+            config_dir = candidate_config_dir
+            break
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt_index == 0:
+                continue
+            raise
+    if worktree is None:
+        assert last_error is not None
+        raise last_error
+
     decomp_config_path = config_dir / "container.toml"
     mcp_config_path = config_dir / "mcp.json" if provider == "claude" else None
-
-    _reset_worker_root(config.melee.repo_path, root_dir, worktree_path)
-    root_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    agent_home_dir.mkdir(parents=True, exist_ok=True)
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    worktree = create_git_worktree(config.melee.repo_path, worktree_path)
     decomp_config_path.write_text(
         render_worker_container_config(config, repo_path=worktree_path),
         encoding="utf-8",
@@ -338,13 +378,13 @@ def create_worker_spec(
 
     spec = WorkerSpec(
         provider=provider,
-        worker_id=worker_id,
+        worker_id=chosen_worker_id,
         function_name=function_name,
         source_file=source_file,
         root_dir=root_dir,
         output_dir=output_dir,
         agent_home_dir=agent_home_dir,
-        container_name=f"{provider}-worker-{worker_id}",
+        container_name=f"{provider}-worker-{chosen_worker_id}",
         melee_worktree=worktree,
         decomp_config_path=decomp_config_path,
         mcp_config_path=mcp_config_path,

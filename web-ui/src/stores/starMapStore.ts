@@ -31,6 +31,10 @@ interface StarMapState {
   processEvent: (event: CampaignEvent) => void;
 }
 
+// Function names that arrived via processEvent before stars were loaded
+const pendingPulsingNames = new Set<string>();
+const pendingStoppedNames = new Set<string>();
+
 export const useStarMapStore = create<StarMapState>((set, get) => ({
   stars: [],
   edges: [],
@@ -44,8 +48,20 @@ export const useStarMapStore = create<StarMapState>((set, get) => ({
   playbackSpeed: 1,
   paused: false,
 
-  setStars: (stars, edges, centroids) =>
-    set({ stars, edges, centroids, loaded: true }),
+  setStars: (stars, edges, centroids) => {
+    // Resolve any events that arrived before stars loaded
+    const pulsing = new Set<number>();
+    if (pendingPulsingNames.size > 0) {
+      for (const s of stars) {
+        if (pendingPulsingNames.has(s.name) && !pendingStoppedNames.has(s.name)) {
+          pulsing.add(s.id);
+        }
+      }
+      pendingPulsingNames.clear();
+      pendingStoppedNames.clear();
+    }
+    set({ stars, edges, centroids, loaded: true, pulsingStarIds: pulsing });
+  },
 
   addSupernova: (supernova) =>
     set((s) => ({ supernovae: [...s.supernovae, supernova] })),
@@ -67,9 +83,22 @@ export const useStarMapStore = create<StarMapState>((set, get) => ({
 
   processEvent: (event) => {
     const state = get();
-    const star = event.function_name
-      ? state.stars.find((s) => s.name === event.function_name)
+    const fnName = event.function_name;
+    const star = fnName
+      ? state.stars.find((s) => s.name === fnName)
       : null;
+
+    // If stars haven't loaded yet, stash names to resolve later
+    if (!state.loaded && fnName) {
+      if (event.event_type === "worker_started") {
+        pendingPulsingNames.add(fnName);
+        pendingStoppedNames.delete(fnName);
+      }
+      if (event.event_type === "worker_completed" || event.event_type === "worker_failed" || event.event_type === "match_achieved") {
+        pendingStoppedNames.add(fnName);
+      }
+      return;
+    }
 
     if (event.event_type === "worker_started" && star) {
       set((s) => ({

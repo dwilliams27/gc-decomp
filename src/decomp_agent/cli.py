@@ -137,17 +137,19 @@ def _write_campaign_process_manifest(campaign: Campaign, payload: dict[str, obje
     return path
 
 
-def _launch_campaign_process(command: list[str], *, log_path: Path) -> subprocess.Popen:
+def _launch_campaign_process(command: list[str], *, log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_file = log_path.open("ab")
-    return subprocess.Popen(
-        command,
-        cwd=Path.cwd(),
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    with log_path.open("ab") as handle:
+        proc = subprocess.Popen(
+            command,
+            cwd=Path.cwd(),
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return proc.pid
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -747,14 +749,14 @@ def campaign_launch(
     base_cmd = _campaign_cli_base_cmd(ctx)
     supervisor_log = Path(campaign.artifact_dir) / "supervisor.log"
     supervisor_cmd = base_cmd + ["campaign", "supervise", str(campaign.id)]
-    supervisor_proc = _launch_campaign_process(supervisor_cmd, log_path=supervisor_log)
+    supervisor_pid = _launch_campaign_process(supervisor_cmd, log_path=supervisor_log)
 
     manifest = {
         "campaign_id": campaign.id,
         "source_file": campaign.source_file,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "supervisor": {
-            "pid": supervisor_proc.pid,
+            "pid": supervisor_pid,
             "command": supervisor_cmd,
             "log_path": str(supervisor_log),
         },
@@ -764,7 +766,7 @@ def campaign_launch(
     deadline = time.time() + 30.0
     healthy = False
     while time.time() < deadline:
-        if not _pid_is_alive(supervisor_proc.pid):
+        if not _pid_is_alive(supervisor_pid):
             break
         if _orchestrator_healthy(engine, campaign.id):  # type: ignore[arg-type]
             healthy = True
@@ -773,7 +775,7 @@ def campaign_launch(
 
     if not healthy:
         stopped_roles: list[str] = []
-        for role, pid in (("supervisor", supervisor_proc.pid),):
+        for role, pid in (("supervisor", supervisor_pid),):
             if _stop_pid(pid):
                 stopped_roles.append(role)
         removed_containers = _stop_campaign_worker_containers(campaign)

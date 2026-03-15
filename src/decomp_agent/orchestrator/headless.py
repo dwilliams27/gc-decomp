@@ -45,6 +45,10 @@ _TASK_MATCH_LINE_RE = re.compile(
     r"^\s*([A-Za-z0-9_]+):\s*(MATCH|\d+(?:\.\d+)?%)",
     re.MULTILINE,
 )
+_WRITE_RESULT_PCT_RE = re.compile(
+    r"\b(?:match\s+)?(?:IMPROVED|REGRESSED)\s+from\s+(\d+(?:\.\d+)?)%\s+to\s+(\d+(?:\.\d+)?)%",
+    re.IGNORECASE,
+)
 
 
 def _resolve_claude_worker_budget(
@@ -229,6 +233,14 @@ def _extract_best_match_from_text(function_name: str, text: str) -> float | None
         value = match.group(2)
         pct = 100.0 if value == "MATCH" else float(value.rstrip("%"))
         best = max(best or 0.0, pct)
+    if best is not None:
+        return best
+
+    if function_name in text:
+        for match in _WRITE_RESULT_PCT_RE.finditer(text):
+            from_pct = float(match.group(1))
+            to_pct = float(match.group(2))
+            best = max(best or 0.0, from_pct, to_pct)
     return best
 
 
@@ -314,13 +326,18 @@ def _run_claude_stream(
     timeout: int,
     function_name: str | None,
     progress_callback: Callable[[float | None, str], None] | None,
+    stdin_text: str | None = None,
 ) -> tuple[subprocess.Popen[str], dict | None, str, float]:
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+    if proc.stdin is not None and stdin_text is not None:
+        proc.stdin.write(stdin_text)
+        proc.stdin.close()
     stdout_lines: list[str] = []
     last_data: dict | None = None
     current_tool_name = ""
@@ -411,7 +428,7 @@ def run_headless(
     mcp_config_path = "/app/mcp.json"
     claude_args = [
         "claude",
-        "-p", shlex.quote(prompt),
+        "-p",
         "--output-format", "stream-json",
         "--verbose",
         "--model", "claude-opus-4-6",
@@ -454,7 +471,7 @@ def run_headless(
         wait_for_worker_container(isolated_spec)
         prepare_worker_repo_in_container(isolated_spec)
         validate_worker_tools_in_container(isolated_spec)
-        cmd = ["docker", "exec", isolated_spec.container_name, "sh", "-c", shell_cmd]
+        cmd = ["docker", "exec", "-i", isolated_spec.container_name, "sh", "-c", shell_cmd]
         bound_log.info(
             "headless_isolated_start",
             container=isolated_spec.container_name,
@@ -470,6 +487,7 @@ def run_headless(
                 timeout=timeout,
                 function_name=function_name,
                 progress_callback=progress_callback,
+                stdin_text=prompt,
             )
         except subprocess.TimeoutExpired:
             subprocess.run(
@@ -492,7 +510,7 @@ def run_headless(
         result.patch_path = str(export_worker_patch(isolated_spec))
     else:
         cmd = [
-            "docker", "exec", container,
+            "docker", "exec", "-i", container,
             "sh", "-c", shell_cmd,
         ]
 
@@ -512,6 +530,7 @@ def run_headless(
                     timeout=timeout,
                     function_name=function_name,
                     progress_callback=progress_callback,
+                    stdin_text=prompt,
                 )
             except subprocess.TimeoutExpired:
                 cleanup_shared_claude_processes(config, bound_log=bound_log)

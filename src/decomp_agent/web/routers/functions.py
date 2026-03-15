@@ -81,6 +81,32 @@ def list_functions(
     }
 
 
+@router.get("/starmap")
+def starmap_data(session: Session = Depends(get_session)):
+    """All functions flat, grouped by library, with match_pct/size/address for star map."""
+    functions = session.exec(select(Function)).all()
+
+    by_library: dict[str, list[dict]] = defaultdict(list)
+    for f in functions:
+        by_library[f.library].append({
+            "id": f.id,
+            "name": f.name,
+            "address": f.address,
+            "size": f.size,
+            "source_file": f.source_file,
+            "match_pct": f.current_match_pct,
+            "status": f.status,
+            "attempts": f.attempts,
+        })
+
+    return {
+        "libraries": [
+            {"name": lib, "functions": funcs}
+            for lib, funcs in sorted(by_library.items())
+        ],
+    }
+
+
 @router.get("/treemap")
 def treemap_data(session: Session = Depends(get_session)):
     """Pre-built hierarchy: root -> library -> source_file -> function.

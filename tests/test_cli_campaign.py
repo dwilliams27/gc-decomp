@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -32,7 +31,7 @@ def test_campaign_launch_starts_processes_and_writes_manifest(tmp_path):
 
     def fake_launch(command, *, log_path):
         launched.append((command, str(log_path)))
-        return SimpleNamespace(pid=1000 + len(launched))
+        return 1000 + len(launched)
 
     with (
         patch("decomp_agent.cli.load_config", return_value=config),
@@ -67,7 +66,7 @@ def test_campaign_launch_rolls_back_if_orchestrator_never_becomes_healthy(tmp_pa
 
     def fake_launch(command, *, log_path):
         launched.append((command, str(log_path)))
-        return SimpleNamespace(pid=1000 + len(launched))
+        return 1000 + len(launched)
 
     with (
         patch("decomp_agent.cli.load_config", return_value=config),
@@ -109,7 +108,7 @@ def test_campaign_launch_resets_stranded_in_progress_rows_for_source_file(tmp_pa
         session.commit()
 
     def fake_launch(command, *, log_path):
-        return SimpleNamespace(pid=1000)
+        return 1000
 
     with (
         patch("decomp_agent.cli.load_config", return_value=config),
@@ -168,7 +167,11 @@ def test_campaign_cleanup_workers_removes_worker_roots(tmp_path):
         patch("decomp_agent.cli.load_config", return_value=config),
         patch("decomp_agent.cli.subprocess.run") as run_mock,
     ):
-        run_mock.return_value = SimpleNamespace(returncode=0, stdout="worktree /repo\n", stderr="")
+        run_mock.return_value = type(
+            "FakeCompleted",
+            (),
+            {"returncode": 0, "stdout": "worktree /repo\n", "stderr": ""},
+        )()
         runner = CliRunner()
         result = runner.invoke(main, ["campaign", "cleanup-workers"])
 

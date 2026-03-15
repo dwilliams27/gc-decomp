@@ -41,13 +41,27 @@ export const useCampaignStore = create<CampaignState>((set) => ({
   setSelectedCampaignId: (id) => set({ selectedCampaignId: id }),
   setSelectedCampaign: (campaign) => set({ selectedCampaign: campaign }),
   addMessage: (message) =>
-    set((state) => ({ messages: [...state.messages, message] })),
+    set((state) => {
+      if (state.messages.some((m) => m.id === message.id)) return state;
+      return { messages: [...state.messages, message] };
+    }),
   addMessages: (messages) =>
-    set((state) => ({ messages: [...state.messages, ...messages] })),
+    set((state) => {
+      const seen = new Set(state.messages.map((m) => m.id));
+      const fresh = messages.filter((m) => !seen.has(m.id));
+      return fresh.length ? { messages: [...state.messages, ...fresh] } : state;
+    }),
   addEvent: (event) =>
-    set((state) => ({ events: [...state.events, event] })),
+    set((state) => {
+      if (state.events.some((e) => e.id === event.id)) return state;
+      return { events: [...state.events, event] };
+    }),
   addEvents: (events) =>
-    set((state) => ({ events: [...state.events, ...events] })),
+    set((state) => {
+      const seen = new Set(state.events.map((e) => e.id));
+      const fresh = events.filter((e) => !seen.has(e.id));
+      return fresh.length ? { events: [...state.events, ...fresh] } : state;
+    }),
   clearMessages: () => set({ messages: [], events: [] }),
   setTimeline: (timeline) => set({ timeline }),
   setLoading: (loading) => set({ loading }),

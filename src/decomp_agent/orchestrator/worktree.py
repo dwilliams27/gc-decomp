@@ -27,6 +27,7 @@ _WORKTREE_REGISTRY_LOCK = threading.Lock()
 
 def prune_git_worktrees(repo_root: Path) -> None:
     """Prune stale worktree registrations from the main repo."""
+    repo_root = repo_root.resolve()
     with _WORKTREE_REGISTRY_LOCK:
         subprocess.run(
             ["git", "worktree", "prune", "--expire", "now"],
@@ -39,6 +40,8 @@ def prune_git_worktrees(repo_root: Path) -> None:
 
 def create_git_worktree(repo_root: Path, worktree_path: Path) -> WorktreeSpec:
     """Create a detached worktree at HEAD."""
+    repo_root = repo_root.resolve()
+    worktree_path = worktree_path.resolve()
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     with _WORKTREE_REGISTRY_LOCK:
         subprocess.run(
@@ -83,6 +86,10 @@ def create_git_worktree(repo_root: Path, worktree_path: Path) -> WorktreeSpec:
 
 def remove_git_worktree(spec: WorktreeSpec) -> None:
     """Remove a detached worktree and clean up any leftover directory."""
+    spec = WorktreeSpec(
+        repo_root=spec.repo_root.resolve(),
+        worktree_path=spec.worktree_path.resolve(),
+    )
     with _WORKTREE_REGISTRY_LOCK:
         proc = subprocess.run(
             ["git", "worktree", "remove", "--force", str(spec.worktree_path)],

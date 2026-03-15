@@ -11,7 +11,6 @@ export function CampaignSelector() {
   const setSelectedCampaign = useCampaignStore((s) => s.setSelectedCampaign);
   const clearMessages = useCampaignStore((s) => s.clearMessages);
   const setMode = useStarMapStore((s) => s.setMode);
-  const setTimeline = useCampaignStore((s) => s.setTimeline);
   const addMessages = useCampaignStore((s) => s.addMessages);
   const addEvents = useCampaignStore((s) => s.addEvents);
   const processEvent = useStarMapStore((s) => s.processEvent);
@@ -59,11 +58,6 @@ export function CampaignSelector() {
       }
     });
 
-    if (!isLive) {
-      campaignApi.getCampaignTimeline(id).then((tl) => setTimeline(tl));
-    } else {
-      setTimeline(null);
-    }
     setExpanded(false);
   };
 

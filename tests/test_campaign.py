@@ -12,13 +12,17 @@ from sqlmodel import Session, select
 from decomp_agent.agent.loop import AgentResult
 from decomp_agent.models.db import (
     Campaign,
+    CampaignEvent,
     CampaignTask,
+    Function,
     get_engine,
     record_campaign_task_progress,
+    seed_campaign_function_tasks,
     sync_from_report,
 )
 from decomp_agent.orchestrator.campaign import (
     _compute_rate_limit_cooldown,
+    _should_reset_no_progress,
     append_campaign_function_memory,
     append_campaign_note,
     build_campaign_spec,
@@ -117,6 +121,65 @@ def test_start_campaign_creates_db_record(tmp_path):
         "simple_add",
         "simple_loop",
     }
+
+
+def test_seed_campaign_function_tasks_prioritizes_low_match_then_low_attempts(tmp_path):
+    engine = get_engine(tmp_path / "seed-order.db")
+
+    with Session(engine) as session:
+        session.add_all(
+            [
+                Function(
+                    name="low_match_fresh",
+                    address=0x1000,
+                    size=24,
+                    source_file="melee/test/testfile.c",
+                    library="melee",
+                    initial_match_pct=5.0,
+                    current_match_pct=5.0,
+                    attempts=0,
+                ),
+                Function(
+                    name="low_match_many_attempts",
+                    address=0x1010,
+                    size=16,
+                    source_file="melee/test/testfile.c",
+                    library="melee",
+                    initial_match_pct=5.0,
+                    current_match_pct=5.0,
+                    attempts=4,
+                ),
+                Function(
+                    name="high_match",
+                    address=0x1020,
+                    size=8,
+                    source_file="melee/test/testfile.c",
+                    library="melee",
+                    initial_match_pct=95.0,
+                    current_match_pct=95.0,
+                    attempts=0,
+                ),
+            ]
+        )
+        session.commit()
+
+        created = seed_campaign_function_tasks(
+            session,
+            campaign_id=1,
+            source_file="melee/test/testfile.c",
+        )
+        tasks = session.exec(
+            select(CampaignTask)
+            .where(CampaignTask.campaign_id == 1)
+            .order_by(CampaignTask.priority.desc(), CampaignTask.id.asc())
+        ).all()
+
+    assert created == 3
+    assert [task.function_name for task in tasks] == [
+        "low_match_fresh",
+        "low_match_many_attempts",
+        "high_match",
+    ]
 
 
 def test_start_campaign_clears_stale_artifacts_for_reused_id(tmp_path):
@@ -898,6 +961,78 @@ def test_live_status_uses_host_progress_not_transcripts(tmp_path):
     assert "Live status: live best seen: 100.0%" not in task_text
 
 
+def test_starting_baseline_progress_is_not_emitted_as_match_improved(tmp_path):
+    engine = get_engine(tmp_path / "campaign-baseline-progress.db")
+
+    with Session(engine) as session:
+        task = CampaignTask(
+            campaign_id=1,
+            source_file="melee/test/testfile.c",
+            function_name="target_fn",
+            status="running",
+        )
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
+        record_campaign_task_progress(
+            session,
+            task,
+            observed_match_pct=80.8,
+            detail="starting baseline 80.8%",
+            allow_improvement_event=False,
+        )
+
+        events = session.exec(
+            select(CampaignEvent)
+            .where(CampaignEvent.campaign_id == 1)
+            .order_by(CampaignEvent.id.asc())
+        ).all()
+        session.refresh(task)
+
+    assert task.live_best_match_pct == 80.8
+    assert len(events) == 1
+    assert events[0].event_type == "progress"
+
+
+def test_complete_campaign_task_emits_worker_failed_for_agent_crash(tmp_path):
+    engine = get_engine(tmp_path / "campaign-worker-failed.db")
+
+    with Session(engine) as session:
+        task = CampaignTask(
+            campaign_id=1,
+            source_file="melee/test/testfile.c",
+            function_name="target_fn",
+            status="running",
+        )
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
+        from decomp_agent.models.db import complete_campaign_task
+
+        complete_campaign_task(
+            session,
+            task,
+            AgentResult(
+                matched=False,
+                best_match_percent=12.5,
+                termination_reason="agent_crash",
+                error="boom",
+            ),
+        )
+
+        events = session.exec(
+            select(CampaignEvent)
+            .where(CampaignEvent.campaign_id == 1)
+            .order_by(CampaignEvent.id.asc())
+        ).all()
+        session.refresh(task)
+
+    assert task.status == "failed"
+    assert events[-1].event_type == "worker_failed"
+
+
 def test_run_campaign_next_task_summary_reports_result(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
     engine = get_engine(tmp_path / "campaign-next-task.db")
@@ -947,6 +1082,10 @@ def test_run_campaign_supervisor_loop_stops_after_no_progress(tmp_path):
 
     with (
         patch(
+            "decomp_agent.orchestrator.campaign.requeue_running_campaign_tasks",
+            return_value=0,
+        ),
+        patch(
             "decomp_agent.orchestrator.campaign_orchestrator.run_campaign_orchestrator_once",
             return_value=(campaign, AgentResult(termination_reason="model_stopped")),
         ),
@@ -969,6 +1108,14 @@ def test_run_campaign_supervisor_loop_stops_after_no_progress(tmp_path):
     payload = json.loads(open(summary.summary_path, encoding="utf-8").read())
     assert payload["stop_reason"] == "no_progress_limit"
     assert payload["campaign_status"] == "stopped"
+
+
+def test_run_campaign_supervisor_loop_does_not_stop_for_recent_running_activity(tmp_path):
+    running_task = CampaignTask(campaign_id=1, source_file="melee/test/testfile.c", status="running")
+    assert _should_reset_no_progress(tasks=[running_task], active_futures={}, new_events=[]) is True
+    assert _should_reset_no_progress(tasks=[], active_futures={object(): 1}, new_events=[]) is True
+    assert _should_reset_no_progress(tasks=[], active_futures={}, new_events=[object()]) is True
+    assert _should_reset_no_progress(tasks=[], active_futures={}, new_events=[]) is False
 
 
 def test_run_campaign_supervisor_loop_writes_summary_on_completion(tmp_path):

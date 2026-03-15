@@ -648,6 +648,19 @@ def _run_claimed_campaign_task(
         if function is None:
             raise ValueError(f"Function #{function_id} not found for campaign task #{task_id}")
         warm_start = function.current_match_pct > 0.0
+        starting_match_pct = function.current_match_pct
+
+    if starting_match_pct > 0.0:
+        with Session(engine) as progress_session:
+            live_task = progress_session.get(CampaignTask, task_id)
+            if live_task is not None:
+                record_campaign_task_progress(
+                    progress_session,
+                    live_task,
+                    observed_match_pct=starting_match_pct,
+                    detail=f"starting baseline {starting_match_pct:.1f}%",
+                    allow_improvement_event=False,
+                )
 
     try:
         def progress_callback(match_pct: float | None, detail: str) -> None:
@@ -1209,6 +1222,16 @@ def _needs_manager_wake(
     return False, "no_significant_event"
 
 
+def _should_reset_no_progress(
+    *,
+    tasks: list[CampaignTask],
+    active_futures: dict[Future, int],
+    new_events: list[object],
+) -> bool:
+    """Return whether the supervisor should suppress no-progress counting this cycle."""
+    return bool(active_futures or new_events or any(task.status == "running" for task in tasks))
+
+
 def run_campaign_supervisor_loop(
     engine: Engine,
     config: Config,
@@ -1374,7 +1397,14 @@ def run_campaign_supervisor_loop(
             with Session(engine) as session:
                 refreshed_tasks = list_campaign_tasks(session, campaign_id)
             next_snapshot = _campaign_progress_snapshot(refreshed_tasks)
-            if next_snapshot == previous_snapshot == current_snapshot:
+            refreshed_running = [task for task in refreshed_tasks if task.status == "running"]
+            if _should_reset_no_progress(
+                tasks=refreshed_tasks,
+                active_futures=active_futures,
+                new_events=new_events,
+            ):
+                no_progress_cycles = 0
+            elif next_snapshot == previous_snapshot == current_snapshot:
                 no_progress_cycles += 1
             else:
                 no_progress_cycles = 0
@@ -1383,6 +1413,8 @@ def run_campaign_supervisor_loop(
             if (
                 config.campaign.max_no_progress_cycles > 0
                 and no_progress_cycles >= config.campaign.max_no_progress_cycles
+                and not active_futures
+                and not refreshed_running
             ):
                 stop_reason = "no_progress_limit"
                 break

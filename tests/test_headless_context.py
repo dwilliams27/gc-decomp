@@ -140,3 +140,5 @@ def test_build_campaign_orchestrator_prompt_mentions_campaign_tools(tmp_path):
     assert "campaign_launch_worker" in prompt
     assert "persistent campaign-management session" in prompt
     assert "Wake reason: worker_terminal_event" in prompt
+    assert "bias strongly toward low-match or unattempted functions" in prompt
+    assert "do not let the campaign spend most of its time on the same 95%+ functions" in prompt

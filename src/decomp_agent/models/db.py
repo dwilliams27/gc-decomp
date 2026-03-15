@@ -570,13 +570,20 @@ def record_campaign_task_progress(
     *,
     observed_match_pct: float | None,
     detail: str,
+    allow_improvement_event: bool = True,
 ) -> None:
     """Persist host-owned live progress for a running campaign task."""
     now = datetime.now(timezone.utc)
     improved = False
-    if observed_match_pct is not None and observed_match_pct > task.live_best_match_pct:
+    if (
+        allow_improvement_event
+        and observed_match_pct is not None
+        and observed_match_pct > task.live_best_match_pct
+    ):
         task.live_best_match_pct = observed_match_pct
         improved = True
+    elif observed_match_pct is not None and observed_match_pct > task.live_best_match_pct:
+        task.live_best_match_pct = observed_match_pct
     task.live_last_activity_at = now
     task.live_status_detail = detail
     task.updated_at = now
@@ -723,7 +730,12 @@ def complete_campaign_task(
         task.status = "completed"
     session.add(task)
     session.commit()
-    event_type = "match_achieved" if result.matched else "worker_completed"
+    if result.matched:
+        event_type = "match_achieved"
+    elif task.status == "failed":
+        event_type = "worker_failed"
+    else:
+        event_type = "worker_completed"
     emit_campaign_event(
         session, task.campaign_id, event_type,
         {"task_id": task.id, "function_name": task.function_name,
@@ -752,7 +764,11 @@ def seed_campaign_function_tasks(
             Function.status.in_(["pending"]),  # type: ignore[attr-defined]
             Function.current_match_pct < 100.0,
         )
-        .order_by(Function.current_match_pct.desc(), Function.size.asc())  # type: ignore[arg-type, attr-defined]
+        .order_by(  # type: ignore[arg-type, attr-defined]
+            Function.current_match_pct.asc(),
+            Function.attempts.asc(),
+            Function.size.asc(),
+        )
     ).all()
 
     existing_function_ids = {
@@ -767,6 +783,7 @@ def seed_campaign_function_tasks(
 
     now = datetime.now(timezone.utc)
     created = 0
+    total = len(functions)
     for index, function in enumerate(functions):
         if function.id in existing_function_ids:
             continue
@@ -778,7 +795,7 @@ def seed_campaign_function_tasks(
                 function_name=function.name,
                 provider=provider,
                 scope="function",
-                priority=max(len(functions) - index, 1),
+                priority=max(total - index, 1),
                 created_at=now,
                 updated_at=now,
             )

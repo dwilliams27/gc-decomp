@@ -220,7 +220,7 @@ def _run_claude_orchestrator(
     timeout = max(config.claude_code.orchestrator_timeout_seconds, 60)
     system_prompt = load_campaign_orchestrator_system_prompt()
 
-    claude_args = ["claude", "-p", shlex.quote(prompt)]
+    claude_args = ["claude", "-p"]
     if campaign.orchestrator_session_id:
         claude_args.extend(["--resume", campaign.orchestrator_session_id])
     else:
@@ -238,6 +238,7 @@ def _run_claude_orchestrator(
     cmd = [
         "docker",
         "exec",
+        "-i",
         config.claude_code.container_name,
         "sh",
         "-c",
@@ -263,10 +264,14 @@ def _run_claude_orchestrator(
             try:
                 proc = subprocess.Popen(
                     cmd,
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                 )
+                if proc.stdin is not None:
+                    proc.stdin.write(prompt)
+                    proc.stdin.close()
                 deadline = time.monotonic() + timeout
                 assert proc.stdout is not None
                 for line in proc.stdout:

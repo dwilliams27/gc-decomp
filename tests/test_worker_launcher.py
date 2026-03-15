@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from decomp_agent.orchestrator.worker_launcher import (
     build_worker_container_run_args,
@@ -257,6 +260,131 @@ def test_create_worker_spec_recovers_missing_but_registered_worktree(tmp_path):
         assert str(second.melee_worktree.worktree_path) in listed
     finally:
         cleanup_worker_spec(second)
+
+
+def test_create_worker_spec_normalizes_symlinked_worker_root(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+
+    real_root = tmp_path / "real-workers"
+    real_root.mkdir()
+    symlink_root = tmp_path / "workers-link"
+    symlink_root.symlink_to(real_root, target_is_directory=True)
+    config.claude_code.worker_root = symlink_root
+
+    spec = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    try:
+        assert spec.root_dir.parent == real_root.resolve()
+        assert spec.melee_worktree.worktree_path.exists()
+    finally:
+        cleanup_worker_spec(spec)
+
+
+def test_create_worker_spec_serializes_reset_and_create(tmp_path, monkeypatch):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+
+    entered: list[str] = []
+    inside = {"count": 0, "max": 0}
+    guard = threading.Lock()
+
+    def fake_reset(repo_root, root_dir, worktree_path):
+        del repo_root, root_dir, worktree_path
+        with guard:
+            inside["count"] += 1
+            inside["max"] = max(inside["max"], inside["count"])
+        entered.append("reset")
+        time.sleep(0.05)
+        with guard:
+            inside["count"] -= 1
+
+    def fake_create(repo_root, worktree_path):
+        del repo_root
+        with guard:
+            inside["count"] += 1
+            inside["max"] = max(inside["max"], inside["count"])
+        entered.append(f"create:{worktree_path.name}")
+        time.sleep(0.05)
+        with guard:
+            inside["count"] -= 1
+        return SimpleNamespace(repo_root=repo_path, worktree_path=worktree_path)
+
+    monkeypatch.setattr(
+        "decomp_agent.orchestrator.worker_launcher._reset_worker_root",
+        fake_reset,
+    )
+    monkeypatch.setattr(
+        "decomp_agent.orchestrator.worker_launcher.create_git_worktree",
+        fake_create,
+    )
+
+    results = []
+
+    def run(function_name: str) -> None:
+        spec = create_worker_spec(
+            config,
+            provider="claude",
+            source_file="melee/test/testfile.c",
+            function_name=function_name,
+        )
+        results.append(spec)
+
+    threads = [
+        threading.Thread(target=run, args=("simple_add",)),
+        threading.Thread(target=run, args=("simple_loop",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 2
+    assert inside["max"] == 1
+
+
+def test_create_worker_spec_retries_with_unique_worker_id_on_worktree_failure(tmp_path, monkeypatch):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+
+    calls = {"count": 0}
+
+    def fake_create(repo_root, worktree_path):
+        del repo_root
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise subprocess.CalledProcessError(
+                128,
+                ["git", "worktree", "add"],
+                stderr="already registered worktree",
+            )
+        worktree_path.mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(repo_root=repo_path, worktree_path=worktree_path)
+
+    monkeypatch.setattr(
+        "decomp_agent.orchestrator.worker_launcher.create_git_worktree",
+        fake_create,
+    )
+
+    spec = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    try:
+        assert calls["count"] == 2
+        assert spec.worker_id.startswith("melee-test-testfile.c-simple_add")
+        assert spec.worker_id != "melee-test-testfile.c-simple_add"
+        assert spec.container_name == f"claude-worker-{spec.worker_id}"
+    finally:
+        cleanup_worker_spec(spec)
 
 
 def test_build_worker_container_run_args_mounts_private_claude_home(tmp_path):

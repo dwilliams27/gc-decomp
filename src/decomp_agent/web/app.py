@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from decomp_agent.web.deps import AppState, set_state
-from decomp_agent.web.routers import batch, config_api, functions, stats
+from decomp_agent.web.routers import batch, campaigns, config_api, functions, stats
 from decomp_agent.web.ws import get_broadcaster, install_broadcaster, ws_endpoint
 
 
@@ -39,6 +39,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     app.include_router(stats.router)
     app.include_router(batch.router)
     app.include_router(config_api.router)
+    app.include_router(campaigns.router)
 
     # WebSocket
     app.websocket("/ws/events")(ws_endpoint)

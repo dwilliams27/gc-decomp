@@ -6,7 +6,6 @@ import { FunctionTooltip } from "./components/starmap/FunctionTooltip";
 import { CampaignSelector } from "./components/campaign/CampaignSelector";
 import { CommLog } from "./components/campaign/CommLog";
 import { CampaignStats } from "./components/campaign/CampaignStats";
-import { CampaignTimeline } from "./components/campaign/CampaignTimeline";
 import { useCampaignStore } from "./stores/campaignStore";
 import { useStarMapStore } from "./stores/starMapStore";
 
@@ -46,7 +45,6 @@ export default function App() {
       <CampaignSelector />
       <CampaignStats />
       <CommLog />
-      <CampaignTimeline />
 
       {/* Vignette overlay */}
       <div

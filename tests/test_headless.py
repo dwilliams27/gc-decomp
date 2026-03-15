@@ -313,6 +313,7 @@ def test_run_claude_stream_reports_progress_from_user_tool_result():
         def __init__(self) -> None:
             self.stdout = stdout
             self.stderr = io.StringIO("")
+            self.stdin = io.StringIO()
             self.returncode = 0
 
         def wait(self, timeout=None):
@@ -333,3 +334,58 @@ def test_run_claude_stream_reports_progress_from_user_tool_result():
     assert output is not None
     assert best == 66.0
     assert any(pct == 66.0 for pct, _detail in seen)
+
+
+def test_run_claude_stream_reports_progress_from_regression_message():
+    stdout = io.StringIO(
+        "\n".join(
+            [
+                json.dumps({"type": "tool_use", "name": "mcp__decomp-tools__write_function"}),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "toolUseResult": (
+                            '{"result":"Wrote target_fn, but match REGRESSED from 88.7% to 85.7% '
+                            '(reverted to previous code)."}'
+                        ),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "usage": {"input_tokens": 1, "output_tokens": 2},
+                        "result": "done",
+                        "session_id": "sess-1",
+                        "num_turns": 2,
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = stdout
+            self.stderr = io.StringIO("")
+            self.stdin = io.StringIO()
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            del timeout
+            self.returncode = 0
+            return 0
+
+    seen: list[tuple[float | None, str]] = []
+
+    with patch("decomp_agent.orchestrator.headless.subprocess.Popen", return_value=FakeProc()):
+        _proc, output, _stdout, best = _run_claude_stream(
+            ["claude", "-p", "stub"],
+            timeout=30,
+            function_name="target_fn",
+            progress_callback=lambda pct, detail: seen.append((pct, detail)),
+        )
+
+    assert output is not None
+    assert best == 88.7
+    assert any(pct == 88.7 for pct, _detail in seen)
