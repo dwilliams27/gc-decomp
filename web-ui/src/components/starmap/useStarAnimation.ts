@@ -134,17 +134,38 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
 
   // Sample the ridge contour so trees can sit on it
   const ridgeY = (fx: number): number => {
-    // Piecewise approximation of the near ridge curve
-    if (fx < 0.12) return horizonY + 40 - 25 * (fx / 0.12);
-    if (fx < 0.28) return horizonY + 15 + 20 * ((fx - 0.12) / 0.16) * Math.sin(((fx - 0.12) / 0.16) * Math.PI);
-    if (fx < 0.34) return horizonY + 25 - 55 * ((fx - 0.28) / 0.06);
-    if (fx < 0.40) return horizonY - 30; // observatory peak
-    if (fx < 0.52) return horizonY - 30 + 50 * ((fx - 0.40) / 0.12);
-    if (fx < 0.60) return horizonY + 20 + 20 * ((fx - 0.52) / 0.08);
-    if (fx < 0.68) return horizonY + 40 - 15 * ((fx - 0.60) / 0.08);
-    if (fx < 0.82) return horizonY + 25 - 20 * Math.sin(((fx - 0.68) / 0.14) * Math.PI) + 5;
-    if (fx < 0.95) return horizonY + 30 + 15 * Math.sin(((fx - 0.82) / 0.13) * Math.PI);
-    return horizonY + 35;
+    // Exact piecewise quadratic matching the drawn near ridge curves
+    const quad = (t: number, p0: number, p1: number, p2: number) =>
+      p0 + (p1 - p0) * 2 * t * (1 - t) + (p2 - p0) * t * t;
+    if (fx < 0.12) {
+      const t = fx / 0.12;
+      return quad(t, horizonY + 40, horizonY + 15, horizonY + 35);
+    }
+    if (fx < 0.28) {
+      const t = (fx - 0.12) / 0.16;
+      return quad(t, horizonY + 35, horizonY + 10, horizonY + 25);
+    }
+    if (fx < 0.40) {
+      const t = (fx - 0.28) / 0.12;
+      return quad(t, horizonY + 25, horizonY - 20, horizonY - 30);
+    }
+    if (fx < 0.52) {
+      const t = (fx - 0.40) / 0.12;
+      return quad(t, horizonY - 30, horizonY - 15, horizonY + 20);
+    }
+    if (fx < 0.68) {
+      const t = (fx - 0.52) / 0.16;
+      return quad(t, horizonY + 20, horizonY + 40, horizonY + 25);
+    }
+    if (fx < 0.82) {
+      const t = (fx - 0.68) / 0.14;
+      return quad(t, horizonY + 25, horizonY + 5, horizonY + 30);
+    }
+    if (fx < 0.95) {
+      const t = (fx - 0.82) / 0.13;
+      return quad(t, horizonY + 30, horizonY + 45, horizonY + 35);
+    }
+    return horizonY + 35 + (fx - 0.95) / 0.05 * 5;
   };
 
   ctx.fillStyle = dark1;
@@ -184,83 +205,24 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
     ctx.restore();
   }
 
-  // ── Scattered trees on the near ridge ────────────────────────────────
-  // Sparse coverage everywhere except observatory (0.34-0.46) and dense forest (0.68-0.86)
-  const nearScatteredTrees = getNearScatteredTreeCache();
-  for (let i = 0; i < nearScatteredTrees.length; i++) {
-    const t = nearScatteredTrees[i];
+  // ── Forest covering all near ridge mounds ────────────────────────────
+  const nearForestTrees = getNearRidgeForestCache();
+  for (let i = 0; i < nearForestTrees.length; i++) {
+    const t = nearForestTrees[i];
     const tx = t.fx * w;
-    const baseY = ridgeY(t.fx) + 16;
+    const baseY = ridgeY(t.fx) + 4 + t.yOffset;
     ctx.fillStyle = t.shade;
-    // Small conifers — single triangle + optional second layer
     ctx.beginPath();
     ctx.moveTo(tx, baseY - t.height);
     ctx.lineTo(tx - t.width, baseY);
     ctx.lineTo(tx + t.width, baseY);
     ctx.closePath();
     ctx.fill();
-    if (t.height > 6) {
+    if (t.height > 5) {
       ctx.beginPath();
       ctx.moveTo(tx, baseY - t.height * 1.15);
-      ctx.lineTo(tx - t.width * 0.65, baseY - t.height * 0.4);
-      ctx.lineTo(tx + t.width * 0.65, baseY - t.height * 0.4);
-      ctx.closePath();
-      ctx.fill();
-    }
-  }
-
-  // ── Dense forest on the right side of the near ridge ──────────────────
-  // Conifers sitting on the ridge contour, partially obscuring far ridge
-  const forestTrees = getForestTreeCache();
-  for (let i = 0; i < forestTrees.length; i++) {
-    const t = forestTrees[i];
-    const tx = t.fx * w;
-    const baseY = ridgeY(t.fx) + 14 + t.yOffset;
-
-    // Tree trunk
-    ctx.fillStyle = "#070b13";
-    ctx.fillRect(tx - 0.5, baseY - t.trunk, 1, t.trunk);
-
-    // Conifer shape — 2-3 layered triangles tapering upward
-    ctx.fillStyle = t.shade;
-    const treeTop = baseY - t.trunk - t.height;
-    const layers = t.layers;
-    for (let l = 0; l < layers; l++) {
-      const lf = l / layers;
-      const layerTop = baseY - t.trunk - t.height * (lf + 1 / layers);
-      const layerBot = baseY - t.trunk - t.height * lf * 0.6;
-      const layerW = t.width * (1 - lf * 0.35);
-      ctx.beginPath();
-      ctx.moveTo(tx, layerTop);
-      ctx.lineTo(tx - layerW, layerBot);
-      ctx.lineTo(tx + layerW, layerBot);
-      ctx.closePath();
-      ctx.fill();
-    }
-  }
-
-  // ── Dense forest on the observatory hill ────────────────────────────
-  // Covers both slopes, leaving a gap for dome+annex (fx ~0.38-0.44)
-  const obsForestTrees = getObsHillForestCache();
-  for (let i = 0; i < obsForestTrees.length; i++) {
-    const t = obsForestTrees[i];
-    const tx = t.fx * w;
-    const baseY = ridgeY(t.fx) + 14 + t.yOffset;
-
-    ctx.fillStyle = "#070b13";
-    ctx.fillRect(tx - 0.5, baseY - t.trunk, 1, t.trunk);
-
-    ctx.fillStyle = t.shade;
-    const layers = t.layers;
-    for (let l = 0; l < layers; l++) {
-      const lf = l / layers;
-      const layerTop = baseY - t.trunk - t.height * (lf + 1 / layers);
-      const layerBot = baseY - t.trunk - t.height * lf * 0.6;
-      const layerW = t.width * (1 - lf * 0.35);
-      ctx.beginPath();
-      ctx.moveTo(tx, layerTop);
-      ctx.lineTo(tx - layerW, layerBot);
-      ctx.lineTo(tx + layerW, layerBot);
+      ctx.lineTo(tx - t.width * 0.6, baseY - t.height * 0.35);
+      ctx.lineTo(tx + t.width * 0.6, baseY - t.height * 0.35);
       ctx.closePath();
       ctx.fill();
     }
@@ -385,22 +347,36 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
     }
   }
 
+  // ── Observatory dome highlight ──────────────────────────────────────
+  // Redraw dome slightly brighter so it stands out from the forested ridge
+  ctx.fillStyle = "#111826";
+  ctx.beginPath();
+  ctx.arc(domeX, domeY, 12, Math.PI, 0);
+  ctx.closePath();
+  ctx.fill();
+  // Dome rim highlight
+  ctx.strokeStyle = "rgba(80,100,140,0.15)";
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.arc(domeX, domeY, 12, Math.PI, 0);
+  ctx.stroke();
+
   // ── Observatory annex building (attached to the right of the dome) ───
   const annexL = domeX + 10;
   const annexR = domeX + 22;
   const annexTop = domeY - 2;
   const annexBot = domeY + 6;
   // Main body
-  ctx.fillStyle = "#0c1119";
+  ctx.fillStyle = "#10161f";
   ctx.fillRect(annexL, annexTop, annexR - annexL, annexBot - annexTop);
   // Flat roof overhang
-  ctx.fillStyle = "#0a0f17";
+  ctx.fillStyle = "#0e1420";
   ctx.fillRect(annexL - 1, annexTop - 1, annexR - annexL + 2, 2);
   // Tiny window — faint warm glow
-  ctx.fillStyle = "rgba(200,170,100,0.08)";
+  ctx.fillStyle = "rgba(200,170,100,0.12)";
   ctx.fillRect(annexL + 3, annexTop + 3, 2, 2);
   // Door frame
-  ctx.fillStyle = "#080c14";
+  ctx.fillStyle = "#0c1119";
   ctx.fillRect(annexL + 8, annexTop + 4, 2, annexBot - annexTop - 4);
 
   // ── Observatory slit ──────────────────────────────────────────────────
@@ -515,10 +491,10 @@ function drawRadioTelescope(
   ctx.save();
 
   // Support tower
-  ctx.fillStyle = "#0a0f17";
+  ctx.fillStyle = "#0e1420";
   ctx.fillRect(dishX - 1.5, dishBase - 18, 3, 18);
   // Tower cross-braces
-  ctx.strokeStyle = "#0a0f17";
+  ctx.strokeStyle = "#0e1420";
   ctx.lineWidth = 0.7;
   ctx.beginPath();
   ctx.moveTo(dishX - 4, dishBase);
@@ -536,7 +512,7 @@ function drawRadioTelescope(
   ctx.rotate(angle + Math.PI / 2); // +90° so 0 = pointing up
 
   // Parabolic dish
-  ctx.fillStyle = "#0c1119";
+  ctx.fillStyle = "#111826";
   ctx.beginPath();
   ctx.moveTo(-dishRadius, 4);
   ctx.quadraticCurveTo(0, 10, dishRadius, 4);
@@ -544,14 +520,14 @@ function drawRadioTelescope(
   ctx.closePath();
   ctx.fill();
   // Dish rim highlight
-  ctx.strokeStyle = "rgba(60,80,110,0.12)";
+  ctx.strokeStyle = "rgba(80,100,140,0.18)";
   ctx.lineWidth = 0.8;
   ctx.beginPath();
   ctx.moveTo(-dishRadius, 4);
   ctx.quadraticCurveTo(0, -2, dishRadius, 4);
   ctx.stroke();
   // Feed arm struts
-  ctx.strokeStyle = "#0a0f17";
+  ctx.strokeStyle = "#0e1420";
   ctx.lineWidth = 0.8;
   ctx.beginPath();
   ctx.moveTo(-dishRadius + 2, 3);
@@ -559,7 +535,7 @@ function drawRadioTelescope(
   ctx.lineTo(dishRadius - 2, 3);
   ctx.stroke();
   // Receiver
-  ctx.fillStyle = "#0e1420";
+  ctx.fillStyle = "#151c2a";
   ctx.beginPath();
   ctx.arc(0, -8, 1.5, 0, Math.PI * 2);
   ctx.fill();
@@ -786,97 +762,43 @@ function getTreeCache(): { x: number; h: number }[] {
   return treeCache;
 }
 
-interface ForestTree {
-  fx: number;
-  yOffset: number; // additional vertical offset for depth rows
-  height: number;
-  width: number;
-  trunk: number;
-  layers: number;
-  shade: string;
-}
+let nearRidgeForestCache: SimpleTree[] | null = null;
 
-let forestTreeCache: ForestTree[] | null = null;
-
-function getForestTreeCache(): ForestTree[] {
-  if (!forestTreeCache) {
-    forestTreeCache = [];
-    // Multiple depth rows of trees, back to front
-    // Rows further back are shorter/darker, rows in front taller/slightly lighter
-    const rowCount = 8;
-    let globalIdx = 0;
-    for (let row = 0; row < rowCount; row++) {
-      const rowF = row / rowCount; // 0=back, 1=front
-      const yOff = -6 + row * 4; // back rows higher, front rows lower
-      const heightScale = 0.5 + rowF * 0.6; // back trees shorter
-      const shadeIdx = Math.min(3, Math.floor(row / 2));
-      const shades = ["#050910", "#060a12", "#070b14", "#080c15"];
-      const shade = shades[shadeIdx];
-      // Slightly different x range per row for natural look
-      // Front (lower) rows start further right so the left edge doesn't dip down the ridge
-      const xStart = 0.68 + rowF * 0.06 + seededF(row * 7 + 800) * 0.02;
-      const xEnd = 0.84 + seededF(row * 7 + 801) * 0.02;
-
-      let fx = xStart;
-      while (fx < xEnd) {
-        const gap = 0.002 + seededF(globalIdx * 3 + 700) * 0.004;
-        fx += gap;
-        if (fx >= xEnd) break;
-        // Jitter x slightly per row so trees don't align vertically
-        const jitteredFx = fx + (seededF(globalIdx * 3 + 706) - 0.5) * 0.004;
-        const height = (6 + seededF(globalIdx * 3 + 701) * 12) * heightScale;
-        const width = (2 + seededF(globalIdx * 3 + 702) * 2.5) * (0.7 + heightScale * 0.3);
-        const trunk = (1.5 + seededF(globalIdx * 3 + 703) * 2) * heightScale;
-        const layers = 2 + Math.floor(seededF(globalIdx * 3 + 704) * 2);
-        forestTreeCache.push({ fx: jitteredFx, yOffset: yOff, height, width, trunk, layers, shade });
-        globalIdx++;
-      }
-    }
-    // Sort back-to-front so front trees draw on top
-    forestTreeCache.sort((a, b) => a.yOffset - b.yOffset);
-  }
-  return forestTreeCache;
-}
-
-let obsHillForestCache: ForestTree[] | null = null;
-
-function getObsHillForestCache(): ForestTree[] {
-  if (!obsHillForestCache) {
-    obsHillForestCache = [];
+function getNearRidgeForestCache(): SimpleTree[] {
+  if (!nearRidgeForestCache) {
+    nearRidgeForestCache = [];
+    // Unified forest covering all near ridge mounds — no gaps
     const rowCount = 12;
     let globalIdx = 0;
     for (let row = 0; row < rowCount; row++) {
       const rowF = row / rowCount;
-      const yOff = -6 + row * 6;
-      const heightScale = 0.5 + rowF * 0.6;
-      const shadeIdx = Math.min(3, Math.floor(row / 2));
-      const shades = ["#050910", "#060a12", "#070b14", "#080c15"];
-      const shade = shades[shadeIdx];
-      // Left boundary tracks the slope: top rows start near the peak, lower rows extend further left
-      // This prevents trees from floating above the ridge on the left where it drops steeply
-      const xStart = 0.38 - rowF * 0.50 + seededF(row * 7 + 2000) * 0.01;
-      const xEnd = 0.70 + seededF(row * 7 + 2001) * 0.01;
-      let fx = xStart;
-      {
-        while (fx < xEnd) {
-          const gap = 0.0015 + seededF(globalIdx * 3 + 2100) * 0.003;
-          fx += gap;
-          if (fx >= xEnd) break;
-          // Skip the dome/annex clearing
-          if (fx > 0.3995 && fx < 0.4015) { globalIdx++; continue; }
-          const jitteredFx = fx + (seededF(globalIdx * 3 + 2106) - 0.5) * 0.004;
-          const height = (6 + seededF(globalIdx * 3 + 2101) * 12) * heightScale;
-          const width = (2 + seededF(globalIdx * 3 + 2102) * 2.5) * (0.7 + heightScale * 0.3);
-          const trunk = (1.5 + seededF(globalIdx * 3 + 2103) * 2) * heightScale;
-          const layers = 2 + Math.floor(seededF(globalIdx * 3 + 2104) * 2);
-          obsHillForestCache.push({ fx: jitteredFx, yOffset: yOff, height, width, trunk, layers, shade });
-          globalIdx++;
-        }
+      const yOffBase = row * 6;
+      const shades = [
+        ["#050910", "#060a12", "#070b14"],
+        ["#060a12", "#070b14", "#080c15"],
+        ["#050910", "#060a11", "#070b13"],
+      ][Math.min(2, Math.floor(row / 3))];
+      let fx = -0.02;
+      while (fx < 1.02) {
+        const gap = 0.002 + seededF(globalIdx * 3 + 1100) * 0.004;
+        fx += gap;
+        if (fx >= 1.02) break;
+        if (seededF(globalIdx * 3 + 1103) < 0.08) { globalIdx++; continue; }
+        // Thin trees near dome/annex and radio telescope
+        if (fx > 0.39 && fx < 0.41 && rowF < 0.3) { globalIdx++; continue; }
+        if (fx > 0.36 && fx < 0.385 && rowF < 0.2) { globalIdx++; continue; }
+        const yJitter = (seededF(globalIdx * 3 + 1105) - 0.5) * 10;
+        const yOff = yOffBase + yJitter;
+        const height = 4 + seededF(globalIdx * 3 + 1101) * 10;
+        const width = 1.8 + seededF(globalIdx * 3 + 1102) * 2.2;
+        const shade = shades[Math.floor(seededF(globalIdx * 3 + 1104) * shades.length)];
+        nearRidgeForestCache.push({ fx, yOffset: yOff, height, width, shade });
+        globalIdx++;
       }
     }
-    obsHillForestCache.sort((a, b) => a.yOffset - b.yOffset);
+    nearRidgeForestCache.sort((a, b) => a.yOffset - b.yOffset);
   }
-  return obsHillForestCache;
+  return nearRidgeForestCache;
 }
 
 interface SimpleTree {
@@ -965,38 +887,6 @@ function getFarRidgeTreeCache(): SimpleTree[] {
   return farRidgeTreeCache;
 }
 
-let nearScatteredTreeCache: SimpleTree[] | null = null;
-
-function getNearScatteredTreeCache(): SimpleTree[] {
-  if (!nearScatteredTreeCache) {
-    nearScatteredTreeCache = [];
-    // Scattered across near ridge, avoiding observatory (0.34-0.46) and dense forest (0.68-0.86)
-    const shades = ["#060a12", "#070b14", "#080c15", "#050910"];
-    const zones = [
-      { start: 0.04, end: 0.32 },
-      { start: 0.48, end: 0.66 },
-      { start: 0.88, end: 0.97 },
-    ];
-    let globalIdx = 0;
-    for (const zone of zones) {
-      let fx = zone.start;
-      while (fx < zone.end) {
-        const density = 0.4 + 0.6 * Math.abs(Math.sin(fx * 15 + 1.2));
-        const gap = 0.003 + seededF(globalIdx * 3 + 1100) * 0.009 / density;
-        fx += gap;
-        if (fx >= zone.end) break;
-        // Random skip for sparse natural feel
-        if (seededF(globalIdx * 3 + 1103) < 0.1) { globalIdx++; continue; }
-        const height = 4 + seededF(globalIdx * 3 + 1101) * 10;
-        const width = 1.8 + seededF(globalIdx * 3 + 1102) * 2.2;
-        const shade = shades[Math.floor(seededF(globalIdx * 3 + 1104) * shades.length)];
-        nearScatteredTreeCache.push({ fx, yOffset: 0, height, width, shade });
-        globalIdx++;
-      }
-    }
-  }
-  return nearScatteredTreeCache;
-}
 
 interface ValleyTree {
   fx: number;
