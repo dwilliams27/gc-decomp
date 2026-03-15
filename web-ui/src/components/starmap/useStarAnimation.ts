@@ -104,6 +104,30 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
     ctx.fill();
   }
 
+  // ── Dense forest on far-right background mound ─────────────────────────
+  const bgForestTrees = getBgMoundForestCache();
+  for (let i = 0; i < bgForestTrees.length; i++) {
+    const t = bgForestTrees[i];
+    const tx = t.fx * w;
+    const baseY = farRidgeY(t.fx) + 4 + t.yOffset;
+    ctx.fillStyle = t.shade;
+    // Two-layer conifer silhouette
+    ctx.beginPath();
+    ctx.moveTo(tx, baseY - t.height);
+    ctx.lineTo(tx - t.width, baseY);
+    ctx.lineTo(tx + t.width, baseY);
+    ctx.closePath();
+    ctx.fill();
+    if (t.height > 4) {
+      ctx.beginPath();
+      ctx.moveTo(tx, baseY - t.height * 1.15);
+      ctx.lineTo(tx - t.width * 0.6, baseY - t.height * 0.35);
+      ctx.lineTo(tx + t.width * 0.6, baseY - t.height * 0.35);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
   // ── Near ridge ──────────────────────────────────────────────────────────
   const domeX = w * 0.40;
   const domeY = horizonY - 26;
@@ -141,6 +165,24 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.lineTo(w, h);
   ctx.closePath();
   ctx.fill();
+
+  // ── Mountain road switchbacks (drawn before forests so trees occlude) ─
+  {
+    const jxn = w * 0.38;
+    const jny = horizonY + 42;
+    ctx.save();
+    ctx.strokeStyle = "rgba(14,21,32,0.8)";
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(jxn, jny);
+    ctx.bezierCurveTo(w * 0.45, horizonY + 20, w * 0.44, horizonY + 10, w * 0.38, horizonY + 4);
+    ctx.bezierCurveTo(w * 0.35, horizonY, w * 0.37, horizonY - 10, w * 0.42, horizonY - 14);
+    ctx.bezierCurveTo(w * 0.44, horizonY - 16, w * 0.43, horizonY - 22, domeX + 14, domeY + 14);
+    ctx.stroke();
+    ctx.restore();
+  }
 
   // ── Scattered trees on the near ridge ────────────────────────────────
   // Sparse coverage everywhere except observatory (0.34-0.46) and dense forest (0.68-0.86)
@@ -260,28 +302,17 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.stroke();
   ctx.restore();
 
-  // ── Winding road up to observatory ───────────────────────────────────
-  // Branches off the horizontal road and switchbacks up the near ridge
-  // Junction: around fx 0.35 on the horizontal road
+  // ── Valley approach road to observatory ──────────────────────────────
+  // Just the valley portion — mountain switchbacks drawn earlier, under the forests
   const junctionX = w * 0.35;
-  const junctionY = roadY + 7; // roadAtX(0.35) ≈ roadY + 7
-  const obsRoadTop = domeY + 14; // arrives at base of observatory
+  const junctionY = roadY + 7;
   ctx.save();
   ctx.strokeStyle = "#0e1520";
   ctx.lineWidth = 1.8;
   ctx.lineCap = "round";
   ctx.beginPath();
-  // Valley approach — curves from junction toward ridge base
   ctx.moveTo(junctionX, junctionY);
-  ctx.quadraticCurveTo(w * 0.36, roadY - 10, w * 0.38, horizonY + 42);
-  // Switchback 1 — right
-  ctx.quadraticCurveTo(w * 0.42, horizonY + 28, w * 0.44, horizonY + 18);
-  // Switchback 2 — left
-  ctx.quadraticCurveTo(w * 0.42, horizonY + 8, w * 0.38, horizonY + 2);
-  // Switchback 3 — right
-  ctx.quadraticCurveTo(w * 0.40, horizonY - 8, w * 0.42, horizonY - 16);
-  // Final approach — curves back left to observatory
-  ctx.quadraticCurveTo(w * 0.41, horizonY - 22, domeX + 14, obsRoadTop);
+  ctx.bezierCurveTo(w * 0.36, roadY - 15, w * 0.37, horizonY + 45, w * 0.38, horizonY + 42);
   ctx.stroke();
   ctx.restore();
 
@@ -782,7 +813,8 @@ function getForestTreeCache(): ForestTree[] {
       const shades = ["#050910", "#060a12", "#070b14", "#080c15"];
       const shade = shades[shadeIdx];
       // Slightly different x range per row for natural look
-      const xStart = 0.68 + seededF(row * 7 + 800) * 0.02;
+      // Front (lower) rows start further right so the left edge doesn't dip down the ridge
+      const xStart = 0.68 + rowF * 0.06 + seededF(row * 7 + 800) * 0.02;
       const xEnd = 0.84 + seededF(row * 7 + 801) * 0.02;
 
       let fx = xStart;
@@ -822,7 +854,7 @@ function getObsHillForestCache(): ForestTree[] {
       const shade = shades[shadeIdx];
       // Left boundary tracks the slope: top rows start near the peak, lower rows extend further left
       // This prevents trees from floating above the ridge on the left where it drops steeply
-      const xStart = 0.38 - rowF * 0.35 + seededF(row * 7 + 2000) * 0.01;
+      const xStart = 0.38 - rowF * 0.50 + seededF(row * 7 + 2000) * 0.01;
       const xEnd = 0.70 + seededF(row * 7 + 2001) * 0.01;
       let fx = xStart;
       {
@@ -853,6 +885,46 @@ interface SimpleTree {
   height: number;
   width: number;
   shade: string;
+}
+
+let bgMoundForestCache: SimpleTree[] | null = null;
+
+function getBgMoundForestCache(): SimpleTree[] {
+  if (!bgMoundForestCache) {
+    bgMoundForestCache = [];
+    // Dense forest on the tall far-right background mound (~fx 0.73-0.90)
+    // Fainter shades since it's distant
+    const rowCount = 12;
+    let globalIdx = 0;
+    for (let row = 0; row < rowCount; row++) {
+      const rowF = row / rowCount;
+      const yOffBase = row * 6;
+      const shades = [
+        ["#0b1018", "#0c111a", "#0a0f17"],
+        ["#0a0e16", "#0b1018", "#090e15"],
+        ["#090d14", "#0a0f16", "#080c13"],
+      ][Math.min(2, Math.floor(row / 2))];
+      // All rows start well left of the peak; bottom rows extend even further
+      const xStart = 0.72 - rowF * 0.12 + seededF(row * 7 + 3000) * 0.02;
+      const xEnd = 0.88 + rowF * 0.12 + seededF(row * 7 + 3001) * 0.02;
+      let fx = xStart;
+      while (fx < xEnd) {
+        const gap = 0.0015 + seededF(globalIdx * 3 + 3100) * 0.003;
+        fx += gap;
+        if (fx >= xEnd) break;
+        // Heavy per-tree y jitter to break up ring patterns
+        const yJitter = (seededF(globalIdx * 3 + 3105) - 0.5) * 10;
+        const yOff = yOffBase + yJitter;
+        const height = 2.5 + seededF(globalIdx * 3 + 3101) * 5;
+        const width = 1 + seededF(globalIdx * 3 + 3102) * 1.2;
+        const shade = shades[Math.floor(seededF(globalIdx * 3 + 3104) * shades.length)];
+        bgMoundForestCache.push({ fx, yOffset: yOff, height, width, shade });
+        globalIdx++;
+      }
+    }
+    bgMoundForestCache.sort((a, b) => a.yOffset - b.yOffset);
+  }
+  return bgMoundForestCache;
 }
 
 let farRidgeTreeCache: SimpleTree[] | null = null;
