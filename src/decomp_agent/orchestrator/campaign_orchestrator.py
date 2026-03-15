@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import Engine
+from sqlalchemy import func as sa_func
 from sqlmodel import Session, select
 
 from decomp_agent.agent.loop import AgentResult
@@ -140,6 +141,73 @@ def _set_orchestrator_provider_cooldown(
         session.commit()
 
 
+def _process_stream_line(
+    line: str,
+    campaign_id: int,
+    engine: Engine,
+    session_number: int,
+    turn_counter: list[int],
+) -> dict | None:
+    """Parse one stream-json line and write CampaignMessage rows. Returns parsed dict or None."""
+    from decomp_agent.models.db import emit_campaign_message
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+    msg_type = data.get("type", "")
+
+    if msg_type == "assistant":
+        content = data.get("message", {}).get("content", "")
+        if isinstance(content, list):
+            # Extract text blocks
+            text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+            content = "\n".join(text_parts)
+        if content:
+            turn_counter[0] += 1
+            try:
+                with Session(engine) as session:
+                    emit_campaign_message(
+                        session, campaign_id, "orchestrator", str(content),
+                        session_number=session_number, turn_number=turn_counter[0],
+                    )
+            except Exception:
+                pass
+
+    elif msg_type == "tool_use":
+        tool_name = data.get("name", data.get("tool", ""))
+        tool_input = data.get("input", {})
+        try:
+            with Session(engine) as session:
+                emit_campaign_message(
+                    session, campaign_id, "tool_call",
+                    json.dumps({"name": tool_name, "input": tool_input}),
+                    session_number=session_number, turn_number=turn_counter[0],
+                )
+        except Exception:
+            pass
+
+    elif msg_type == "tool_result":
+        content = data.get("content", "")
+        if isinstance(content, list):
+            text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+            content = "\n".join(text_parts)
+        try:
+            with Session(engine) as session:
+                emit_campaign_message(
+                    session, campaign_id, "tool_result",
+                    str(content)[:4000],
+                    session_number=session_number, turn_number=turn_counter[0],
+                )
+        except Exception:
+            pass
+
+    return data
+
+
 def _run_claude_orchestrator(
     engine: Engine,
     campaign: Campaign,
@@ -155,7 +223,8 @@ def _run_claude_orchestrator(
     claude_args = [
         "claude",
         "-p", shlex.quote(prompt),
-        "--output-format", "json",
+        "--output-format", "stream-json",
+        "--verbose",
         "--model", "claude-opus-4-6",
         "--append-system-prompt", shlex.quote(system_prompt),
         "--mcp-config", "/app/mcp.json",
@@ -170,49 +239,80 @@ def _run_claude_orchestrator(
         "-c",
         " ".join(claude_args),
     ]
+
+    campaign_id = campaign.id
+    # Count existing sessions for this campaign to set session_number
+    with Session(engine) as session:
+        from decomp_agent.models.db import CampaignMessage
+        existing_sessions = session.exec(
+            select(sa_func.max(CampaignMessage.session_number)).where(
+                CampaignMessage.campaign_id == campaign_id,
+            )
+        ).one()
+    session_number = (existing_sessions or 0) + 1
+    turn_counter = [0]
+    last_data: dict | None = None
+
     with campaign_ipc_service(engine, config):
         with claude_shared_worker_lock():
             cleanup_shared_claude_processes(config)
             try:
-                proc = subprocess.run(
+                proc = subprocess.Popen(
                     cmd,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=timeout,
                 )
+                deadline = time.monotonic() + timeout
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if time.monotonic() > deadline:
+                        proc.kill()
+                        result.elapsed_seconds = time.monotonic() - start_time
+                        result.termination_reason = "timeout"
+                        result.error = f"Claude orchestrator timed out after {timeout}s"
+                        return result
+                    parsed = _process_stream_line(
+                        line, campaign_id, engine, session_number, turn_counter,
+                    )
+                    if parsed is not None:
+                        last_data = parsed
+                proc.wait(timeout=max(deadline - time.monotonic(), 1))
             except subprocess.TimeoutExpired:
+                proc.kill()
                 cleanup_shared_claude_processes(config)
                 result.elapsed_seconds = time.monotonic() - start_time
                 result.termination_reason = "timeout"
                 result.error = f"Claude orchestrator timed out after {timeout}s"
                 return result
 
+    stderr_text = proc.stderr.read() if proc.stderr else ""
     if proc.returncode != 0:
         result.elapsed_seconds = time.monotonic() - start_time
         result.termination_reason = "api_error"
-        result.error = proc.stderr.strip() or proc.stdout.strip()[:500] or "(no output)"
+        result.error = stderr_text.strip()[:500] or "(no output)"
         return result
 
-    try:
-        output = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        result.elapsed_seconds = time.monotonic() - start_time
-        result.termination_reason = "api_error"
-        result.error = f"Failed to parse Claude orchestrator JSON: {exc}"
-        return result
+    # The last stream-json line with type=="result" has usage stats
+    output = last_data or {}
+    if output.get("type") == "result":
+        usage = output.get("usage", {})
+        result.input_tokens = usage.get("input_tokens", 0)
+        result.output_tokens = usage.get("output_tokens", 0)
+        result.cached_tokens = usage.get("cache_read_input_tokens", 0)
+        result.total_tokens = result.input_tokens + result.output_tokens
+        result.session_id = output.get("session_id", "")
+        result.iterations = output.get("num_turns", 0)
+        result.final_code = output.get("result", "")
+        subtype = output.get("subtype", "")
+        result.termination_reason = (
+            "max_iterations" if subtype == "error_max_turns" else "model_stopped"
+        )
+    else:
+        # Fallback: try to extract from last_data
+        result.session_id = (output.get("session_id", "") if output else "")
+        result.termination_reason = "model_stopped"
 
-    usage = output.get("usage", {})
-    result.input_tokens = usage.get("input_tokens", 0)
-    result.output_tokens = usage.get("output_tokens", 0)
-    result.cached_tokens = usage.get("cache_read_input_tokens", 0)
-    result.total_tokens = result.input_tokens + result.output_tokens
-    result.session_id = output.get("session_id", "")
-    result.iterations = output.get("num_turns", 0)
-    result.final_code = output.get("result", "")
-    subtype = output.get("subtype", "")
-    result.termination_reason = (
-        "max_iterations" if subtype == "error_max_turns" else "model_stopped"
-    )
     result.elapsed_seconds = time.monotonic() - start_time
     return result
 

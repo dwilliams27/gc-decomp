@@ -96,6 +96,23 @@ def submit_campaign_ipc_request(
     )
 
 
+def _emit_ipc_event(engine: Engine, tool_name: str, payload: dict[str, Any]) -> None:
+    """Emit a tool_call CampaignEvent for an IPC request."""
+    from decomp_agent.models.db import emit_campaign_event
+    campaign_id = payload.get("campaign_id")
+    if campaign_id is None:
+        return
+    try:
+        from sqlmodel import Session as _Session
+        with _Session(engine) as session:
+            emit_campaign_event(
+                session, int(campaign_id), "tool_call",
+                {"tool": tool_name, "payload": payload},
+            )
+    except Exception:
+        pass  # Don't let event emission break IPC dispatch
+
+
 def _dispatch_campaign_ipc_request(
     engine: Engine,
     config: Config,
@@ -103,6 +120,7 @@ def _dispatch_campaign_ipc_request(
     tool_name: str,
     payload: dict[str, Any],
 ) -> str:
+    _emit_ipc_event(engine, tool_name, payload)
     if tool_name == "campaign_get_status":
         return format_campaign_status(engine, config, int(payload["campaign_id"]))
     if tool_name == "campaign_get_task_result":

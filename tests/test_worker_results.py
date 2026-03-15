@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 
 from decomp_agent.agent.loop import AgentResult
@@ -8,6 +9,7 @@ from decomp_agent.orchestrator.worker_launcher import (
     create_worker_spec,
 )
 from decomp_agent.orchestrator.worker_results import (
+    archive_worker_artifacts,
     export_worker_patch,
     load_worker_result,
     worker_artifact_paths,
@@ -100,3 +102,36 @@ def test_write_worker_artifact_manifest(tmp_path):
 
     assert manifest_path == paths.metadata_file
     assert manifest_path.name == "artifacts.json"
+
+
+def test_archive_worker_artifacts_preserves_output_and_transcript(tmp_path):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "workers"
+
+    spec = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+    try:
+        result = AgentResult(
+            matched=False,
+            best_match_percent=88.5,
+            termination_reason="model_stopped",
+            session_id="sess-1",
+        )
+        write_worker_result(spec, result)
+        write_worker_artifact_manifest(spec)
+        transcript = spec.agent_home_dir / "projects" / "-" / "session.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(json.dumps({"type": "assistant", "message": "hi"}), encoding="utf-8")
+
+        archived = archive_worker_artifacts(spec)
+    finally:
+        cleanup_worker_spec(spec)
+
+    assert (archived / "output" / "result.json").exists()
+    assert (archived / "output" / "artifacts.json").exists()
+    assert (archived / "transcript.jsonl").exists()

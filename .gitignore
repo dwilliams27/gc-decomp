@@ -13,3 +13,4 @@ data/
 build.ninja
 node_modules/
 ghidra_projects/
+.run-artifacts/

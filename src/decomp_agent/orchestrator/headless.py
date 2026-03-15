@@ -7,6 +7,7 @@ Invokes Claude Code CLI inside the Docker worker container via
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 import json
 import os
@@ -26,17 +27,23 @@ from decomp_agent.orchestrator.headless_context import (
 )
 from decomp_agent.orchestrator.worker_launcher import (
     build_worker_container_run_args,
+    cleanup_worker_spec,
     create_worker_spec,
     prepare_worker_repo_in_container,
     wait_for_worker_container,
 )
 from decomp_agent.orchestrator.worker_results import (
+    archive_worker_artifacts,
     export_worker_patch,
     write_worker_artifact_manifest,
     write_worker_result,
 )
 
 log = structlog.get_logger()
+_TASK_MATCH_LINE_RE = re.compile(
+    r"^\s*([A-Za-z0-9_]+):\s*(MATCH|\d+(?:\.\d+)?%)",
+    re.MULTILINE,
+)
 
 
 def _resolve_claude_worker_budget(
@@ -193,6 +200,142 @@ def _read_final_code(
     except Exception:
         log.warning("final_code_read_failed", exc_info=True)
 
+
+def _candidate_texts_from_object(value: object) -> list[str]:
+    texts: list[str] = []
+    if isinstance(value, str):
+        texts.append(value)
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if decoded is not None and decoded is not value:
+            texts.extend(_candidate_texts_from_object(decoded))
+    elif isinstance(value, dict):
+        for nested in value.values():
+            texts.extend(_candidate_texts_from_object(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            texts.extend(_candidate_texts_from_object(nested))
+    return texts
+
+
+def _extract_best_match_from_text(function_name: str, text: str) -> float | None:
+    best = None
+    for match in _TASK_MATCH_LINE_RE.finditer(text):
+        if match.group(1) != function_name:
+            continue
+        value = match.group(2)
+        pct = 100.0 if value == "MATCH" else float(value.rstrip("%"))
+        best = max(best or 0.0, pct)
+    return best
+
+
+def _read_transcript_best_match(agent_home_dir: Path, function_name: str | None) -> float | None:
+    if function_name is None or not agent_home_dir.exists():
+        return None
+    transcript_candidates = sorted(
+        [
+            path
+            for path in agent_home_dir.rglob("*.jsonl")
+            if "/subagents/" not in str(path)
+        ],
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+    )
+    if not transcript_candidates:
+        return None
+
+    best = None
+    raw = transcript_candidates[-1].read_text(encoding="utf-8", errors="ignore")
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        candidate_texts = [line]
+        try:
+            entry = json.loads(line)
+        except Exception:
+            entry = None
+        if isinstance(entry, dict):
+            candidate_texts.extend(_candidate_texts_from_object(entry.get("toolUseResult")))
+            candidate_texts.extend(_candidate_texts_from_object(entry.get("message")))
+        for text in candidate_texts:
+            pct = _extract_best_match_from_text(function_name, text)
+            if pct is not None:
+                best = max(best or 0.0, pct)
+    return best
+
+
+def _extract_stream_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for block in value:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str):
+                        parts.append(text)
+                else:
+                    parts.append(_extract_stream_text(block.get("content", "")))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ("content", "message", "result"):
+            if key in value:
+                return _extract_stream_text(value[key])
+    return ""
+
+
+def _run_claude_stream(
+    cmd: list[str],
+    *,
+    timeout: int,
+    function_name: str | None,
+    progress_callback: Callable[[float | None, str], None] | None,
+) -> tuple[subprocess.Popen[str], dict | None, str, float]:
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout_lines: list[str] = []
+    last_data: dict | None = None
+    current_tool_name = ""
+    best_observed = 0.0
+    deadline = time.monotonic() + timeout
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        stdout_lines.append(line)
+        if time.monotonic() > deadline:
+            proc.kill()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        last_data = data
+        msg_type = data.get("type", "")
+        if msg_type == "tool_use":
+            current_tool_name = str(data.get("name") or data.get("tool") or "")
+        elif msg_type == "tool_result":
+            content = _extract_stream_text(data.get("content", ""))
+            observed = _extract_best_match_from_text(function_name, content) if function_name else None
+            if observed is not None:
+                best_observed = max(best_observed, observed)
+            if progress_callback is not None:
+                detail = current_tool_name or "tool_result"
+                if observed is not None:
+                    detail = f"{detail}: observed {observed:.1f}%"
+                progress_callback(observed, detail)
+    proc.wait(timeout=max(deadline - time.monotonic(), 1))
+    return proc, last_data, "".join(stdout_lines), best_observed
+
 def run_headless(
     function_name: str | None,
     source_file: str,
@@ -201,6 +344,7 @@ def run_headless(
     worker_label: str = "",
     prior_best_code: str | None = None,
     prior_match_pct: float = 0,
+    progress_callback: Callable[[float | None, str], None] | None = None,
 ) -> AgentResult:
     """Run Claude Code headless to match function(s).
 
@@ -247,7 +391,8 @@ def run_headless(
     claude_args = [
         "claude",
         "-p", shlex.quote(prompt),
-        "--output-format", "json",
+        "--output-format", "stream-json",
+        "--verbose",
         "--model", "claude-opus-4-6",
         "--append-system-prompt", shlex.quote(system_prompt),
         "--mcp-config", mcp_config_path,
@@ -298,11 +443,11 @@ def run_headless(
             warm_start=prior_best_code is not None,
         )
         try:
-            proc = subprocess.run(
+            proc, output, stdout, stream_best = _run_claude_stream(
                 cmd,
-                capture_output=True,
-                text=True,
                 timeout=timeout,
+                function_name=function_name,
+                progress_callback=progress_callback,
             )
         except subprocess.TimeoutExpired:
             subprocess.run(
@@ -340,11 +485,11 @@ def run_headless(
         with claude_shared_worker_lock():
             cleanup_shared_claude_processes(config, bound_log=bound_log)
             try:
-                proc = subprocess.run(
+                proc, output, stdout, stream_best = _run_claude_stream(
                     cmd,
-                    capture_output=True,
-                    text=True,
                     timeout=timeout,
+                    function_name=function_name,
+                    progress_callback=progress_callback,
                 )
             except subprocess.TimeoutExpired:
                 cleanup_shared_claude_processes(config, bound_log=bound_log)
@@ -356,8 +501,7 @@ def run_headless(
 
     # Combine all output for error detection — Claude Code may write errors
     # to stdout or stderr depending on failure mode.
-    stderr = proc.stderr or ""
-    stdout = proc.stdout or ""
+    stderr = proc.stderr.read() if proc.stderr else ""
     all_output = f"{stderr}\n{stdout}".lower()
 
     # Check for rate limiting in stderr only — stdout contains JSON with
@@ -409,14 +553,11 @@ def run_headless(
             )
         return result
 
-    # Parse JSON output
-    try:
-        output = json.loads(proc.stdout)
-    except json.JSONDecodeError as e:
+    if output is None or output.get("type") != "result":
         result.elapsed_seconds = time.monotonic() - start_time
         result.termination_reason = "api_error"
-        result.error = f"Failed to parse Claude Code JSON output: {e}"
-        bound_log.error("headless_json_error", error=str(e))
+        result.error = "Claude Code stream did not produce a final result event"
+        bound_log.error("headless_json_error", output_type=(output or {}).get("type"))
         return result
 
     # Extract token usage
@@ -451,6 +592,7 @@ def run_headless(
         pct_match = re.search(r"(\d+(?:\.\d+)?)%\s*match", result_text)
         if pct_match:
             result.best_match_percent = float(pct_match.group(1))
+    result.best_match_percent = max(result.best_match_percent, stream_best)
 
     # Post-run verification: compile and check match from the host side.
     # This catches matches even when the result text is empty (e.g. max_turns).
@@ -498,6 +640,12 @@ def run_headless(
         )
 
     if config.claude_code.isolated_worker_enabled and isolated_spec is not None:
+        transcript_best = _read_transcript_best_match(
+            isolated_spec.agent_home_dir,
+            function_name,
+        )
+        if transcript_best is not None:
+            result.best_match_percent = max(result.best_match_percent, transcript_best)
         if result.matched:
             result.matched = False
             result.termination_reason = "isolated_patch_ready"
@@ -512,6 +660,12 @@ def run_headless(
             result,
             extra={"source_file": source_file, "function_name": function_name},
         )
+        archived_dir = archive_worker_artifacts(isolated_spec)
+        archived_patch = archived_dir / "output" / "worker.patch"
+        result.artifact_dir = str(archived_dir / "output")
+        if archived_patch.exists():
+            result.patch_path = str(archived_patch)
+        cleanup_worker_spec(isolated_spec)
 
     result.elapsed_seconds = time.monotonic() - start_time
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from sqlmodel import Session, select
 
@@ -15,6 +16,18 @@ from decomp_agent.orchestrator.campaign_orchestrator import (
     run_campaign_orchestrator_once,
 )
 from tests.fixtures.fake_repo import create_fake_repo
+
+
+def _mock_popen_for_stream_json(result_payload: dict, returncode: int = 0):
+    """Create a mock Popen that streams a single result line to stdout."""
+    result_line = json.dumps({**result_payload, "type": "result"}) + "\n"
+    mock_proc = MagicMock()
+    mock_proc.stdout = io.StringIO(result_line)
+    mock_proc.stderr = io.StringIO("")
+    mock_proc.returncode = returncode
+    mock_proc.wait = MagicMock()
+    mock_proc.kill = MagicMock()
+    return mock_proc
 
 
 def test_run_campaign_orchestrator_once_stores_claude_session_id(tmp_path):
@@ -47,14 +60,10 @@ def test_run_campaign_orchestrator_once_stores_claude_session_id(tmp_path):
         "subtype": "success",
     }
 
-    with patch(
-        "subprocess.run",
-        return_value=subprocess.CompletedProcess(
-            args=["docker", "exec"],
-            returncode=0,
-            stdout=json.dumps(payload),
-            stderr="",
-        ),
+    mock_proc = _mock_popen_for_stream_json(payload)
+    with (
+        patch("decomp_agent.orchestrator.campaign_orchestrator.subprocess.Popen", return_value=mock_proc),
+        patch("decomp_agent.orchestrator.campaign_orchestrator.cleanup_shared_claude_processes"),
     ):
         refreshed_campaign, result = run_campaign_orchestrator_once(
             engine,

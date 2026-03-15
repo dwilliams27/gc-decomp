@@ -20,11 +20,13 @@ from decomp_agent.orchestrator.headless_context import (
 from decomp_agent.orchestrator.worker_launcher import (
     WorkerSpec,
     build_worker_container_run_args,
+    cleanup_worker_spec,
     create_worker_spec,
     prepare_worker_repo_in_container,
     wait_for_worker_container,
 )
 from decomp_agent.orchestrator.worker_results import (
+    archive_worker_artifacts,
     export_worker_patch,
     write_worker_artifact_manifest,
     write_worker_result,
@@ -393,6 +395,12 @@ def run_codex_headless(
             result,
             extra={"source_file": source_file, "function_name": function_name},
         )
+        archived_dir = archive_worker_artifacts(isolated_spec)
+        archived_patch = archived_dir / "output" / "worker.patch"
+        result.artifact_dir = str(archived_dir / "output")
+        if archived_patch.exists():
+            result.patch_path = str(archived_patch)
+        cleanup_worker_spec(isolated_spec)
 
     result.elapsed_seconds = time.monotonic() - start_time
     bound_log.info(

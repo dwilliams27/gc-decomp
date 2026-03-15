@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -52,21 +53,15 @@ def test_isolated_claude_match_becomes_patch_ready(tmp_path):
     def fake_run(cmd, *args, **kwargs):
         if cmd[:2] == ["docker", "run"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="container-id\n", stderr="")
-        if cmd[:2] == ["docker", "exec"]:
-            exec_commands.append(cmd)
-            return subprocess.CompletedProcess(
-                cmd,
-                0,
-                stdout=(
-                    '{"usage":{"input_tokens":10,"output_tokens":20},'
-                    '"result":"confirmed MATCH","session_id":"claude-session",'
-                    '"num_turns":4}'
-                ),
-                stderr="",
-            )
         if cmd[:2] == ["docker", "stop"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(f"Unexpected subprocess command: {cmd}")
+
+    fake_proc = type(
+        "FakeProc",
+        (),
+        {"returncode": 0, "stderr": None},
+    )()
 
     with (
         patch("decomp_agent.orchestrator.headless.create_worker_spec", return_value=fake_spec),
@@ -76,6 +71,26 @@ def test_isolated_claude_match_becomes_patch_ready(tmp_path):
         patch("decomp_agent.orchestrator.headless.prepare_worker_repo_in_container") as prepare_repo,
         patch("decomp_agent.orchestrator.headless.export_worker_patch", return_value=tmp_path / "worker.patch"),
         patch("decomp_agent.orchestrator.headless.write_worker_result"),
+        patch(
+            "decomp_agent.orchestrator.headless.archive_worker_artifacts",
+            return_value=fake_spec.output_dir,
+        ),
+        patch("decomp_agent.orchestrator.headless.cleanup_worker_spec"),
+        patch(
+            "decomp_agent.orchestrator.headless._run_claude_stream",
+            side_effect=lambda cmd, **kwargs: (
+                exec_commands.append(cmd) or fake_proc,
+                {
+                    "type": "result",
+                    "usage": {"input_tokens": 10, "output_tokens": 20},
+                    "result": "confirmed MATCH",
+                    "session_id": "claude-session",
+                    "num_turns": 4,
+                },
+                "",
+                100.0,
+            ),
+        ),
         patch("decomp_agent.tools.build.check_match", return_value=matched),
         patch("decomp_agent.orchestrator.headless._read_final_code"),
         patch("decomp_agent.orchestrator.headless.subprocess.run", side_effect=fake_run),
@@ -86,7 +101,7 @@ def test_isolated_claude_match_becomes_patch_ready(tmp_path):
     assert result.termination_reason == "isolated_patch_ready"
     assert result.best_match_percent == 100.0
     assert result.patch_path.endswith("worker.patch")
-    assert result.artifact_dir == str(fake_spec.output_dir)
+    assert result.artifact_dir == str(fake_spec.output_dir / "output")
     assert str(fake_spec.mcp_config_path) in exec_commands[0][-1]
     prepare_repo.assert_called_once_with(fake_spec)
 
@@ -151,3 +166,111 @@ def test_resolve_claude_worker_budget_uses_near_match_settings(tmp_path):
 
     assert turns == 150
     assert timeout == 5400
+
+
+def test_isolated_claude_recovers_best_match_from_transcript(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "configure.py").write_text("print('stub')", encoding="utf-8")
+    config = Config(melee=MeleeConfig(repo_path=repo))
+    config.claude_code.enabled = True
+    config.claude_code.isolated_worker_enabled = True
+
+    fake_spec = WorkerSpec(
+        provider="claude",
+        worker_id="worker-1",
+        function_name="target_fn",
+        source_file="melee/test/testfile.c",
+        root_dir=tmp_path / "worker-root",
+        output_dir=tmp_path / "worker-root" / "output",
+        agent_home_dir=tmp_path / "worker-root" / "agent-home",
+        container_name="claude-worker-1",
+        melee_worktree=WorktreeSpec(
+            repo_root=repo,
+            worktree_path=tmp_path / "worker-root" / "repo",
+        ),
+        decomp_config_path=tmp_path / "worker-root" / "config" / "container.toml",
+        mcp_config_path=tmp_path / "worker-root" / "config" / "mcp.json",
+        auth_seed_path=None,
+    )
+    transcript = (
+        fake_spec.agent_home_dir
+        / "projects"
+        / "-"
+        / "session.jsonl"
+    )
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"timestamp": "2026-03-15T00:00:00Z", "type": "assistant"}),
+                json.dumps(
+                    {
+                        "timestamp": "2026-03-15T00:00:01Z",
+                        "type": "user",
+                        "toolUseResult": (
+                            "Compilation successful.\n"
+                            "  other_func: MATCH (size: 8)\n"
+                            "  target_fn: 66.0% (97% structural — wrong instructions)\n"
+                        ),
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    unmatched = CompileResult(
+        object_name="melee/test/testfile.c",
+        success=True,
+        functions=[FunctionMatch(name="target_fn", fuzzy_match_percent=13.0, size=8)],
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="container-id\n", stderr="")
+        if cmd[:2] == ["docker", "stop"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected subprocess command: {cmd}")
+
+    fake_proc = type(
+        "FakeProc",
+        (),
+        {"returncode": 0, "stderr": None},
+    )()
+
+    with (
+        patch("decomp_agent.orchestrator.headless.create_worker_spec", return_value=fake_spec),
+        patch("decomp_agent.orchestrator.headless.write_worker_artifact_manifest"),
+        patch("decomp_agent.orchestrator.headless.build_worker_container_run_args", return_value=["docker", "run"]),
+        patch("decomp_agent.orchestrator.headless.wait_for_worker_container"),
+        patch("decomp_agent.orchestrator.headless.prepare_worker_repo_in_container"),
+        patch("decomp_agent.orchestrator.headless.export_worker_patch", return_value=tmp_path / "worker.patch"),
+        patch("decomp_agent.orchestrator.headless.write_worker_result"),
+        patch(
+            "decomp_agent.orchestrator.headless.archive_worker_artifacts",
+            return_value=fake_spec.output_dir,
+        ),
+        patch("decomp_agent.orchestrator.headless.cleanup_worker_spec"),
+        patch(
+            "decomp_agent.orchestrator.headless._run_claude_stream",
+            return_value=(
+                fake_proc,
+                {
+                    "type": "result",
+                    "usage": {"input_tokens": 10, "output_tokens": 20},
+                    "result": "Stopped after iteration",
+                    "session_id": "claude-session",
+                    "num_turns": 4,
+                },
+                "",
+                66.0,
+            ),
+        ),
+        patch("decomp_agent.tools.build.check_match", return_value=unmatched),
+        patch("decomp_agent.orchestrator.headless._read_final_code"),
+        patch("decomp_agent.orchestrator.headless.subprocess.run", side_effect=fake_run),
+    ):
+        result = run_headless("target_fn", "melee/test/testfile.c", config)
+
+    assert result.best_match_percent == 66.0

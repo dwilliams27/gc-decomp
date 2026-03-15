@@ -20,6 +20,7 @@ from decomp_agent.config import load_config
 from decomp_agent.models.db import (
     Campaign,
     CampaignTask,
+    CampaignMessage,
     Function,
     backup_database_files,
     check_database_integrity,
@@ -200,6 +201,111 @@ def _stop_campaign_worker_containers(campaign: Campaign) -> list[str]:
         subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True)
         removed.append(name)
     return removed
+
+
+def _reset_campaign_in_progress_functions(engine, *, campaign_id: int) -> int:
+    """Reset stranded function rows for a stopped campaign back to pending."""
+    reset = 0
+    with Session(engine) as session:
+        task_rows = session.exec(
+            select(CampaignTask.function_id).where(
+                CampaignTask.campaign_id == campaign_id,
+                CampaignTask.function_id.is_not(None),  # type: ignore[union-attr]
+            )
+        ).all()
+        function_ids = {row for row in task_rows if row is not None}
+        if not function_ids:
+            return 0
+        functions = session.exec(
+            select(Function).where(
+                Function.id.in_(function_ids),  # type: ignore[attr-defined]
+                Function.status == "in_progress",
+            )
+        ).all()
+        for function in functions:
+            function.status = "pending"
+            session.add(function)
+            reset += 1
+        session.commit()
+    return reset
+
+
+def _orchestrator_healthy(engine, campaign_id: int) -> bool:
+    """Return whether the orchestrator has produced any observable progress."""
+    with Session(engine) as session:
+        campaign = session.get(Campaign, campaign_id)
+        if campaign is None:
+            return False
+        if campaign.notes.strip():
+            return True
+        message_count = session.exec(
+            select(func.count()).select_from(CampaignMessage).where(
+                CampaignMessage.campaign_id == campaign_id,
+            )
+        ).one()
+        return bool(message_count)
+
+
+def _reset_in_progress_functions_for_source_file(engine, *, source_file: str) -> int:
+    """Reset stranded in-progress rows for a source file before launching a fresh campaign."""
+    reset = 0
+    with Session(engine) as session:
+        functions = session.exec(
+            select(Function).where(
+                Function.source_file == source_file,
+                Function.status == "in_progress",
+            )
+        ).all()
+        for function in functions:
+            function.status = "pending"
+            session.add(function)
+            reset += 1
+        session.commit()
+    return reset
+
+
+def _melee_repo_dirty(config) -> list[str]:
+    """Return a list of dirty-path lines for the host melee checkout."""
+    proc = subprocess.run(
+        ["git", "-C", str(config.melee.repo_path), "status", "--short"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return [proc.stderr.strip() or "git status failed"]
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _cleanup_worker_roots(config, *, provider: str | None = None) -> tuple[int, int]:
+    """Remove stale worker roots and prune melee worktree registrations."""
+    from decomp_agent.orchestrator.worktree import prune_git_worktrees
+
+    removed_roots = 0
+    root_paths: list[Path] = []
+    if provider in (None, "claude"):
+        root_paths.append(config.claude_code.worker_root)
+    if provider in (None, "codex"):
+        root_paths.append(config.codex_code.worker_root)
+
+    for root in root_paths:
+        if not root.exists():
+            continue
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            shutil.rmtree(child, ignore_errors=True)
+            removed_roots += 1
+
+    prune_git_worktrees(config.melee.repo_path)
+    registrations = subprocess.run(
+        ["git", "-C", str(config.melee.repo_path), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    remaining = registrations.stdout.count("worktree ")
+    return removed_roots, remaining
 
 
 @main.command()
@@ -580,6 +686,7 @@ def campaign_start(
 @click.option("--timeout-hours", type=int, default=None, help="Campaign wall-clock timeout")
 @click.option("--allow-shared-fix-workers", is_flag=True, default=False, help="Allow workers to make broader shared-file fixes")
 @click.option("--allow-temporary-unmatched-regressions", is_flag=True, default=False, help="Allow temporary regressions in unmatched functions when net file progress improves")
+@click.option("--allow-dirty-melee", is_flag=True, default=False, help="Allow launch even if the host melee checkout has uncommitted changes")
 @click.pass_context
 def campaign_launch(
     ctx: click.Context,
@@ -590,6 +697,7 @@ def campaign_launch(
     timeout_hours: int | None,
     allow_shared_fix_workers: bool,
     allow_temporary_unmatched_regressions: bool,
+    allow_dirty_melee: bool,
 ) -> None:
     """Create a campaign and launch its orchestrator + worker loops in the background."""
     config, engine = _load(ctx)
@@ -599,6 +707,17 @@ def campaign_launch(
             f"[red]Source file '{source_file}' not found at {src_path}.[/red]"
         )
         raise SystemExit(1)
+    dirty_lines = _melee_repo_dirty(config)
+    if dirty_lines and not allow_dirty_melee:
+        raise click.ClickException(
+            "Host melee checkout is dirty. Refusing to launch a campaign until it is clean. "
+            "Use --allow-dirty-melee only if you intentionally want to run on a dirty checkout."
+        )
+
+    reset_before_launch = _reset_in_progress_functions_for_source_file(
+        engine,
+        source_file=source_file,
+    )
 
     from decomp_agent.orchestrator.campaign import start_campaign
 
@@ -651,6 +770,45 @@ def campaign_launch(
     }
     manifest_path = _write_campaign_process_manifest(campaign, manifest)
 
+    deadline = time.time() + 30.0
+    healthy = False
+    while time.time() < deadline:
+        if not _pid_is_alive(orchestrator_proc.pid):
+            break
+        if _orchestrator_healthy(engine, campaign.id):  # type: ignore[arg-type]
+            healthy = True
+            break
+        time.sleep(1.0)
+
+    if not healthy:
+        stopped_roles: list[str] = []
+        for role, pid in (("orchestrator", orchestrator_proc.pid), ("worker", worker_proc.pid)):
+            if _stop_pid(pid):
+                stopped_roles.append(role)
+        removed_containers = _stop_campaign_worker_containers(campaign)
+        with Session(engine) as session:
+            live_campaign = session.get(Campaign, campaign.id)
+            if live_campaign is not None:
+                mark_campaign_stopped(session, live_campaign)
+                stop_running_campaign_tasks(
+                    session,
+                    campaign.id,  # type: ignore[arg-type]
+                    error="campaign launch failed health check",
+                )
+        reset_functions = _reset_campaign_in_progress_functions(
+            engine,
+            campaign_id=campaign.id,  # type: ignore[arg-type]
+        )
+        manifest["launch_failed"] = True
+        manifest["stopped_roles"] = stopped_roles
+        manifest["removed_containers"] = removed_containers
+        _write_campaign_process_manifest(campaign, manifest)
+        raise click.ClickException(
+            "Campaign launch health check failed: orchestrator produced no notes/messages "
+            "within 30s. Launch was rolled back. "
+            f"Reset {reset_functions} stranded function row(s)."
+        )
+
     console.print(
         f"Launched campaign [bold]#{campaign.id}[/bold] for {campaign.source_file}"
     )
@@ -663,6 +821,8 @@ def campaign_launch(
     console.print(f"  PID file:     {manifest_path}")
     console.print(f"  Manager log:  {orchestrator_log}")
     console.print(f"  Worker log:   {worker_log}")
+    if reset_before_launch:
+        console.print(f"  Reset rows:   {reset_before_launch} stranded in_progress function row(s)")
 
 
 @campaign_group.command("show")
@@ -748,16 +908,40 @@ def campaign_stop(ctx: click.Context, campaign_id: int) -> None:
             campaign_id,
             error="campaign stopped by operator",
         )
+    reset_functions = _reset_campaign_in_progress_functions(engine, campaign_id=campaign_id)
 
     manifest["stopped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     manifest["stopped_roles"] = stopped_roles
     manifest["removed_containers"] = removed_containers
+    manifest["reset_functions"] = reset_functions
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
     console.print(f"Stopped campaign [bold]#{campaign_id}[/bold]")
     console.print(f"  Host loops:    {', '.join(stopped_roles) or '(none found)'}")
     console.print(f"  Task cleanup:  {stopped_tasks} running task(s) marked stopped")
     console.print(f"  Containers:    {len(removed_containers)} removed")
+    console.print(f"  Functions:     {reset_functions} in_progress row(s) reset")
+
+
+@campaign_group.command("cleanup-workers")
+@click.option(
+    "--provider",
+    type=click.Choice(["claude", "codex"], case_sensitive=False),
+    default=None,
+    help="Limit cleanup to one provider's worker root",
+)
+@click.pass_context
+def campaign_cleanup_workers(ctx: click.Context, provider: str | None) -> None:
+    """Remove stale worker roots and prune registered melee worktrees."""
+    config, _engine = _load(ctx)
+    removed_roots, remaining_worktrees = _cleanup_worker_roots(
+        config,
+        provider=_provider_choice(provider) if provider else None,
+    )
+    console.print("Cleaned worker state")
+    console.print(f"  Provider:      {provider or 'all'}")
+    console.print(f"  Roots removed: {removed_roots}")
+    console.print(f"  Worktrees now: {remaining_worktrees}")
 
 
 @campaign_group.command("run-once")

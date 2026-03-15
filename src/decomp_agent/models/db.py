@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Engine, event, text as sa_text
 from sqlalchemy import func as sa_func
@@ -109,6 +110,7 @@ class Campaign(SQLModel, table=True):
     claude_cooldown_until: datetime | None = None
     codex_cooldown_until: datetime | None = None
     staging_worktree_path: str = ""
+    notes: str = ""
     artifact_dir: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
@@ -130,6 +132,9 @@ class CampaignTask(SQLModel, table=True):
     worker_session_id: str = ""
     worker_id: str = ""
     best_match_pct: float = 0.0
+    live_best_match_pct: float = 0.0
+    live_last_activity_at: datetime | None = None
+    live_status_detail: str = ""
     termination_reason: str = ""
     error: str = ""
     artifact_dir: str = ""
@@ -140,6 +145,77 @@ class CampaignTask(SQLModel, table=True):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CampaignEvent(SQLModel, table=True):
+    """Timestamped progress/activity events for campaign visualization."""
+    id: int | None = Field(default=None, primary_key=True)
+    campaign_id: int = Field(foreign_key="campaign.id", index=True)
+    task_id: int | None = Field(default=None, foreign_key="campaigntask.id")
+    function_name: str | None = None
+    event_type: str  # progress | tool_call | match_improved | match_achieved |
+                     # worker_started | worker_completed | worker_failed | status_change
+    data: str = ""   # JSON payload
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CampaignMessage(SQLModel, table=True):
+    """Orchestrator agent conversation turns for comm log visualization."""
+    id: int | None = Field(default=None, primary_key=True)
+    campaign_id: int = Field(foreign_key="campaign.id", index=True)
+    role: str          # orchestrator | tool_call | tool_result
+    content: str = ""
+    session_number: int = 0
+    turn_number: int = 0
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+def emit_campaign_event(
+    session: Session,
+    campaign_id: int,
+    event_type: str,
+    data_dict: dict[str, Any] | None = None,
+    *,
+    task_id: int | None = None,
+    function_name: str | None = None,
+) -> CampaignEvent:
+    """Write a CampaignEvent row. Used by lifecycle functions to emit real-time events."""
+    ev = CampaignEvent(
+        campaign_id=campaign_id,
+        task_id=task_id,
+        function_name=function_name,
+        event_type=event_type,
+        data=_json.dumps(data_dict) if data_dict else "",
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(ev)
+    session.commit()
+    session.refresh(ev)
+    return ev
+
+
+def emit_campaign_message(
+    session: Session,
+    campaign_id: int,
+    role: str,
+    content: str,
+    *,
+    session_number: int = 0,
+    turn_number: int = 0,
+) -> CampaignMessage:
+    """Write a CampaignMessage row for the comm log."""
+    msg = CampaignMessage(
+        campaign_id=campaign_id,
+        role=role,
+        content=content,
+        session_number=session_number,
+        turn_number=turn_number,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(msg)
+    session.commit()
+    session.refresh(msg)
+    return msg
 
 
 def get_engine(db_path: Path | str) -> Engine:
@@ -221,12 +297,16 @@ def _migrate(engine: Engine) -> None:
         ("attempt", "artifact_dir", "TEXT NOT NULL DEFAULT ''"),
         ("attempt", "patch_path", "TEXT NOT NULL DEFAULT ''"),
         ("campaigntask", "best_match_pct", "REAL NOT NULL DEFAULT 0.0"),
+        ("campaigntask", "live_best_match_pct", "REAL NOT NULL DEFAULT 0.0"),
+        ("campaigntask", "live_last_activity_at", "TIMESTAMP"),
+        ("campaigntask", "live_status_detail", "TEXT NOT NULL DEFAULT ''"),
         ("campaigntask", "termination_reason", "TEXT NOT NULL DEFAULT ''"),
         ("campaigntask", "error", "TEXT NOT NULL DEFAULT ''"),
         ("campaigntask", "next_eligible_at", "TIMESTAMP"),
         ("campaigntask", "rate_limit_count", "INTEGER NOT NULL DEFAULT 0"),
         ("campaign", "claude_cooldown_until", "TIMESTAMP"),
         ("campaign", "codex_cooldown_until", "TIMESTAMP"),
+        ("campaign", "notes", "TEXT NOT NULL DEFAULT ''"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -395,6 +475,10 @@ def mark_campaign_running(
     campaign.updated_at = now
     session.add(campaign)
     session.commit()
+    emit_campaign_event(
+        session, campaign.id, "status_change",  # type: ignore[arg-type]
+        {"status": "running"},
+    )
 
 
 def mark_campaign_completed(
@@ -408,6 +492,10 @@ def mark_campaign_completed(
     campaign.updated_at = now
     session.add(campaign)
     session.commit()
+    emit_campaign_event(
+        session, campaign.id, "status_change",  # type: ignore[arg-type]
+        {"status": "completed"},
+    )
 
 
 def mark_campaign_stopped(
@@ -420,6 +508,10 @@ def mark_campaign_stopped(
     campaign.updated_at = now
     session.add(campaign)
     session.commit()
+    emit_campaign_event(
+        session, campaign.id, "status_change",  # type: ignore[arg-type]
+        {"status": "stopped"},
+    )
 
 
 def stop_running_campaign_tasks(
@@ -459,8 +551,52 @@ def mark_campaign_task_running(
     task.started_at = now
     task.updated_at = now
     task.next_eligible_at = None
+    task.live_best_match_pct = 0.0
+    task.live_last_activity_at = now
+    task.live_status_detail = "worker started"
     session.add(task)
     session.commit()
+    emit_campaign_event(
+        session, task.campaign_id, "worker_started",
+        {"task_id": task.id, "function_name": task.function_name,
+         "provider": task.provider, "scope": task.scope},
+        task_id=task.id, function_name=task.function_name,
+    )
+
+
+def record_campaign_task_progress(
+    session: Session,
+    task: CampaignTask,
+    *,
+    observed_match_pct: float | None,
+    detail: str,
+) -> None:
+    """Persist host-owned live progress for a running campaign task."""
+    now = datetime.now(timezone.utc)
+    improved = False
+    if observed_match_pct is not None and observed_match_pct > task.live_best_match_pct:
+        task.live_best_match_pct = observed_match_pct
+        improved = True
+    task.live_last_activity_at = now
+    task.live_status_detail = detail
+    task.updated_at = now
+    session.add(task)
+    session.commit()
+
+    emit_campaign_event(
+        session,
+        task.campaign_id,
+        "match_improved" if improved else "progress",
+        {
+            "task_id": task.id,
+            "function_name": task.function_name,
+            "live_best_match_pct": task.live_best_match_pct,
+            "observed_match_pct": observed_match_pct,
+            "detail": detail,
+        },
+        task_id=task.id,
+        function_name=task.function_name,
+    )
 
 
 def requeue_running_campaign_tasks(
@@ -508,6 +644,13 @@ def defer_campaign_task(
     task.rate_limit_count += 1
     session.add(task)
     session.commit()
+    emit_campaign_event(
+        session, task.campaign_id, "worker_failed",
+        {"task_id": task.id, "function_name": task.function_name,
+         "error": error, "reason": "rate_limited",
+         "next_eligible_at": until.isoformat()},
+        task_id=task.id, function_name=task.function_name,
+    )
 
 
 def set_campaign_provider_cooldown(
@@ -546,6 +689,12 @@ def fail_campaign_task(
     task.termination_reason = termination_reason
     session.add(task)
     session.commit()
+    emit_campaign_event(
+        session, task.campaign_id, "worker_failed",
+        {"task_id": task.id, "function_name": task.function_name,
+         "error": error, "termination_reason": termination_reason},
+        task_id=task.id, function_name=task.function_name,
+    )
 
 
 def complete_campaign_task(
@@ -557,7 +706,10 @@ def complete_campaign_task(
     now = datetime.now(timezone.utc)
     task.completed_at = now
     task.updated_at = now
-    task.best_match_pct = result.best_match_percent
+    task.best_match_pct = max(result.best_match_percent, task.live_best_match_pct)
+    task.live_last_activity_at = now
+    if result.termination_reason:
+        task.live_status_detail = f"completed: {result.termination_reason}"
     task.termination_reason = result.termination_reason
     task.error = result.error or ""
     task.worker_session_id = result.session_id
@@ -571,6 +723,15 @@ def complete_campaign_task(
         task.status = "completed"
     session.add(task)
     session.commit()
+    event_type = "match_achieved" if result.matched else "worker_completed"
+    emit_campaign_event(
+        session, task.campaign_id, event_type,
+        {"task_id": task.id, "function_name": task.function_name,
+         "best_match_pct": task.best_match_pct,
+         "matched": result.matched,
+         "termination_reason": result.termination_reason},
+        task_id=task.id, function_name=task.function_name,
+    )
 
 
 def seed_campaign_function_tasks(

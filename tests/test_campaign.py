@@ -8,7 +8,13 @@ from unittest.mock import patch
 from sqlmodel import Session, select
 
 from decomp_agent.agent.loop import AgentResult
-from decomp_agent.models.db import Campaign, CampaignTask, get_engine, sync_from_report
+from decomp_agent.models.db import (
+    Campaign,
+    CampaignTask,
+    get_engine,
+    record_campaign_task_progress,
+    sync_from_report,
+)
 from decomp_agent.orchestrator.campaign import (
     _compute_rate_limit_cooldown,
     append_campaign_note,
@@ -197,8 +203,16 @@ def test_run_campaign_task_once_uses_warm_start_for_existing_code(tmp_path):
     )
     captured: dict[str, object] = {}
 
-    def fake_run_function(function, config, engine, *, worker_label="", warm_start=False):
-        del function, config, engine, worker_label
+    def fake_run_function(
+        function,
+        config,
+        engine,
+        *,
+        worker_label="",
+        warm_start=False,
+        progress_callback=None,
+    ):
+        del function, config, engine, worker_label, progress_callback
         captured["warm_start"] = warm_start
         return fake_result
 
@@ -713,45 +727,17 @@ def test_format_campaign_status_includes_live_running_details(tmp_path):
             .order_by(CampaignTask.id.asc())  # type: ignore[arg-type]
         ).first()
         assert task is not None
-        function_name = task.function_name
-        assert function_name is not None
         task.status = "running"
         session.add(task)
         session.commit()
+        record_campaign_task_progress(
+            session,
+            task,
+            observed_match_pct=60.0,
+            detail="compile_and_check: observed 60.0%",
+        )
         campaign_id = campaign.id
         task_id = task.id
-
-    transcript = (
-        config.claude_code.worker_root
-        / f"melee-test-testfile.c-{function_name}"
-        / "agent-home"
-        / "projects"
-        / "-"
-        / "live.jsonl"
-    )
-    transcript.parent.mkdir(parents=True, exist_ok=True)
-    transcript.write_text(
-        "\n".join(
-            [
-                json.dumps({"timestamp": "2026-03-14T12:00:00Z", "type": "assistant"}),
-                json.dumps(
-                    {
-                        "timestamp": "2026-03-14T12:01:00Z",
-                        "type": "user",
-                        "message": {
-                            "content": [
-                                    {
-                                        "type": "tool_result",
-                                        "content": f'{{"result":"{function_name}: 60.0%"}}',
-                                    }
-                                ]
-                            },
-                    }
-                ),
-            ]
-        ),
-        encoding="utf-8",
-    )
 
     status = format_campaign_status(engine, config, campaign_id)  # type: ignore[arg-type]
     assert "live best seen: 60.0%" in status
@@ -765,7 +751,7 @@ def test_format_campaign_status_includes_live_running_details(tmp_path):
     assert "Live status: live best seen: 60.0%" in task_text
 
 
-def test_live_status_parser_ignores_other_function_matches(tmp_path):
+def test_live_status_uses_host_progress_not_transcripts(tmp_path):
     _repo_path, config = create_fake_repo(tmp_path)
     config.campaign.root_dir = tmp_path / "campaigns"
     config.claude_code.worker_root = tmp_path / "claude-workers"
@@ -788,44 +774,17 @@ def test_live_status_parser_ignores_other_function_matches(tmp_path):
             .order_by(CampaignTask.id.asc())  # type: ignore[arg-type]
         ).first()
         assert task is not None
-        function_name = task.function_name
-        assert function_name is not None
         task.status = "running"
         session.add(task)
         session.commit()
+        record_campaign_task_progress(
+            session,
+            task,
+            observed_match_pct=60.0,
+            detail="compile_and_check: observed 60.0%",
+        )
         campaign_id = campaign.id
         task_id = task.id
-
-    transcript = (
-        config.claude_code.worker_root
-        / f"melee-test-testfile.c-{function_name}"
-        / "agent-home"
-        / "projects"
-        / "-"
-        / "live.jsonl"
-    )
-    transcript.parent.mkdir(parents=True, exist_ok=True)
-    transcript.write_text(
-        "\n".join(
-            [
-                json.dumps({"timestamp": "2026-03-14T12:00:00Z", "type": "assistant"}),
-                json.dumps(
-                    {
-                        "timestamp": "2026-03-14T12:01:00Z",
-                        "type": "user",
-                        "toolUseResult": (
-                            f"Wrote {function_name} to melee/test/testfile.c.\n\n"
-                            "Compilation successful. Match results for melee/test/testfile.c:\n\n"
-                            f"  {function_name}: 60.0% (100% structural — register allocation only)\n"
-                            "  simple_init: MATCH (size: 40)\n"
-                            "Overall: 80.0% average match"
-                        ),
-                    }
-                ),
-            ]
-        ),
-        encoding="utf-8",
-    )
 
     status = format_campaign_status(engine, config, campaign_id)  # type: ignore[arg-type]
     assert "live best seen: 60.0%" in status

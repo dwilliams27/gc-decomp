@@ -267,15 +267,21 @@ When evaluating whether the system is healthy, validate these components in orde
    - If a provider hit `rate_limited`, tasks should be deferred with `next_eligible_at`, not marked as normal completions.
    - The campaign should wait out the cooldown window rather than burning progress cycles.
 
-8. **Artifacts and transcripts**
-   - If a worker reports `iterations > 0` but `final_code = null` and `worker.patch` is empty, inspect the worker transcript before concluding the model “did nothing”.
-   - The transcript is the source of truth for whether the agent was decomping, debugging the environment, rate-limited, or blocked on tools.
+8. **Host-owned progress data**
+   - The orchestrator must use host-owned worker progress data as the source of truth: `CampaignTask.live_*` fields and `CampaignEvent` progress/match events.
+   - Running-task summaries must be derivable without looking at chat logs.
+   - If real progress happened, it must be reflected in those logical summaries while the worker is still running, not only after completion.
 
-9. **Promotion path**
+9. **Artifacts and transcripts**
+   - Transcripts are for RCA and follow-up guidance, not primary orchestration state.
+   - Use them to understand why a worker stalled, regressed, or chose a bad tactic.
+   - If a worker reports `iterations > 0` but `final_code = null` and `worker.patch` is empty, inspect the worker transcript before concluding the model “did nothing”.
+
+10. **Promotion path**
    - A worker producing a good patch is not enough; verify that patch promotion, validation, and DB state updates are working too.
    - If a worker reaches `100%` in isolation but the function is still not matched, the bug is in promotion/finalization, not generation.
 
-10. **Launch-path validation**
+11. **Launch-path validation**
    - Confirm the campaign was launched through `decomp-agent`, not a no-op module invocation.
    - Confirm host control loops have the permissions they need for Docker + git worktrees.
    - If early tasks all fail with Docker socket or `git worktree add` errors, the launch path is wrong even if the campaign row exists.

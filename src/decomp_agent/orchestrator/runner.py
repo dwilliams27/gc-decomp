@@ -303,6 +303,7 @@ def run_function(
     *,
     worker_label: str = "",
     warm_start: bool = False,
+    progress_callback=None,
 ) -> AgentResult:
     """Run the agent on a single function, managing DB state throughout.
 
@@ -405,6 +406,7 @@ def run_function(
                         worker_label=worker_label,
                         prior_best_code=prior_best_code,
                         prior_match_pct=prior_match_pct,
+                        progress_callback=progress_callback,
                     )
                 elif _provider_enabled(config.codex_code):
                     from decomp_agent.orchestrator.codex_headless import (

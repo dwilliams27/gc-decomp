@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from decomp_agent.agent.loop import AgentResult
@@ -25,6 +27,43 @@ def worker_artifact_paths(spec: WorkerSpec) -> WorkerArtifacts:
         patch_file=spec.output_dir / "worker.patch",
         metadata_file=spec.output_dir / "artifacts.json",
     )
+
+
+def audit_worker_artifact_root() -> Path:
+    """Return the gitignored host-side root for preserved raw worker artifacts."""
+    repo_root = Path(__file__).parents[3]
+    root = repo_root / ".run-artifacts" / "workers"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def archive_worker_artifacts(spec: WorkerSpec) -> Path:
+    """Copy raw worker artifacts into a durable gitignored audit directory."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest_root = audit_worker_artifact_root() / f"{spec.worker_id}-{timestamp}"
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    output_dest = dest_root / "output"
+    if spec.output_dir.exists():
+        shutil.copytree(spec.output_dir, output_dest, dirs_exist_ok=True)
+
+    transcript_candidates = sorted(
+        [
+            path
+            for path in spec.agent_home_dir.rglob("*.jsonl")
+            if "/subagents/" not in str(path)
+        ],
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+    )
+    if transcript_candidates:
+        transcript_dest = dest_root / "transcript.jsonl"
+        shutil.copy2(transcript_candidates[-1], transcript_dest)
+
+    spec_path = spec.output_dir / "worker-spec.json"
+    if spec_path.exists():
+        shutil.copy2(spec_path, dest_root / "worker-spec.json")
+
+    return dest_root
 
 
 def export_worker_patch(spec: WorkerSpec) -> Path:
