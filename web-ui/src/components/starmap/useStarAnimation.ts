@@ -106,6 +106,36 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.closePath();
   ctx.fill();
 
+  // ── Small forest on the right side of the near ridge ─────────────────
+  // Conifers sitting on the ridge contour, partially obscuring far ridge
+  const forestTrees = getForestTreeCache();
+  for (let i = 0; i < forestTrees.length; i++) {
+    const t = forestTrees[i];
+    const tx = t.fx * w;
+    const baseY = ridgeY(t.fx) + 14 + t.yOffset;
+
+    // Tree trunk
+    ctx.fillStyle = "#070b13";
+    ctx.fillRect(tx - 0.5, baseY - t.trunk, 1, t.trunk);
+
+    // Conifer shape — 2-3 layered triangles tapering upward
+    ctx.fillStyle = t.shade;
+    const treeTop = baseY - t.trunk - t.height;
+    const layers = t.layers;
+    for (let l = 0; l < layers; l++) {
+      const lf = l / layers;
+      const layerTop = baseY - t.trunk - t.height * (lf + 1 / layers);
+      const layerBot = baseY - t.trunk - t.height * lf * 0.6;
+      const layerW = t.width * (1 - lf * 0.35);
+      ctx.beginPath();
+      ctx.moveTo(tx, layerTop);
+      ctx.lineTo(tx - layerW, layerBot);
+      ctx.lineTo(tx + layerW, layerBot);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
   // ── Valley floor with subtle gradient ─────────────────────────────────
   const valleyTop = horizonY + 45;
   const valleyGrad = ctx.createLinearGradient(0, valleyTop, 0, h);
@@ -552,19 +582,55 @@ function getTreeCache(): { x: number; h: number }[] {
   return treeCache;
 }
 
-let forestCache: { x: number; h: number }[] | null = null;
+interface ForestTree {
+  fx: number;
+  yOffset: number; // additional vertical offset for depth rows
+  height: number;
+  width: number;
+  trunk: number;
+  layers: number;
+  shade: string;
+}
 
-function getForestCache(): { x: number; h: number }[] {
-  if (!forestCache) {
-    forestCache = [];
-    for (let i = 0; i < 120; i++) {
-      forestCache.push({
-        x: seededF(i * 2 + 500),
-        h: seededF(i * 2 + 501),
-      });
+let forestTreeCache: ForestTree[] | null = null;
+
+function getForestTreeCache(): ForestTree[] {
+  if (!forestTreeCache) {
+    forestTreeCache = [];
+    // Multiple depth rows of trees, back to front
+    // Rows further back are shorter/darker, rows in front taller/slightly lighter
+    const rowCount = 8;
+    let globalIdx = 0;
+    for (let row = 0; row < rowCount; row++) {
+      const rowF = row / rowCount; // 0=back, 1=front
+      const yOff = -6 + row * 4; // back rows higher, front rows lower
+      const heightScale = 0.5 + rowF * 0.6; // back trees shorter
+      const shadeIdx = Math.min(3, Math.floor(row / 2));
+      const shades = ["#050910", "#060a12", "#070b14", "#080c15"];
+      const shade = shades[shadeIdx];
+      // Slightly different x range per row for natural look
+      const xStart = 0.69 + seededF(row * 7 + 800) * 0.02;
+      const xEnd = 0.84 + seededF(row * 7 + 801) * 0.02;
+
+      let fx = xStart;
+      while (fx < xEnd) {
+        const gap = 0.002 + seededF(globalIdx * 3 + 700) * 0.004;
+        fx += gap;
+        if (fx >= xEnd) break;
+        // Jitter x slightly per row so trees don't align vertically
+        const jitteredFx = fx + (seededF(globalIdx * 3 + 706) - 0.5) * 0.004;
+        const height = (6 + seededF(globalIdx * 3 + 701) * 12) * heightScale;
+        const width = (2 + seededF(globalIdx * 3 + 702) * 2.5) * (0.7 + heightScale * 0.3);
+        const trunk = (1.5 + seededF(globalIdx * 3 + 703) * 2) * heightScale;
+        const layers = 2 + Math.floor(seededF(globalIdx * 3 + 704) * 2);
+        forestTreeCache.push({ fx: jitteredFx, yOffset: yOff, height, width, trunk, layers, shade });
+        globalIdx++;
+      }
     }
+    // Sort back-to-front so front trees draw on top
+    forestTreeCache.sort((a, b) => a.yOffset - b.yOffset);
   }
-  return forestCache;
+  return forestTreeCache;
 }
 
 let bgStarsCache: { x: number; y: number; r: number; phase: number }[] | null = null;
