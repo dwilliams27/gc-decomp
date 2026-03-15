@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -356,8 +357,17 @@ def run_m2c(
 
     # Build m2c command
     ctx_path = _ctx_file_path(config)
+    m2c_executable = shutil.which("m2c")
+    if not m2c_executable:
+        if cleanup_asm:
+            asm_path.unlink(missing_ok=True)
+        return M2CResult(
+            function_name=function_name,
+            error="m2c not found on PATH",
+        )
+
     m2c_args = [
-        "python3", "-m", "m2c.main",
+        m2c_executable,
         "--knr", "--pointer", "left",
         "--target", "ppc-mwcc-c",
     ]
@@ -390,7 +400,7 @@ def run_m2c(
     except FileNotFoundError:
         return M2CResult(
             function_name=function_name,
-            error="python3 not found",
+            error="m2c executable not found",
         )
     finally:
         if cleanup_asm:

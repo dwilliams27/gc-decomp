@@ -7,6 +7,7 @@
 - **NEVER add silent fallbacks or hardcoded workarounds.** If something essential is missing (a tool, a config value, a file), the code must fail hard with a clear error message. Silent fallbacks hide real issues and create a patchwork of bandaids that make debugging impossible. It is always better to crash with a useful error than to silently proceed with partial functionality.
 
 - **Do not hide missing setup behind graceful degradation.** If Ghidra isn't configured, m2c isn't installed, or the build environment isn't ready — raise an error, don't return a stub result and pretend everything is fine. The caller (the agent loop) needs to know what's actually available.
+- **Be explicit about the correct `m2c` package.** We have hit this exact failure before: the worker image accidentally installed the unrelated PyPI `m2c` package instead of the Melee decomp tool from `matt-kempster/m2c`. Always validate `importlib.util.find_spec("m2c.main")` in worker environments; `which m2c` alone is not enough.
 
 - **ALWAYS use the latest models.** Headless Claude Code agents MUST use `claude-opus-4-6` (the latest Opus). API agents should use `gpt-5.4` (latest GPT) or equivalent top-tier model. Never let a stale default regress us to an older model — this directly impacts match quality. Check model versions when debugging poor agent performance.
 
@@ -249,6 +250,7 @@ When evaluating whether the system is healthy, validate these components in orde
 3. **MCP tool reachability**
    - Prove that `get_target_assembly`, `get_context`, `read_source_file`, `write_function`, `compile_and_check`, and `get_diff` work from inside the worker.
    - Do this with the same provider path the agent will use, not with a separate host-side probe.
+   - For `get_m2c_decompilation`, validate the worker has the correct package identity: `m2c.main` must import successfully. A random `m2c` binary on PATH is not sufficient.
 
 4. **Repo/build visibility inside workers**
    - The worker must see the correct isolated worktree path.

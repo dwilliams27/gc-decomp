@@ -23,6 +23,7 @@ from decomp_agent.orchestrator.worker_launcher import (
     cleanup_worker_spec,
     create_worker_spec,
     prepare_worker_repo_in_container,
+    validate_worker_tools_in_container,
     wait_for_worker_container,
 )
 from decomp_agent.orchestrator.worker_results import (
@@ -241,6 +242,7 @@ def _run_isolated_worker(
     )
     wait_for_worker_container(spec)
     prepare_worker_repo_in_container(spec)
+    validate_worker_tools_in_container(spec)
     try:
         system_prompt = load_headless_system_prompt()
         combined_prompt = (

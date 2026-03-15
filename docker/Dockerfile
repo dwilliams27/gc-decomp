@@ -32,8 +32,10 @@ COPY pyproject.toml /app/pyproject.toml
 COPY src/ /app/src/
 RUN pip3 install --break-system-packages '/app[mcp]'
 
-# m2c for decompilation (pure Python, runs natively)
-RUN pip3 install --break-system-packages m2c
+# m2c for decompilation. Use the melee repo's expected package, not the
+# unrelated PyPI "m2c" package with the same name.
+RUN pip3 install --break-system-packages \
+    'm2c @ git+https://github.com/matt-kempster/m2c.git'
 
 # NOTE: decomp-permuter is NOT included in initial build.
 # See "Deferred: Permuter" in the plan for steps to add it later.

@@ -296,6 +296,7 @@ def test_run_m2c_materializes_disassembled_target(tmp_path, monkeypatch):
         "decomp_agent.tools.m2c_tool.run_in_repo",
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
     )
+    monkeypatch.setattr("decomp_agent.tools.m2c_tool.shutil.which", lambda name: "/usr/local/bin/m2c")
     monkeypatch.setattr(
         "decomp_agent.tools.disasm.disassemble_object",
         lambda obj, cfg: disasm,
@@ -313,6 +314,23 @@ def test_run_m2c_materializes_disassembled_target(tmp_path, monkeypatch):
     result = run_m2c("simple_add", "melee/test/testfile.c", config)
     assert result.success
     assert seen_args
+    assert seen_args[0][0] == "/usr/local/bin/m2c"
+
+
+def test_run_m2c_reports_missing_cli(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "configure.py").write_text("print('stub')", encoding="utf-8")
+    asm_dir = repo / "build" / "GALE01" / "asm" / "melee" / "test"
+    asm_dir.mkdir(parents=True, exist_ok=True)
+    (asm_dir / "testfile.s").write_text(".fn simple_add, global\n.endfn simple_add\n", encoding="utf-8")
+
+    config = Config(melee=MeleeConfig(repo_path=repo))
+    monkeypatch.setattr("decomp_agent.tools.m2c_tool.shutil.which", lambda name: None)
+
+    result = run_m2c("simple_add", "melee/test/testfile.c", config)
+    assert not result.success
+    assert result.error == "m2c not found on PATH"
 
 
 # --- ghidra.py tests ---

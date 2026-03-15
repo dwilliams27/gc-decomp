@@ -11,6 +11,7 @@ from decomp_agent.orchestrator.worker_launcher import (
     prepare_worker_repo_in_container,
     render_worker_container_config,
     render_worker_mcp_config,
+    validate_worker_tools_in_container,
     wait_for_worker_container,
 )
 from tests.fixtures.fake_repo import create_fake_repo
@@ -314,3 +315,58 @@ def test_prepare_worker_repo_in_container_regenerates_build_files(tmp_path, monk
     joined = " ".join(calls[0])
     assert "rm -f build.ninja objdiff.json .ninja_log .ninja_deps" in joined
     assert "python configure.py" in joined
+
+
+def test_validate_worker_tools_in_container_accepts_expected_m2c(tmp_path, monkeypatch):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+
+    spec = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+
+    try:
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+        )
+        validate_worker_tools_in_container(spec)
+    finally:
+        cleanup_worker_spec(spec)
+
+
+def test_validate_worker_tools_in_container_rejects_missing_m2c_main(tmp_path, monkeypatch):
+    repo_path, config = create_fake_repo(tmp_path)
+    _init_git_repo(repo_path)
+    config.claude_code.worker_root = tmp_path / "claude-workers"
+
+    spec = create_worker_spec(
+        config,
+        provider="claude",
+        source_file="melee/test/testfile.c",
+        function_name="simple_add",
+    )
+
+    try:
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(
+                args[0],
+                1,
+                "",
+                "missing m2c.main",
+            ),
+        )
+        try:
+            validate_worker_tools_in_container(spec)
+            raise AssertionError("expected RuntimeError")
+        except RuntimeError as exc:
+            assert "missing m2c.main" in str(exc)
+    finally:
+        cleanup_worker_spec(spec)

@@ -232,6 +232,29 @@ def prepare_worker_repo_in_container(spec: WorkerSpec) -> None:
         )
 
 
+def validate_worker_tools_in_container(spec: WorkerSpec) -> None:
+    """Fail fast if critical worker tools are missing or the wrong package is installed."""
+    validation_cmd = (
+        "python3 -c "
+        "\"import importlib.util, shutil, sys; "
+        "m2c_main = importlib.util.find_spec('m2c.main'); "
+        "m2c_cli = shutil.which('m2c'); "
+        "sys.exit(0 if (m2c_main is not None and m2c_cli) else 1)\""
+    )
+    proc = subprocess.run(
+        ["docker", "exec", spec.container_name, "sh", "-lc", validation_cmd],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or (
+            "missing m2c.main module or m2c executable"
+        )
+        raise RuntimeError(
+            f"Worker tool validation failed in {spec.container_name}: {detail}"
+        )
+
+
 def _reset_worker_root(
     repo_root: Path,
     root_dir: Path,

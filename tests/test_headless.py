@@ -71,6 +71,7 @@ def test_isolated_claude_match_becomes_patch_ready(tmp_path):
         patch("decomp_agent.orchestrator.headless.build_worker_container_run_args", return_value=["docker", "run"]),
         patch("decomp_agent.orchestrator.headless.wait_for_worker_container"),
         patch("decomp_agent.orchestrator.headless.prepare_worker_repo_in_container") as prepare_repo,
+        patch("decomp_agent.orchestrator.headless.validate_worker_tools_in_container"),
         patch("decomp_agent.orchestrator.headless.export_worker_patch", return_value=tmp_path / "worker.patch"),
         patch("decomp_agent.orchestrator.headless.write_worker_result"),
         patch(
@@ -247,6 +248,7 @@ def test_isolated_claude_recovers_best_match_from_transcript(tmp_path):
         patch("decomp_agent.orchestrator.headless.build_worker_container_run_args", return_value=["docker", "run"]),
         patch("decomp_agent.orchestrator.headless.wait_for_worker_container"),
         patch("decomp_agent.orchestrator.headless.prepare_worker_repo_in_container"),
+        patch("decomp_agent.orchestrator.headless.validate_worker_tools_in_container"),
         patch("decomp_agent.orchestrator.headless.export_worker_patch", return_value=tmp_path / "worker.patch"),
         patch("decomp_agent.orchestrator.headless.write_worker_result"),
         patch(
