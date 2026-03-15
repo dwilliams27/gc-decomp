@@ -57,16 +57,52 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.closePath();
   ctx.fill();
 
-  // ── Distant road (in the valley, below the near ridge) ─────────────────
-  const roadY = horizonY + 75;
-  ctx.strokeStyle = "#090e18";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(0, roadY + 3);
-  ctx.quadraticCurveTo(w * 0.15, roadY - 1, w * 0.30, roadY + 2);
-  ctx.quadraticCurveTo(w * 0.50, roadY + 5, w * 0.70, roadY + 1);
-  ctx.quadraticCurveTo(w * 0.85, roadY - 2, w, roadY + 2);
-  ctx.stroke();
+  // ── Scattered trees on the far ridge ────────────────────────────────
+  // Far ridge contour sampler
+  const farRidgeY = (fx: number): number => {
+    const quad = (t: number, p0: number, p1: number, p2: number) =>
+      p0 + (p1 - p0) * 2 * t * (1 - t) + (p2 - p0) * t * t;
+    if (fx < 0.15) {
+      const t = fx / 0.15;
+      return quad(t, horizonY + 10, horizonY - 25, horizonY + 5);
+    }
+    if (fx < 0.30) {
+      const t = (fx - 0.15) / 0.15;
+      return quad(t, horizonY + 5, horizonY - 40, horizonY - 10);
+    }
+    if (fx < 0.44) {
+      const t = (fx - 0.30) / 0.14;
+      return quad(t, horizonY - 10, horizonY - 60, horizonY - 35);
+    }
+    if (fx < 0.55) {
+      const t = (fx - 0.44) / 0.11;
+      return quad(t, horizonY - 35, horizonY - 15, horizonY + 5);
+    }
+    if (fx < 0.72) {
+      const t = (fx - 0.55) / 0.17;
+      return quad(t, horizonY + 5, horizonY - 30, horizonY - 5);
+    }
+    if (fx < 0.88) {
+      const t = (fx - 0.72) / 0.16;
+      return quad(t, horizonY - 5, horizonY - 45, horizonY - 15);
+    }
+    const t = (fx - 0.88) / 0.12;
+    return quad(t, horizonY - 15, horizonY + 5, horizonY + 10);
+  };
+  const farTrees = getFarRidgeTreeCache();
+  for (let i = 0; i < farTrees.length; i++) {
+    const t = farTrees[i];
+    const tx = t.fx * w;
+    const baseY = farRidgeY(t.fx) + 4;
+    ctx.fillStyle = t.shade;
+    // Simple small triangles — distant, so less detail
+    ctx.beginPath();
+    ctx.moveTo(tx, baseY - t.height);
+    ctx.lineTo(tx - t.width, baseY);
+    ctx.lineTo(tx + t.width, baseY);
+    ctx.closePath();
+    ctx.fill();
+  }
 
   // ── Near ridge ──────────────────────────────────────────────────────────
   const domeX = w * 0.40;
@@ -106,7 +142,32 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.closePath();
   ctx.fill();
 
-  // ── Small forest on the right side of the near ridge ─────────────────
+  // ── Scattered trees on the near ridge ────────────────────────────────
+  // Sparse coverage everywhere except observatory (0.34-0.46) and dense forest (0.68-0.86)
+  const nearScatteredTrees = getNearScatteredTreeCache();
+  for (let i = 0; i < nearScatteredTrees.length; i++) {
+    const t = nearScatteredTrees[i];
+    const tx = t.fx * w;
+    const baseY = ridgeY(t.fx) + 16;
+    ctx.fillStyle = t.shade;
+    // Small conifers — single triangle + optional second layer
+    ctx.beginPath();
+    ctx.moveTo(tx, baseY - t.height);
+    ctx.lineTo(tx - t.width, baseY);
+    ctx.lineTo(tx + t.width, baseY);
+    ctx.closePath();
+    ctx.fill();
+    if (t.height > 6) {
+      ctx.beginPath();
+      ctx.moveTo(tx, baseY - t.height * 1.15);
+      ctx.lineTo(tx - t.width * 0.65, baseY - t.height * 0.4);
+      ctx.lineTo(tx + t.width * 0.65, baseY - t.height * 0.4);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // ── Dense forest on the right side of the near ridge ──────────────────
   // Conifers sitting on the ridge contour, partially obscuring far ridge
   const forestTrees = getForestTreeCache();
   for (let i = 0; i < forestTrees.length; i++) {
@@ -145,6 +206,33 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.fillStyle = valleyGrad;
   ctx.fillRect(0, valleyTop, w, h - valleyTop);
 
+  // ── Distant road (winding through the valley) ────────────────────────
+  const roadY = horizonY + 75;
+  ctx.save();
+  ctx.strokeStyle = "#0e1520";
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(-10, roadY + 8);
+  ctx.quadraticCurveTo(w * 0.08, roadY - 4, w * 0.18, roadY + 6);
+  ctx.quadraticCurveTo(w * 0.28, roadY + 16, w * 0.38, roadY + 2);
+  ctx.quadraticCurveTo(w * 0.48, roadY - 12, w * 0.58, roadY + 4);
+  ctx.quadraticCurveTo(w * 0.68, roadY + 18, w * 0.78, roadY - 2);
+  ctx.quadraticCurveTo(w * 0.90, roadY - 14, w + 10, roadY + 4);
+  ctx.stroke();
+  // Faint center line
+  ctx.strokeStyle = "rgba(60,75,100,0.12)";
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(-10, roadY + 8);
+  ctx.quadraticCurveTo(w * 0.08, roadY - 4, w * 0.18, roadY + 6);
+  ctx.quadraticCurveTo(w * 0.28, roadY + 16, w * 0.38, roadY + 2);
+  ctx.quadraticCurveTo(w * 0.48, roadY - 12, w * 0.58, roadY + 4);
+  ctx.quadraticCurveTo(w * 0.68, roadY + 18, w * 0.78, roadY - 2);
+  ctx.quadraticCurveTo(w * 0.90, roadY - 14, w + 10, roadY + 4);
+  ctx.stroke();
+  ctx.restore();
+
   // ── River winding through valley ──────────────────────────────────────
   const riverY = valleyTop + (h - valleyTop) * 0.35;
   ctx.save();
@@ -180,6 +268,39 @@ function drawLandscape(ctx: CanvasRenderingContext2D, w: number, h: number) {
     ctx.fill();
   }
   ctx.restore();
+
+  // ── Valley floor trees (scattered, bigger toward bottom for depth) ───
+  const valleyTrees = getValleyTreeCache();
+  for (let i = 0; i < valleyTrees.length; i++) {
+    const t = valleyTrees[i];
+    const tx = t.fx * w;
+    const ty = valleyTop + t.fy * (h - valleyTop);
+    // Depth scale: trees further down (closer) are bigger
+    const depth = t.fy; // 0=top of valley, 1=bottom
+    const scale = 0.6 + depth * 1.0;
+    const tHeight = t.height * scale;
+    const tWidth = t.width * scale;
+
+    // Trunk
+    ctx.fillStyle = "#050910";
+    ctx.fillRect(tx - 0.4 * scale, ty - t.trunk * scale, 0.8 * scale, t.trunk * scale);
+
+    // Conifer layers
+    ctx.fillStyle = t.shade;
+    const layers = t.layers;
+    for (let l = 0; l < layers; l++) {
+      const lf = l / layers;
+      const layerTop = ty - t.trunk * scale - tHeight * (lf + 1 / layers);
+      const layerBot = ty - t.trunk * scale - tHeight * lf * 0.5;
+      const layerW = tWidth * (1 - lf * 0.3);
+      ctx.beginPath();
+      ctx.moveTo(tx, layerTop);
+      ctx.lineTo(tx - layerW, layerBot);
+      ctx.lineTo(tx + layerW, layerBot);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
 
   // ── Observatory annex building (attached to the right of the dome) ───
   const annexL = domeX + 10;
@@ -633,6 +754,124 @@ function getForestTreeCache(): ForestTree[] {
   return forestTreeCache;
 }
 
+interface SimpleTree {
+  fx: number;
+  height: number;
+  width: number;
+  shade: string;
+}
+
+let farRidgeTreeCache: SimpleTree[] | null = null;
+
+function getFarRidgeTreeCache(): SimpleTree[] {
+  if (!farRidgeTreeCache) {
+    farRidgeTreeCache = [];
+    // Sparse, varied scattering across the far ridge — fainter colors (more distant)
+    const shades = ["#0b1018", "#0c111a", "#0a0f17", "#0d1219"];
+    let fx = 0.03;
+    let i = 0;
+    while (fx < 0.97) {
+      // Varied density: some clumps, some gaps
+      const density = 0.4 + 0.6 * Math.abs(Math.sin(fx * 12 + 3.7));
+      const gap = 0.008 + seededF(i * 3 + 900) * 0.02 / density;
+      fx += gap;
+      if (fx >= 0.97) break;
+      // Skip some trees randomly for natural sparse feel
+      if (seededF(i * 3 + 903) < 0.3) { i++; continue; }
+      const height = 3 + seededF(i * 3 + 901) * 6; // small, distant
+      const width = 1.2 + seededF(i * 3 + 902) * 1.5;
+      const shade = shades[Math.floor(seededF(i * 3 + 904) * shades.length)];
+      farRidgeTreeCache.push({ fx, height, width, shade });
+      i++;
+    }
+  }
+  return farRidgeTreeCache;
+}
+
+let nearScatteredTreeCache: SimpleTree[] | null = null;
+
+function getNearScatteredTreeCache(): SimpleTree[] {
+  if (!nearScatteredTreeCache) {
+    nearScatteredTreeCache = [];
+    // Scattered across near ridge, avoiding observatory (0.34-0.46) and dense forest (0.68-0.86)
+    const shades = ["#060a12", "#070b14", "#080c15", "#050910"];
+    const zones = [
+      { start: 0.04, end: 0.32 },
+      { start: 0.48, end: 0.66 },
+      { start: 0.88, end: 0.97 },
+    ];
+    let globalIdx = 0;
+    for (const zone of zones) {
+      let fx = zone.start;
+      while (fx < zone.end) {
+        const density = 0.3 + 0.7 * Math.abs(Math.sin(fx * 15 + 1.2));
+        const gap = 0.006 + seededF(globalIdx * 3 + 1100) * 0.018 / density;
+        fx += gap;
+        if (fx >= zone.end) break;
+        // Random skip for sparse natural feel
+        if (seededF(globalIdx * 3 + 1103) < 0.25) { globalIdx++; continue; }
+        const height = 4 + seededF(globalIdx * 3 + 1101) * 10;
+        const width = 1.8 + seededF(globalIdx * 3 + 1102) * 2.2;
+        const shade = shades[Math.floor(seededF(globalIdx * 3 + 1104) * shades.length)];
+        nearScatteredTreeCache.push({ fx, height, width, shade });
+        globalIdx++;
+      }
+    }
+  }
+  return nearScatteredTreeCache;
+}
+
+interface ValleyTree {
+  fx: number;
+  fy: number; // 0=top of valley, 1=bottom
+  height: number;
+  width: number;
+  trunk: number;
+  layers: number;
+  shade: string;
+}
+
+let valleyTreeCache: ValleyTree[] | null = null;
+
+function getValleyTreeCache(): ValleyTree[] {
+  if (!valleyTreeCache) {
+    valleyTreeCache = [];
+    // Scatter trees across the valley floor, avoiding a band around the river
+    // fy 0.0-0.25 = above river, 0.30-0.40 = river zone (skip), 0.45-0.85 = below river
+    const bands = [
+      { fyStart: 0.05, fyEnd: 0.25 },
+      { fyStart: 0.45, fyEnd: 0.85 },
+    ];
+    const shades = ["#040810", "#050910", "#060a11", "#040710"];
+    let globalIdx = 0;
+    for (const band of bands) {
+      // Multiple depth rows per band
+      const rowCount = 4;
+      for (let row = 0; row < rowCount; row++) {
+        const fy = band.fyStart + (band.fyEnd - band.fyStart) * (row + seededF(globalIdx + 1300) * 0.5) / rowCount;
+        let fx = 0.02;
+        while (fx < 0.98) {
+          const gap = 0.01 + seededF(globalIdx * 3 + 1200) * 0.035;
+          fx += gap;
+          if (fx >= 0.98) break;
+          // Random skip for sparse natural feel
+          if (seededF(globalIdx * 3 + 1205) < 0.35) { globalIdx++; continue; }
+          const height = 4 + seededF(globalIdx * 3 + 1201) * 8;
+          const width = 1.5 + seededF(globalIdx * 3 + 1202) * 2;
+          const trunk = 1.5 + seededF(globalIdx * 3 + 1203) * 2;
+          const layers = 2 + Math.floor(seededF(globalIdx * 3 + 1204) * 2);
+          const shade = shades[Math.floor(seededF(globalIdx * 3 + 1206) * shades.length)];
+          valleyTreeCache.push({ fx, fy, height, width, trunk, layers, shade });
+          globalIdx++;
+        }
+      }
+    }
+    // Sort by fy so back trees draw first
+    valleyTreeCache.sort((a, b) => a.fy - b.fy);
+  }
+  return valleyTreeCache;
+}
+
 let bgStarsCache: { x: number; y: number; r: number; phase: number }[] | null = null;
 
 function initBgStars() {
@@ -690,18 +929,28 @@ function drawCars(
   const horizonY = h * 0.65;
   const roadY = horizonY + 75;
 
-  // Road curve sampler (matches the static road drawn in landscape)
+  // Road curve sampler (matches the windier static road drawn in landscape)
   const roadAtX = (fx: number): number => {
-    if (fx < 0.30) {
-      const t = fx / 0.30;
-      return roadY + 3 + (roadY - 1 - (roadY + 3)) * 2 * t * (1 - t) + ((roadY + 2) - (roadY + 3)) * t * t;
+    const quad = (t: number, p0: number, p1: number, p2: number) =>
+      p0 + (p1 - p0) * 2 * t * (1 - t) + (p2 - p0) * t * t;
+    if (fx < 0.18) {
+      const t = fx / 0.18;
+      return quad(t, roadY + 8, roadY - 4, roadY + 6);
     }
-    if (fx < 0.70) {
-      const t = (fx - 0.30) / 0.40;
-      return roadY + 2 + (roadY + 6 - (roadY + 2)) * 2 * t * (1 - t) + ((roadY + 1) - (roadY + 2)) * t * t;
+    if (fx < 0.38) {
+      const t = (fx - 0.18) / 0.20;
+      return quad(t, roadY + 6, roadY + 16, roadY + 2);
     }
-    const t = (fx - 0.70) / 0.30;
-    return roadY + 1 + (roadY - 3 - (roadY + 1)) * 2 * t * (1 - t) + ((roadY + 2) - (roadY + 1)) * t * t;
+    if (fx < 0.58) {
+      const t = (fx - 0.38) / 0.20;
+      return quad(t, roadY + 2, roadY - 12, roadY + 4);
+    }
+    if (fx < 0.78) {
+      const t = (fx - 0.58) / 0.20;
+      return quad(t, roadY + 4, roadY + 18, roadY - 2);
+    }
+    const t = (fx - 0.78) / 0.22;
+    return quad(t, roadY - 2, roadY - 14, roadY + 4);
   };
 
   ctx.save();
